@@ -65,6 +65,12 @@ const CURSOR_STEP = 0.001;
 const ACTIVE_X: [number, number] = [0.15, 0.85];
 const ACTIVE_Y: [number, number] = [0.1, 0.9];
 /**
+ * 커서 감도 (1 = 손 위치를 화면에 그대로 대응, 0.5 = 손을 2배 움직여야 같은 거리).
+ * 1 미만이면 마우스처럼 상대 이동: 손 이동량 × 감도만큼 커서가 움직이고 화면 끝에서 멈춤 (끝에서 손을 더 밀면 위치가 다시 맞춰짐).
+ * 손이 HANDS_LOST_RESET_MS 이상 사라졌다 나타나면 손 위치로 다시 맞춤
+ */
+const CURSOR_SENSITIVITY = 0.5;
+/**
  * 커서 One Euro 필터 (정규화 화면 좌표 기준).
  * 멈춰 있으면 컷오프 ≈ MIN_CUTOFF → 떨림 강하게 제거, 빠르게 움직이면 컷오프↑ → 지연 적음
  */
@@ -198,7 +204,6 @@ const GRAB_MIN_GAP = 0.3;
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-const invLerp = (lo: number, hi: number, v: number) => clamp((v - lo) / (hi - lo), 0, 1);
 type Vec2 = [number, number];
 const quantize = (v: number) => Math.round(v / CURSOR_STEP) * CURSOR_STEP;
 
@@ -881,6 +886,9 @@ export default function HandTracker(props: Props) {
   // ── 그리기 상태 (렌더와 무관하므로 ref) ──
   const draw = useRef({
     smoothCursor: null as OneEuro2 | null, // 정규화 화면좌표 (One Euro)
+    /** 상대 이동 커서 (화면 0~1) / 직전 프레임 손 위치 (활성 영역 기준) */
+    relCursor: null as Vec2 | null,
+    prevHandScreen: null as Vec2 | null,
     pinching: false,
     lastPinchAt: 0,
     pinchSince: 0,
@@ -1064,6 +1072,8 @@ export default function HandTracker(props: Props) {
 
       if (hands.length > 0) d.lastHandsAt = now;
       else if (d.chainLen > 0 && now - d.lastHandsAt > HANDS_LOST_RESET_MS) breakChain();
+      // 손이 오래 안 보였으면 상대 커서를 손 위치로 다시 맞춤
+      if (!hands.length && now - d.lastHandsAt > HANDS_LOST_RESET_MS) d.relCursor = null;
 
       // ── 자세 분류 (200ms 유지돼야 stable 갱신) ──
       const drawWorld = drawIdx >= 0 ? res.worldLandmarks[drawIdx] : undefined;
@@ -1170,6 +1180,7 @@ export default function HandTracker(props: Props) {
             z.total = 1;
             d.pinching = false;
             d.smoothCursor = null;
+            d.prevHandScreen = null;
             lastHint = '줌 모드: 벌리면 확대 / 모으면 축소';
           }
         } else {
@@ -1201,6 +1212,7 @@ export default function HandTracker(props: Props) {
       if (zooming) {
         // 줌 중엔 그리기 정지: 커서 숨김 + 핀치/주먹 판정 안 함
         d.smoothCursor = null;
+        d.prevHandScreen = null;
         d.pinching = false;
         d.fistSince = 0;
       } else if (drawHand) {
@@ -1211,10 +1223,26 @@ export default function HandTracker(props: Props) {
         d.smoothCursor = oneEuroStep(d.smoothCursor, [rawX, rawY], now);
 
         // 카메라 활성 영역 → 3D 씬 화면 전체 (마우스 포인터처럼 깊이 없음. 카메라 시점과 무관)
-        const snapped: Vec2 = [
-          quantize(invLerp(ACTIVE_X[0], ACTIVE_X[1], d.smoothCursor.x[0])),
-          quantize(invLerp(ACTIVE_Y[0], ACTIVE_Y[1], d.smoothCursor.x[1])),
+        // 활성 영역 밖도 그대로 (상대 이동 계산용, 절대 위치는 clamp)
+        const handScreen: Vec2 = [
+          (d.smoothCursor.x[0] - ACTIVE_X[0]) / (ACTIVE_X[1] - ACTIVE_X[0]),
+          (d.smoothCursor.x[1] - ACTIVE_Y[0]) / (ACTIVE_Y[1] - ACTIVE_Y[0]),
         ];
+        let screenPos: Vec2 = [clamp(handScreen[0], 0, 1), clamp(handScreen[1], 0, 1)];
+        if (CURSOR_SENSITIVITY < 1) {
+          // 손 사라졌다 다시 나타남(오래) → 손 위치로 다시 맞춤
+          if (!d.relCursor) d.relCursor = screenPos;
+          // 커서가 숨는 자세(카메라 이동·움켜쥐기) 동안엔 멈춰 둠 → 다시 나타날 때 그 자리
+          else if (d.prevHandScreen && !NO_CURSOR_POSES.has(rightPose)) {
+            d.relCursor = [
+              clamp(d.relCursor[0] + (handScreen[0] - d.prevHandScreen[0]) * CURSOR_SENSITIVITY, 0, 1),
+              clamp(d.relCursor[1] + (handScreen[1] - d.prevHandScreen[1]) * CURSOR_SENSITIVITY, 0, 1),
+            ];
+          }
+          d.prevHandScreen = handScreen;
+          screenPos = d.relCursor;
+        }
+        const snapped: Vec2 = [quantize(screenPos[0]), quantize(screenPos[1])];
         // 카메라 이동·움켜쥐기 중엔 커서 숨김 (EMA는 계속 → 모드 복귀 시 커서 안 튐)
         if (rightPose === 'select') {
           // 원시 자세가 아직 ✌️일 때만 조준점 갱신. 주먹으로 접는 중(200ms 확인 대기)엔 마지막 조준점 유지
@@ -1282,6 +1310,7 @@ export default function HandTracker(props: Props) {
         }
       } else {
         d.smoothCursor = null;
+        d.prevHandScreen = null;
         d.pinching = false;
         d.fistSince = 0;
       }

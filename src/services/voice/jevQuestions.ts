@@ -34,6 +34,18 @@ export const INTENTS = [
 ] as const;
 export type Intent = (typeof INTENTS)[number];
 
+/** 손 편집 모드 (음성 "면 크기 도구로" 등 모드만 바꿀 때). sketchOps EditMode의 부분집합 */
+export type VoiceEditMode = 'pushpull' | 'offset' | 'taper' | 'move' | 'copy' | 'scale';
+export const EDIT_MODE_OPTION: Record<string, VoiceEditMode | null> = {
+  push_pull: 'pushpull',
+  offset: 'offset',
+  face_size: 'taper',
+  move: 'move',
+  copy: 'copy',
+  whole_size: 'scale',
+  none: null,
+};
+
 /** Choice 옵션 이름 → 코드 값 */
 export const AXIS_OPTION: Record<string, Axis | null> = {
   x_horizontal: 'x',
@@ -134,13 +146,13 @@ export function buildQuestions(
         move_part: 'Move the selected part to another place without changing its size (옮겨, 이동시켜, 올려, 내려, 위로 1미터).',
         copy_part: 'Make a copy of the selected part (복사, 하나 더, 똑같이 하나 더, 복제).',
         delete_part: 'Remove the selected part (지워, 삭제, 없애, 빼).',
-        scale_part: 'Resize the whole selected part evenly by a factor, said with 배 or 절반 (두 배로 키워, 1.5배, 절반으로 줄여, 크기 조절).',
-        taper_face: 'Make only the top or bottom face of a cylinder narrower or wider, like a cone, a funnel or a dish (윗면 줄여, 위를 좁게, 뾰족하게, 원뿔로 만들어, 아래를 벌려, 접시처럼).',
+        scale_part: 'Resize the whole selected part evenly by a factor, said with 배 or 절반, without naming a face (전체 크기, 두 배로 키워, 1.5배, 절반으로 줄여).',
+        taper_face: 'Make only one face (면) of a cylinder narrower or wider, like a cone, a funnel or a dish, including when the user only names the face-size action (면 크기, 면 크기 조절, 면만 줄여, 윗면 줄여, 위를 좁게, 뾰족하게, 원뿔로 만들어, 아래를 벌려, 접시처럼).',
         dig_hole: 'Hollow out or drill into the selected part, like a cup, a pot or a pipe (파줘, 속 비워, 구멍 내, 뚫어, 컵처럼, 파이프로).',
         draw_shape: 'Start drawing a new flat shape on the floor (사각형 그리기, 네모 그려, 원 그리기, 동그라미, 바닥 그리기).',
         offset_face: 'Draw a smaller face inside a face, leaving a border, usually to cut a window, door or recess (오프셋, 안쪽에 테두리, 창문 틀, 안쪽 면 만들어).',
         change_material: 'Change what the structure is made of, also when the user says only a material name such as "스틸로" or "유리로" (재질, 강철, 나무, 유리, 콘크리트).',
-        change_tool: 'Switch the editing tool (펜, 지우개, 이동, 왜곡, 스프레이).',
+        change_tool: 'Switch the editing tool or editing mode without giving any amount (펜, 지우개, 이동, 왜곡, 스프레이, 늘리기 모드, 오프셋 도구, 면 크기 도구, 복사 모드, 크기 도구, ~도구로 바꿔, ~모드).',
         set_load: 'Set the weight the structure must hold (하중, 킬로, kg, 톤, 버텨).',
         other: 'Build, add or redesign parts, or move the camera (집 지어줘, 기둥 추가해, 다리 만들어, 카메라 위에서 보여줘).',
       },
@@ -213,6 +225,19 @@ export function buildQuestions(
       type: 'choice',
       instructions: 'Which editing tool does the user want in `spoken_text`?',
       criteria: TOOL_CRITERIA,
+    },
+    edit_mode: {
+      type: 'choice',
+      instructions: 'Which pinch-drag editing mode does the user name in `spoken_text`?',
+      criteria: {
+        push_pull: 'Push/pull a face to make it longer or shorter: 늘리기, 밀고 당기기, 푸시풀.',
+        offset: 'Draw a smaller face inside a face: 오프셋, 안쪽 테두리.',
+        face_size: 'Resize only one face of a cylinder, top or bottom: 면 크기, 면 스케일, 윗면 크기, 아랫면 크기.',
+        move: 'Move the part: 이동, 옮기기.',
+        copy: 'Copy the part: 복사, 복제.',
+        whole_size: 'Resize the whole part: 전체 크기, 크기 도구, 스케일.',
+        none: 'The user names a drawing tool such as 펜, 지우개, 왜곡, 스프레이, 선택, or no editing mode at all.',
+      },
     },
   };
 

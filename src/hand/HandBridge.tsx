@@ -6,7 +6,7 @@ import HandTracker, { type HandCursorState, type ObjectRotateEvent, type Pointer
 import { cameraGesture, pushCameraZoom } from '../services/cameraGesture';
 import { describeSelection, expandSelection, pruneSelection, type PickHit, type Selection } from '../services/selection';
 import { applySession, startSession, type Axis, type RotateSession } from '../services/handRotate';
-import { NEEDS_SELECTION, describeCommand, interpretVoice, parseConfirmReply, type VoiceCommand } from '../services/voice/voiceCommand';
+import { NEEDS_SELECTION, describeCommand, isModeOnly, interpretVoice, parseConfirmReply, type VoiceCommand } from '../services/voice/voiceCommand';
 import { applyVoiceCommand } from '../services/voice/applyVoice';
 import { voiceEditOp, voiceLatheOp, voiceOffsetOp } from '../services/voice/applyEditVoice';
 import { parseBareDistance } from '../services/voice/koreanNumber';
@@ -332,7 +332,8 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
       setVoiceFb({ label: '되돌릴 손 편집 없음 → AI 설계로 전달', tone: 'info' });
       return onVoiceCommand(text);
     }
-    if (NEEDS_SELECTION.has(cmd.type) && !selected) {
+    if (cmd.type === 'set_mode') return setMode(cmd.mode);
+    if (NEEDS_SELECTION.has(cmd.type) && !selected && !isModeOnly(cmd)) {
       // 선택 없이 "건물 높이 늘려" 등 → 설계 요청으로 보고 AI에 넘김
       setVoiceFb({ label: `${describeCommand(cmd)}: 선택 없음 → AI 설계로 전달`, tone: 'info' });
       return onVoiceCommand(text);

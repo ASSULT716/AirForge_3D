@@ -11,6 +11,7 @@ import {
 } from './koreanNumber';
 import {
   AXIS_OPTION,
+  EDIT_MODE_OPTION,
   DIRECTION_SIGN,
   MOVE_DIRECTION_OPTION,
   IS_COMMAND_NO,
@@ -25,14 +26,17 @@ import {
   type Material,
   type MoveDirection,
   type Tool,
+  type VoiceEditMode,
 } from './jevQuestions';
 
-export type { Axis, Material, MoveDirection, Tool } from './jevQuestions';
+export type { Axis, Material, MoveDirection, Tool, VoiceEditMode } from './jevQuestions';
 
 export type VoiceCommand =
   | { type: 'rotate'; axis: Axis; deg: number }
   | { type: 'set_material'; material: Material }
   | { type: 'set_tool'; tool: Tool }
+  /** 손 편집 모드만 바꿈 ("면 크기 도구로") — 선택 없어도 됨 */
+  | { type: 'set_mode'; mode: VoiceEditMode }
   | { type: 'set_load'; kg: number }
   /** meters null = 거리 안 말함 → 늘리기 모드로 바꾸고 손으로 끌게 안내 */
   | { type: 'push_pull'; dir: MoveDirection | null; meters: number | null; shrink: boolean }
@@ -53,6 +57,33 @@ export type VoiceCommand =
 
 /** 선택된 구조물이 있어야 하는 명령 (없으면 AI 설계로 넘김) */
 export const NEEDS_SELECTION: ReadonlySet<VoiceCommand['type']> = new Set(['push_pull', 'move', 'copy', 'delete', 'offset', 'scale', 'taper', 'dig']);
+
+/** 값 없이 모드만 바꾸는 명령 ("면 크기", "늘려") → 선택 없어도 모드 전환. copy는 값 없어도 바로 복사라 제외 */
+export function isModeOnly(c: VoiceCommand): boolean {
+  switch (c.type) {
+    case 'set_mode':
+      return true;
+    case 'taper':
+      return c.ratio === null;
+    case 'scale':
+      return c.factor === null;
+    case 'offset':
+    case 'push_pull':
+    case 'move':
+      return c.meters === null;
+    default:
+      return false;
+  }
+}
+
+export const EDIT_MODE_KO: Record<VoiceEditMode, string> = {
+  pushpull: '늘리기',
+  offset: '오프셋',
+  taper: '면 크기',
+  move: '이동',
+  copy: '복사',
+  scale: '크기',
+};
 
 export interface Interpretation {
   /**
@@ -106,6 +137,8 @@ export function describeCommand(c: VoiceCommand): string {
       return `재질 → ${MATERIAL_KO[c.material]}`;
     case 'set_tool':
       return `도구 → ${TOOL_KO[c.tool]}`;
+    case 'set_mode':
+      return `${EDIT_MODE_KO[c.mode]} 모드`;
     case 'set_load':
       return `하중 ${c.kg}kg`;
     case 'push_pull': {
@@ -262,6 +295,9 @@ function buildCommand(
       return m && m in MATERIAL_KO ? { type: 'set_material', material: m } : null;
     }
     case 'change_tool': {
+      // 편집 모드("면 크기 도구")가 잡히면 그림 도구보다 우선
+      const mode = EDIT_MODE_OPTION[choice(r, 'edit_mode') ?? 'none'] ?? null;
+      if (mode) return { type: 'set_mode', mode };
       const t = choice(r, 'tool') as Tool | null;
       return t && t in TOOL_KO ? { type: 'set_tool', tool: t } : null;
     }

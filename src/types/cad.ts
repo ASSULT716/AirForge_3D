@@ -12,9 +12,57 @@ export interface CameraControlState {
   commandId?: number;
 }
 
+export interface UnitRoomZone {
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  liveLoadKn: number;
+}
+
+export interface UnitPlacement3D {
+  floor: number;
+  position: [number, number, number];
+  scale: [number, number, number];
+}
+
+export interface UnitDesignType {
+  id: string;
+  code: string;
+  name: string;
+  areaSqm: number;
+  householdCount: number;
+  liveLoadKn: number;
+  color: string;
+  rooms: UnitRoomZone[];
+  placements: UnitPlacement3D[];
+}
+
+export interface BuildingSpec {
+  projectName: string;
+  usageType: '단독주택' | '공동주택' | '업무·상업시설' | '복합문화시설';
+  siteAreaSqm: number;           // 대지면적 (㎡)
+  buildingAreaSqm: number;       // 건축면적 (㎡)
+  totalFloorAreaSqm: number;     // 지상 연면적 (㎡)
+  undergroundAreaSqm: number;    // 지하 연면적 (㎡)
+  undergroundFloors: number;     // 지하 층수
+  heightMeters: number;          // 지상 높이 (m)
+  floors: number;                // 지상 층수
+  households: number;            // 총 가구(세대) 수 (단독주택은 1세대 또는 다가구 세대수)
+  unitTypeCount: number;         // 가구 디자인 유형 개수
+  unitTypes?: UnitDesignType[];
+  floorLoadsKn?: Record<number, number>;
+  elevators: number;             // 엘리베이터 수
+  stairs: number;                // 계단 수
+  rooftops: number;              // 옥상 수
+  gardenAreaSqm: number;         // 정원(조경) 면적 (㎡)
+  designConcept?: string;
+}
+
 export interface SolidPrimitive {
   id: string;
-  groupName?: string; // 예: "다리", "건물", "의자" (부분 삭제·수정 식별용)
+  groupName?: string;
   shape: SolidShape;
   position: [number, number, number];
   scale: [number, number, number];
@@ -22,6 +70,7 @@ export interface SolidPrimitive {
   color?: string;
   material?: CadMaterial;
   isFixed?: boolean;
+  floorIndex?: number;
 }
 
 export interface NodePoint {
@@ -74,4 +123,7 @@ export interface StructureState {
   statusMessage?: string;
   chatHistory?: ChatMessage[];
   activeCandidates?: DesignCandidate[];
+  buildingSpec?: BuildingSpec;
+  selectedUnitTypeId?: string | null;
+  isLoadHeatmapActive?: boolean;
 }

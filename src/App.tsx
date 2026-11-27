@@ -6,13 +6,23 @@ import {
   CadMaterial,
   CameraControlState,
   DesignCandidate,
+  BuildingSpec,
 } from './types/cad';
-import { WEAK_BRIDGE_PRESET, TABLE_3D_PRESET } from './data/presets';
+import { WEAK_BRIDGE_PRESET } from './data/presets';
 import SceneCanvas from './components/SceneCanvas';
-import HandTracker, { type HandCursorState } from './components/HandTracker';
+import HandTracker from './components/HandTracker';
 import HudOverlay from './components/HudOverlay';
-import { reinforceStructure, executeNaturalCommand } from './services/aiReinforce';
-import { pushCameraZoom } from './services/cameraGesture';
+import QuotationModal from './components/QuotationModal';
+import FloorPlanViewer from './components/FloorPlanViewer';
+import FloorLoadPanel from './components/FloorLoadPanel';
+import BuildingSpecBuilder from './components/BuildingSpecBuilder';
+import {
+  reinforceStructure,
+  executeNaturalCommand,
+  regenerateDesignVariation,
+  buildFromSpecUI,
+} from './services/aiReinforce';
+import { downloadStructureAsSTL } from './utils/exportStl';
 
 const snap = (v: number) => Math.round(v * 4) / 4;
 
@@ -23,20 +33,18 @@ export default function App() {
       {
         id: 'welcome',
         role: 'assistant',
-        text: '안녕하세요! AirForge 3D 코파일럿입니다. 만들고 싶은 구조물이나 수정할 부분을 말씀해 주세요.',
+        text: '건축 제원 설정 패널에서 면적·높이·가구 수·가구 디자인 유형 수·엘리베이터·계단·옥상·정원 면적을 한 번에 조정해 3D 건축물을 생성하세요.',
         timestamp: Date.now(),
       },
     ],
   });
   const [isReinforcing, setIsReinforcing] = useState(false);
   const [testVoiceInput, setTestVoiceInput] = useState('');
+  const [isSpecBuilderOpen, setIsSpecBuilderOpen] = useState(true);
   const [isChatExpanded, setIsChatExpanded] = useState(true);
+  const [quotationSnapshot, setQuotationSnapshot] = useState<string | null>(null);
+  const [isQuotationOpen, setIsQuotationOpen] = useState(false);
   const lastDrawnNodeIdRef = useRef<string | null>(null);
-  const [handCursor, setHandCursor] = useState<HandCursorState | null>(null);
-  const linkFrom =
-    handCursor?.chainActive && structure.activeTool === 'draw'
-      ? structure.nodes.find((n) => n.id === lastDrawnNodeIdRef.current)?.position ?? null
-      : null;
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -44,6 +52,48 @@ export default function App() {
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [structure.chatHistory?.length, structure.activeCandidates?.length, isChatExpanded]);
+
+  const selectedUnitType =
+    structure.buildingSpec?.unitTypes?.find((u) => u.id === structure.selectedUnitTypeId) ?? null;
+
+  const handleSubmitBuildingSpec = async (spec: BuildingSpec) => {
+    if (isReinforcing) return;
+    setIsReinforcing(true);
+    setStructure((p) => ({
+      ...p,
+      statusMessage: `'${spec.projectName}' 건축법·KDS 하중 반영 3D 설계 생성 중...`,
+    }));
+    try {
+      const nextState = await buildFromSpecUI(spec, structure);
+      setStructure(nextState);
+      setIsSpecBuilderOpen(false);
+    } finally {
+      setIsReinforcing(false);
+    }
+  };
+
+  const handleOpenQuotation = () => {
+    const canvasEl = document.querySelector('canvas');
+    const dataUrl = canvasEl ? canvasEl.toDataURL('image/png') : null;
+    setQuotationSnapshot(dataUrl);
+    setIsQuotationOpen(true);
+  };
+
+  const handleRedesignSameSpec = async () => {
+    if (isReinforcing) return;
+    setIsChatExpanded(true);
+    setIsReinforcing(true);
+    setStructure((p) => ({
+      ...p,
+      statusMessage: '동일 제원 기반 새로운 건축 디자인 생성 중...',
+    }));
+    try {
+      const nextState = await regenerateDesignVariation(structure);
+      setStructure(nextState);
+    } finally {
+      setIsReinforcing(false);
+    }
+  };
 
   const handlePinchAction = (
     tool: CadTool,
@@ -56,12 +106,6 @@ export default function App() {
       snap(rawPos[2]),
     ];
 
-    // StrictMode는 업데이터를 두 번 실행함 → ID·연결 시작점은 업데이터 밖에서 미리 고정
-    const fromId = isNewStroke ? null : lastDrawnNodeIdRef.current;
-    const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const newNodeId = `node_${uid()}`;
-    const beamId = `beam_${uid()}`;
-
     setStructure((prev) => {
       if (tool === 'draw') {
         const existing = prev.nodes.find(
@@ -70,7 +114,7 @@ export default function App() {
             0.15
         );
         const targetNode: NodePoint = existing ?? {
-          id: newNodeId,
+          id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
           groupName: '스케치',
           position: pos,
           isFixed: pos[1] <= 0.05,
@@ -80,29 +124,25 @@ export default function App() {
         const nextNodes = existing ? prev.nodes : [...prev.nodes, targetNode];
         const nextBeams = [...prev.beams];
 
-        const duplicate = prev.beams.some(
-          (b) =>
-            (b.startNodeId === fromId && b.endNodeId === targetNode.id) ||
-            (b.startNodeId === targetNode.id && b.endNodeId === fromId)
-        );
         if (
-          fromId &&
-          fromId !== targetNode.id &&
-          !duplicate &&
-          nextNodes.some((n) => n.id === fromId)
+          !isNewStroke &&
+          lastDrawnNodeIdRef.current &&
+          lastDrawnNodeIdRef.current !== targetNode.id
         ) {
-          nextBeams.push({
-            id: beamId,
-            groupName: '스케치',
-            startNodeId: fromId,
-            endNodeId: targetNode.id,
-            stress: 0.2,
-            color: prev.activeColor,
-            material: prev.activeMaterial,
-            role: 'primary',
-          });
+          const prevNode = nextNodes.find((n) => n.id === lastDrawnNodeIdRef.current);
+          if (prevNode) {
+            nextBeams.push({
+              id: `beam_${Date.now()}`,
+              groupName: '스케치',
+              startNodeId: prevNode.id,
+              endNodeId: targetNode.id,
+              stress: 0.2,
+              color: prev.activeColor,
+              material: prev.activeMaterial,
+              role: 'primary',
+            });
+          }
         }
-        // 두 번 실행돼도 같은 값 → 안전
         lastDrawnNodeIdRef.current = targetNode.id;
         return { ...prev, nodes: nextNodes, beams: nextBeams };
       }
@@ -211,7 +251,7 @@ export default function App() {
 
     setIsChatExpanded(true);
     setIsReinforcing(true);
-    setStructure((p) => ({ ...p, statusMessage: `AI 생각 중: "${text}"...` }));
+    setStructure((p) => ({ ...p, statusMessage: `AI 설계 분석 중: "${text}"...` }));
     try {
       const nextState = await executeNaturalCommand(text, structure);
       setStructure(nextState);
@@ -234,7 +274,7 @@ export default function App() {
         {
           id: `msg_sel_${Date.now()}`,
           role: 'assistant',
-          text: `좋습니다! '${cand.title}' 구성을 3D 작업실에 반영했습니다. 추가로 수정하거나 재질을 바꿀 부분이 있을까요?`,
+          text: `'${cand.title}' 구성을 3D 작업실에 반영했습니다.`,
           timestamp: Date.now(),
         },
       ],
@@ -256,15 +296,12 @@ export default function App() {
       <SceneCanvas
         structure={structure}
         onUpdateStress={(beams) => setStructure((prev) => ({ ...prev, beams }))}
-        handCursor={handCursor && { position: handCursor.position, pinching: handCursor.pinching, linkFrom }}
       />
 
       <HandTracker
         activeTool={structure.activeTool}
         onPinchAction={handlePinchAction}
         onVoiceCommand={handleVoiceCommand}
-        onCursor={setHandCursor}
-        onCameraZoom={pushCameraZoom}
       />
 
       <HudOverlay
@@ -278,7 +315,9 @@ export default function App() {
           setStructure((p) => ({
             ...p,
             activeMaterial,
-            solids: (p.solids ?? []).map((s) => ({ ...s, material: activeMaterial })),
+            solids: (p.solids ?? []).map((s) =>
+              s.color === '#10b981' ? s : { ...s, material: activeMaterial }
+            ),
             beams: p.beams.map((b) => ({ ...b, material: activeMaterial })),
           }))
         }
@@ -286,7 +325,9 @@ export default function App() {
           setStructure((p) => ({
             ...p,
             activeColor,
-            solids: (p.solids ?? []).map((s) => ({ ...s, color: activeColor })),
+            solids: (p.solids ?? []).map((s) =>
+              s.color === '#10b981' ? s : { ...s, color: activeColor }
+            ),
             beams: p.beams.map((b) => ({ ...b, color: activeColor })),
           }))
         }
@@ -294,50 +335,203 @@ export default function App() {
           setStructure((p) => ({ ...p, cameraControl }))
         }
         onLoadPreset={(preset) => setStructure((p) => ({ ...preset, chatHistory: p.chatHistory }))}
-        onReset={() =>
+        onReset={() => {
           setStructure((p) => ({
             ...p,
             solids: [],
             nodes: [],
             beams: [],
+            buildingSpec: undefined,
+            selectedUnitTypeId: null,
+            isLoadHeatmapActive: false,
             isSimulating: false,
             activeCandidates: undefined,
             cameraControl: { mode: 'free' },
             statusMessage: '캔버스 초기화 완료',
-          }))
-        }
+          }));
+          setIsSpecBuilderOpen(true);
+        }}
       />
 
-      {/* 확장형 대화형 AI 코파일럿 & 다중 예상 시안(Candidate) 패널 */}
-      <div className="fixed bottom-4 left-4 z-50 w-[94vw] sm:w-[580px] max-h-[82vh] flex flex-col gap-2.5 bg-slate-950/90 backdrop-blur-md border border-cyan-500/50 p-4 rounded-xl font-sans text-sm text-cyan-100 shadow-2xl">
-        {/* 상단 헤더 + 접기/펼치기 버튼 */}
-        <div className="flex items-center justify-between border-b border-cyan-500/30 pb-2">
+      {/* 중앙: 좌측 하단에서 선택한 방 유형의 2D 건축 평면도 */}
+      {selectedUnitType && (
+        <FloorPlanViewer
+          unitType={selectedUnitType}
+          onClose={() => setStructure((p) => ({ ...p, selectedUnitTypeId: null }))}
+        />
+      )}
+
+      {/* 우측: 한국 건축구조기준(KDS 41 12 00) 층별 하중 스크롤바 & 반투명 화이트→레드 히트맵 패널 */}
+      {structure.buildingSpec && (
+        <FloorLoadPanel
+          spec={structure.buildingSpec}
+          isHeatmapActive={Boolean(structure.isLoadHeatmapActive)}
+          onToggleHeatmap={(active) =>
+            setStructure((p) => ({
+              ...p,
+              isLoadHeatmapActive: active,
+              selectedUnitTypeId: active ? null : p.selectedUnitTypeId,
+            }))
+          }
+          onChangeAllFloorsLoad={(loadKn) =>
+            setStructure((p) => {
+              if (!p.buildingSpec) return p;
+              const nextMap: Record<number, number> = {};
+              for (let f = 1; f <= p.buildingSpec.floors; f++) {
+                nextMap[f] = loadKn;
+              }
+              return {
+                ...p,
+                buildingSpec: { ...p.buildingSpec, floorLoadsKn: nextMap },
+              };
+            })
+          }
+          onChangeFloorLoad={(floor, loadKn) =>
+            setStructure((p) => {
+              if (!p.buildingSpec) return p;
+              return {
+                ...p,
+                buildingSpec: {
+                  ...p.buildingSpec,
+                  floorLoadsKn: {
+                    ...(p.buildingSpec.floorLoadsKn ?? {}),
+                    [floor]: loadKn,
+                  },
+                },
+              };
+            })
+          }
+        />
+      )}
+
+      {/* 우측 하단: 동일 기준 다른 디자인 뽑기 & 견적서·STL 출력 바 */}
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col sm:flex-row gap-2 bg-slate-950/90 backdrop-blur-md border border-cyan-500/50 p-3 rounded-xl shadow-2xl">
+        <button
+          onClick={handleRedesignSameSpec}
+          disabled={isReinforcing}
+          className="px-3.5 py-2 bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50 transition"
+        >
+          같은 기준으로 다른 디자인 뽑기
+        </button>
+        <button
+          onClick={handleOpenQuotation}
+          className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs rounded-lg cursor-pointer transition"
+        >
+          건축 견적서·법규 리포트 출력
+        </button>
+        <button
+          onClick={() => downloadStructureAsSTL(structure)}
+          className="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs rounded-lg cursor-pointer transition"
+        >
+          3D 프린터 설계도 (.STL) 저장
+        </button>
+      </div>
+
+      {/* 좌측 하단: 일괄 건축 제원 입력 패널 + 방 디자인 유형 선택기 + 후속 수정 채팅창 */}
+      <div className="fixed bottom-4 left-4 z-50 w-[94vw] sm:w-[480px] max-h-[85vh] flex flex-col gap-2.5 bg-slate-950/90 backdrop-blur-md border border-cyan-500/50 p-3.5 rounded-xl font-sans text-sm text-cyan-100 shadow-2xl">
+        {/* 초반 일괄 제원 입력 패널 (열려 있을 때 표시) */}
+        {isSpecBuilderOpen && (
+          <BuildingSpecBuilder
+            initialSpec={structure.buildingSpec}
+            isGenerating={isReinforcing}
+            onSubmitSpec={handleSubmitBuildingSpec}
+            onClose={structure.buildingSpec ? () => setIsSpecBuilderOpen(false) : undefined}
+          />
+        )}
+
+        {/* 방(세대) 디자인 유형 선택기 */}
+        {structure.buildingSpec?.unitTypes && structure.buildingSpec.unitTypes.length > 0 && (
+          <div className="bg-slate-900/95 border border-cyan-500/40 rounded-lg p-2.5 space-y-1.5">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-bold text-cyan-300">
+                방(세대) 디자인 유형 선택 (중앙 평면도 + 우측 3D 배치)
+              </span>
+              {structure.selectedUnitTypeId && (
+                <button
+                  onClick={() => setStructure((p) => ({ ...p, selectedUnitTypeId: null }))}
+                  className="text-amber-300 hover:underline cursor-pointer"
+                >
+                  선택 해제
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+              {structure.buildingSpec.unitTypes.map((ut) => {
+                const isSelected = structure.selectedUnitTypeId === ut.id;
+                return (
+                  <button
+                    key={ut.id}
+                    onClick={() =>
+                      setStructure((p) => ({
+                        ...p,
+                        selectedUnitTypeId: isSelected ? null : ut.id,
+                        isLoadHeatmapActive: false,
+                      }))
+                    }
+                    className={`p-2 rounded-lg border text-left transition cursor-pointer ${
+                      isSelected
+                        ? 'bg-cyan-500/25 border-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.35)]'
+                        : 'bg-slate-950/80 border-slate-700 hover:border-cyan-500/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: ut.color }}
+                      />
+                      <span className="font-mono font-bold text-xs text-white">{ut.code}</span>
+                    </div>
+                    <div className="text-[11px] text-slate-300 truncate mt-0.5">
+                      {ut.areaSqm}㎡ · {ut.householdCount}세대
+                    </div>
+                    <div className="text-[10px] font-mono text-amber-300">
+                      하중 {ut.liveLoadKn.toFixed(1)} kN/㎡
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* AI 코파일럿 헤더 + 제원 패널 열기 버튼 */}
+        <div className="flex items-center justify-between border-b border-cyan-500/30 pb-1.5">
           <div className="flex items-center gap-2 font-mono text-xs font-bold text-cyan-400 tracking-wider">
             <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
             AIRFORGE AI ARCHITECT
           </div>
-          <button
-            onClick={() => setIsChatExpanded((prev) => !prev)}
-            className="px-2.5 py-1 text-xs font-mono border border-cyan-500/40 rounded hover:bg-cyan-500/20 text-cyan-300 cursor-pointer"
-          >
-            {isChatExpanded ? '창 접기 ▼' : '대화창 펼치기 ▲'}
-          </button>
+          <div className="flex items-center gap-1.5">
+            {!isSpecBuilderOpen && (
+              <button
+                onClick={() => setIsSpecBuilderOpen(true)}
+                className="px-2 py-0.5 text-xs font-bold bg-cyan-500/20 border border-cyan-400/50 rounded hover:bg-cyan-500/35 text-cyan-200 cursor-pointer"
+              >
+                제원 설정 패널 열기
+              </button>
+            )}
+            <button
+              onClick={() => setIsChatExpanded((prev) => !prev)}
+              className="px-2 py-0.5 text-xs font-mono border border-cyan-500/40 rounded hover:bg-cyan-500/20 text-cyan-300 cursor-pointer"
+            >
+              {isChatExpanded ? '접기 ▼' : '펼치기 ▲'}
+            </button>
+          </div>
         </div>
 
-        {/* 대화 히스토리 (펼쳤을 때만 표시) */}
-        {isChatExpanded && (
-          <div className="flex-1 min-h-[180px] max-h-[42vh] overflow-y-auto space-y-2.5 pr-1.5">
+        {/* 후속 수정 대화 로그 (제원 패널이 닫혀 있을 때 넓게 표시) */}
+        {isChatExpanded && !isSpecBuilderOpen && (
+          <div className="flex-1 min-h-[120px] max-h-[26vh] overflow-y-auto space-y-2 pr-1">
             {(structure.chatHistory ?? []).map((msg) => (
               <div
                 key={msg.id}
-                className={`p-3 rounded-lg leading-relaxed whitespace-pre-wrap break-words ${
+                className={`p-2.5 rounded-lg text-xs leading-relaxed whitespace-pre-wrap break-words ${
                   msg.role === 'user'
-                    ? 'bg-cyan-950/70 border border-cyan-500/40 text-white ml-10'
-                    : 'bg-slate-900/95 border border-slate-700/80 text-cyan-100 mr-4'
+                    ? 'bg-cyan-950/70 border border-cyan-500/40 text-white ml-8'
+                    : 'bg-slate-900/95 border border-slate-700/80 text-cyan-100 mr-2'
                 }`}
               >
-                <span className="font-mono font-bold text-[11px] uppercase tracking-wider block mb-1 text-cyan-400">
-                  {msg.role === 'user' ? 'USER' : 'AIRFORGE AI'}
+                <span className="font-mono font-bold text-[10px] uppercase tracking-wider block mb-0.5 text-cyan-400">
+                  {msg.role === 'user' ? 'ARCHITECT' : 'AIRFORGE AI'}
                 </span>
                 {msg.text}
               </div>
@@ -346,23 +540,19 @@ export default function App() {
           </div>
         )}
 
-        {/* 애매한 명령일 때 나타나는 3가지 예상 결과물 시안 선택 카드 */}
         {isChatExpanded && structure.activeCandidates && structure.activeCandidates.length > 0 && (
-          <div className="max-h-[28vh] overflow-y-auto space-y-2 border-t border-cyan-500/30 pt-2.5 pr-1">
-            <div className="text-xs text-amber-300 font-bold">
-              예상 결과물 시안 (클릭하여 3D 씬에 즉시 적용):
-            </div>
+          <div className="max-h-[22vh] overflow-y-auto space-y-1.5 border-t border-cyan-500/30 pt-2 pr-1">
             {structure.activeCandidates.map((cand) => (
               <button
                 key={cand.id}
                 onClick={() => handleApplyCandidate(cand)}
-                className="w-full text-left p-2.5 rounded-lg border border-cyan-400/50 bg-cyan-950/50 hover:bg-cyan-500/25 transition cursor-pointer flex justify-between items-center gap-3"
+                className="w-full text-left p-2 rounded-lg border border-cyan-400/50 bg-cyan-950/50 hover:bg-cyan-500/25 transition cursor-pointer flex justify-between items-center gap-2"
               >
-                <div className="space-y-0.5">
-                  <div className="font-bold text-sm text-white">{cand.title}</div>
-                  <div className="text-xs text-cyan-200/85 leading-snug">{cand.description}</div>
+                <div>
+                  <div className="font-bold text-xs text-white">{cand.title}</div>
+                  <div className="text-[11px] text-cyan-200/85">{cand.description}</div>
                 </div>
-                <span className="shrink-0 px-3 py-1.5 bg-cyan-500 text-black font-bold rounded text-xs">
+                <span className="shrink-0 px-2.5 py-1 bg-cyan-500 text-black font-bold rounded text-[11px]">
                   적용
                 </span>
               </button>
@@ -370,26 +560,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 빠른 테스트 칩 */}
-        <div className="flex flex-wrap gap-1.5 pt-1 border-t border-slate-800">
-          {['건물 세워줘', '다리만 지워', '3D 테이블 로드'].map((sample) => (
-            <button
-              key={sample}
-              onClick={() => {
-                if (sample === '3D 테이블 로드') {
-                  setStructure((p) => ({ ...TABLE_3D_PRESET, chatHistory: p.chatHistory }));
-                } else {
-                  handleVoiceCommand(sample);
-                }
-              }}
-              className="px-2.5 py-1 text-xs border border-cyan-500/35 rounded hover:bg-cyan-500/20 text-cyan-300 cursor-pointer"
-            >
-              {sample}
-            </button>
-          ))}
-        </div>
-
-        {/* 텍스트 명령 입력창 */}
+        {/* 후속 세부 명령 입력창 (재질 변경, 부분 삭제, 카메라 회전 등) */}
         <div className="flex items-center gap-2">
           <input
             value={testVoiceInput}
@@ -401,8 +572,8 @@ export default function App() {
               }
             }}
             disabled={isReinforcing}
-            placeholder='예: "건물 세워줘", "2번 시안으로 골드 재질 적용", "다리만 지워"'
-            className="flex-1 bg-black/70 border border-cyan-500/50 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-cyan-300"
+            placeholder='후속 수정 명령 (예: "골드 재질로 바꿔", "다리만 지워")'
+            className="flex-1 bg-black/70 border border-cyan-500/50 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-cyan-300"
           />
           <button
             onClick={() => {
@@ -412,12 +583,20 @@ export default function App() {
               }
             }}
             disabled={isReinforcing}
-            className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-sm rounded-lg cursor-pointer disabled:opacity-50"
+            className="px-3.5 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50"
           >
             {isReinforcing ? '...' : '전송'}
           </button>
         </div>
       </div>
+
+      {isQuotationOpen && (
+        <QuotationModal
+          structure={structure}
+          snapshotDataUrl={quotationSnapshot}
+          onClose={() => setIsQuotationOpen(false)}
+        />
+      )}
     </main>
   );
 }

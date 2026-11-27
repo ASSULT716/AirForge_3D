@@ -1,18 +1,16 @@
-import React, { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import {
   ActiveSpecVisualization,
   BuildingSpec,
-  BuildingTemplateOption,
+  BuildingTemplateId,
   CadMaterial,
   DesignCategory,
-  SitePoint2D,
   SiteShape,
 } from '../types/cad';
 import { calculateKoreanBuildingLimits } from '../utils/buildingEstimator';
 import {
   BUILDING_TEMPLATES_BY_CATEGORY,
   getDefaultSpecForCategory,
-  getSiteBoundaryPoints,
 } from '../utils/architectureGenerator';
 import {
   analyzeMultipleHousePhotosAndAdaptSpec,
@@ -202,13 +200,6 @@ export default function BuildingSpecBuilder({
   const [lockedKeys, setLockedKeys] = useState<Partial<Record<SpecFieldKey, boolean>>>({});
   const [expandedKey, setExpandedKey] = useState<SpecFieldKey | null>(null);
   const [baselineSpec, setBaselineSpec] = useState<BuildingSpec>(defaultInit);
-  const [activePrimaryMaterial, setActivePrimaryMaterial] = useState<CadMaterial>('stucco');
-
-  // 제스처/마우스 자유 대지 경계 드로잉 상태
-  const [isDrawingPadOpen, setIsDrawingPadOpen] = useState(false);
-  const [draftPoints, setDraftPoints] = useState<SitePoint2D[]>([]);
-  const isPointerDrawingRef = useRef(false);
-  const drawBoxRef = useRef<HTMLDivElement | null>(null);
 
   // 여러 장 사진 무드보드 상태
   const [refPhotos, setRefPhotos] = useState<string[]>([]);
@@ -232,82 +223,19 @@ export default function BuildingSpecBuilder({
     [specState]
   );
 
-  const templatesForCurrent: BuildingTemplateOption[] = useMemo(() => {
-    if (specState.usageType === '3D 디자인') return [];
-    if (specState.dynamicTemplates && specState.dynamicTemplates.length > 0) {
-      return specState.dynamicTemplates;
-    }
-    return BUILDING_TEMPLATES_BY_CATEGORY[specState.usageType];
-  }, [specState.usageType, specState.dynamicTemplates]);
-
-  const toLocalSitePoint = (clientX: number, clientY: number): SitePoint2D | null => {
-    const el = drawBoxRef.current;
-    if (!el) return null;
-    const rect = el.getBoundingClientRect();
-    const nx = ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
-    const nz = ((clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1;
-    return {
-      x: Number((nx * 4.5).toFixed(2)),
-      z: Number((nz * 4.5).toFixed(2)),
-    };
-  };
-
-  const appendDraftPointIfFarEnough = (pt: SitePoint2D) => {
-    setDraftPoints((prev) => {
-      if (prev.length === 0) return [pt];
-      const last = prev[prev.length - 1];
-      if (Math.hypot(pt.x - last.x, pt.z - last.z) < 0.35) return prev;
-      return [...prev, pt];
-    });
-  };
-
-  const commitFreeformBoundary = (pts: SitePoint2D[]) => {
-    if (pts.length < 3) return;
-    const next: BuildingSpec = {
-      ...specState,
-      siteShape: 'freeform',
-      customSitePoints: pts,
-    };
-    setSpecState(next);
-    onLivePreviewSpec(
-      next,
-      {
-        paramKey: 'siteAreaSqm',
-        label: '자유 대지 경계',
-        formattedValue: `${specState.siteAreaSqm.toLocaleString()}㎡ (${pts.length}각 형상)`,
-        deltaText: '경계 형상에 맞춰 집 매스·배치 갱신됨',
-      },
-      activePrimaryMaterial
-    );
-  };
-
   const applyPhotoCollection = async (nextUrls: string[]) => {
     setRefPhotos(nextUrls);
     if (nextUrls.length === 0) {
       setExtractedStyle(null);
-      const cat =
-        specState.usageType === '3D 디자인' ? '단독주택' : specState.usageType;
-      const defaultTen = BUILDING_TEMPLATES_BY_CATEGORY[cat];
-      const firstDef = defaultTen[0];
       const cleared: BuildingSpec = {
         ...specState,
-        templateId: firstDef.id,
-        selectedTemplateName: firstDef.name,
-        dynamicTemplates: defaultTen,
-        roofStyle: firstDef.roofStyle,
-        accentMaterial: firstDef.accentMaterial,
-        interiorTheme: firstDef.interiorTheme,
-        interiorWallColor: firstDef.interiorWallColor,
-        interiorFloorColor: firstDef.interiorFloorColor,
-        openPlanRatio: firstDef.openPlanRatio,
         customWallColor: undefined,
         customRoofColor: undefined,
         styleSummary: undefined,
         photoCount: 0,
       };
       setSpecState(cleared);
-      setActivePrimaryMaterial(firstDef.primaryMaterial);
-      onLivePreviewSpec(cleared, null, firstDef.primaryMaterial);
+      onLivePreviewSpec(cleared, null, 'stucco');
       return;
     }
 
@@ -321,7 +249,6 @@ export default function BuildingSpecBuilder({
       setExtractedStyle(extracted);
       setSpecState(adaptedSpec);
       setBaselineSpec(adaptedSpec);
-      setActivePrimaryMaterial(extracted.material);
       onLivePreviewSpec(adaptedSpec, null, extracted.material);
     } finally {
       setIsAnalyzingPhoto(false);
@@ -451,75 +378,50 @@ export default function BuildingSpecBuilder({
         deltaText:
           diff === 0 ? '기준값과 동일' : diff > 0 ? `+${diff}${unit} 증가` : `${diff}${unit} 감소`,
       },
-      activePrimaryMaterial
+      extractedStyle?.material
     );
   };
 
-  const handleDesignCategoryChange = async (nextCategory: DesignCategory) => {
+  const applyPreset = (preset: BuildingSpec) => {
+    setSpecState(preset);
+    setBaselineSpec(preset);
+    onLivePreviewSpec(preset, null, extractedStyle?.material);
+  };
+
+  const handleDesignCategoryChange = (nextCategory: DesignCategory) => {
     if (nextCategory === '3D 디자인') {
       onSelectFree3DMode();
       return;
     }
     const def = getDefaultSpecForCategory(nextCategory);
-    if (refPhotos.length > 0) {
-      const { adaptedSpec, extracted } = await analyzeMultipleHousePhotosAndAdaptSpec(
-        refPhotos,
-        def,
-        lockedKeys
-      );
-      setExtractedStyle(extracted);
-      setSpecState(adaptedSpec);
-      setBaselineSpec(adaptedSpec);
-      setActivePrimaryMaterial(extracted.material);
-      onLivePreviewSpec(adaptedSpec, null, extracted.material);
-    } else {
-      setSpecState(def);
-      setBaselineSpec(def);
-      setActivePrimaryMaterial('stucco');
-      onLivePreviewSpec(def, null, 'stucco');
-    }
+    applyPreset({
+      ...def,
+      roofStyle: specState.roofStyle ?? def.roofStyle,
+      accentMaterial: specState.accentMaterial ?? def.accentMaterial,
+      interiorTheme: specState.interiorTheme ?? def.interiorTheme,
+      interiorWallColor: specState.interiorWallColor ?? def.interiorWallColor,
+      interiorFloorColor: specState.interiorFloorColor ?? def.interiorFloorColor,
+      customWallColor: specState.customWallColor,
+      customRoofColor: specState.customRoofColor,
+      styleSummary: specState.styleSummary,
+    });
   };
 
-  const handleTemplateCardSelect = (tpl: BuildingTemplateOption) => {
-    const nextGarden = !lockedKeys.gardenAreaSqm
-      ? Math.min(
-          Math.round(specState.siteAreaSqm * 0.55),
-          Math.max(0, Math.round(baselineSpec.gardenAreaSqm * tpl.gardenMultiplier))
-        )
-      : specState.gardenAreaSqm;
-
-    const updatedSpec: BuildingSpec = {
+  const handleTemplateSelect = (nextTpl: BuildingTemplateId) => {
+    if (specState.usageType === '3D 디자인') return;
+    const preset = getDefaultSpecForCategory(specState.usageType, nextTpl);
+    applyPreset({
       ...specState,
-      projectName: `AirForge ${tpl.name}`,
-      templateId: tpl.id,
-      selectedTemplateName: tpl.name,
-      roofStyle: tpl.roofStyle,
-      accentMaterial: tpl.accentMaterial,
-      interiorTheme: tpl.interiorTheme,
-      interiorWallColor: tpl.interiorWallColor,
-      interiorFloorColor: tpl.interiorFloorColor,
-      openPlanRatio: tpl.openPlanRatio,
-      gardenAreaSqm: nextGarden,
-      customWallColor: tpl.wallColor,
-      customRoofColor: tpl.roofColor,
-      designConcept: tpl.concept,
-    };
-
-    setSpecState(updatedSpec);
-    setActivePrimaryMaterial(tpl.primaryMaterial);
-    onLivePreviewSpec(updatedSpec, null, tpl.primaryMaterial);
+      templateId: nextTpl,
+      projectName: preset.projectName,
+      designConcept: preset.designConcept,
+    });
   };
 
-  // 현재 대지 경계 미리보기 SVG 경로 계산
-  const activeSiteBoundary = useMemo(
-    () =>
-      getSiteBoundaryPoints(
-        specState.siteAreaSqm,
-        specState.siteShape ?? 'rectangle',
-        specState.customSitePoints
-      ),
-    [specState.siteAreaSqm, specState.siteShape, specState.customSitePoints]
-  );
+  const templatesForCurrent =
+    specState.usageType === '3D 디자인'
+      ? []
+      : BUILDING_TEMPLATES_BY_CATEGORY[specState.usageType];
 
   const categories: {
     groupTitle: string;
@@ -677,13 +579,9 @@ export default function BuildingSpecBuilder({
     },
   ];
 
-  const svgPolyString = activeSiteBoundary.points
-    .map((pt) => `${(50 + (pt[0] / 5) * 42).toFixed(1)},${(50 + (pt[2] / 5) * 42).toFixed(1)}`)
-    .join(' ');
-
   return (
     <div className="space-y-2.5 text-slate-800">
-      {/* 여러 장 집 느낌 사진 업로드 -> 10종 맞춤형 디자인 템플릿 자동 재구성 */}
+      {/* 여러 장 집 느낌 사진 업로드 -> 외관·지붕·층별·실내 스타일 동시 추출 */}
       <div className="p-2 rounded-xl bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-200 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
@@ -691,7 +589,7 @@ export default function BuildingSpecBuilder({
               원하는 집 느낌 사진 여러 장 넣기 (외관 · 지붕 · 인테리어)
             </span>
             <span className="text-[9.5px] text-slate-600 block truncate">
-              사진 특징에 따라 10가지 디자인 템플릿의 구조·지붕·실내가 모두 바뀝니다
+              1번 사진: 주 외장재 · 2번 사진: 지붕/상층재 · 3번 사진: 실내 벽·바닥 분위기
             </span>
           </div>
           <input
@@ -730,6 +628,7 @@ export default function BuildingSpecBuilder({
           </div>
         </div>
 
+        {/* 업로드된 다중 사진 썸네일 무드보드 */}
         {refPhotos.length > 0 && (
           <div className="bg-white/90 border border-sky-200 rounded-lg p-1.5 space-y-1.5">
             <div className="flex gap-1.5 overflow-x-auto pb-0.5">
@@ -802,75 +701,70 @@ export default function BuildingSpecBuilder({
         </div>
       </div>
 
-      {/* 디자인 템플릿 (단독주택 10종 / 기타 용도 5종) */}
+      {/* 대지 경계 모양 자유 선택 */}
+      <div>
+        <span className="text-[10px] font-bold text-slate-500 block mb-1">
+          대지 경계 모양 (동일 면적 내 자유 변형)
+        </span>
+        <div className="grid grid-cols-4 gap-1">
+          {(
+            [
+              { id: 'rectangle', label: '▭ 직사각형' },
+              { id: 'triangle', label: '△ 삼각형' },
+              { id: 'circle', label: '○ 원형' },
+              { id: 'trapezoid', label: '⏢ 사다리꼴' },
+            ] as { id: SiteShape; label: string }[]
+          ).map((shapeItem) => {
+            const active = (specState.siteShape ?? 'rectangle') === shapeItem.id;
+            return (
+              <button
+                key={shapeItem.id}
+                type="button"
+                onClick={() => {
+                  const next = { ...specState, siteShape: shapeItem.id };
+                  setSpecState(next);
+                  onLivePreviewSpec(next, null, extractedStyle?.material);
+                }}
+                className={`py-1 px-1.5 rounded text-[10.5px] font-bold border cursor-pointer transition ${
+                  active
+                    ? 'bg-slate-800 text-white border-slate-800'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-400'
+                }`}
+              >
+                {shapeItem.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 건물 유형별 기본 디자인 템플릿 */}
       {templatesForCurrent.length > 0 && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[10.5px] font-extrabold text-slate-800">
-              {specState.usageType} 디자인 템플릿 ({templatesForCurrent.length}종 구조·지붕·실내 변형)
-            </span>
-            {refPhotos.length > 0 && (
-              <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 font-mono text-[9.5px] font-bold">
-                사진 {refPhotos.length}장 맞춤 생성됨
-              </span>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-1.5 max-h-[210px] overflow-y-auto pr-1">
-            {templatesForCurrent.map((tpl, idx) => {
-              const isSelected =
-                (specState.selectedTemplateName && specState.selectedTemplateName === tpl.name) ||
-                (!specState.selectedTemplateName && specState.templateId === tpl.id && idx === 0);
-
+        <div className="space-y-1">
+          <span className="text-[10px] font-bold text-slate-500 block">
+            {specState.usageType} 기본 디자인 템플릿
+          </span>
+          <div className="grid grid-cols-3 gap-1.5">
+            {templatesForCurrent.map((tpl) => {
+              const isSelected = specState.templateId === tpl.id;
               return (
                 <button
-                  key={`${tpl.id}_${tpl.name}_${idx}`}
+                  key={tpl.id}
                   type="button"
-                  onClick={() => handleTemplateCardSelect(tpl)}
-                  className={`${
-                    idx === 0 ? 'col-span-2' : 'col-span-1'
-                  } p-2 rounded-lg border text-left transition cursor-pointer ${
+                  onClick={() => handleTemplateSelect(tpl.id)}
+                  className={`p-1.5 rounded-lg border text-left transition cursor-pointer ${
                     isSelected
                       ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
-                      : 'bg-slate-50 text-slate-800 border-slate-200 hover:border-sky-400 hover:bg-white'
+                      : 'bg-slate-50 text-slate-800 border-slate-200 hover:border-sky-400'
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="text-[10.5px] font-extrabold truncate">
-                      {idx + 1}안. {tpl.name}
-                    </span>
-                    <span
-                      className={`shrink-0 px-1.5 py-0.2 rounded font-mono text-[8.5px] font-bold ${
-                        isSelected
-                          ? 'bg-sky-800/80 text-sky-100'
-                          : 'bg-slate-200/80 text-slate-700'
-                      }`}
-                    >
-                      {tpl.roofBadge}
-                    </span>
-                  </div>
+                  <div className="text-[10.5px] font-bold truncate">{tpl.name}</div>
                   <div
-                    className={`text-[9.5px] line-clamp-2 mt-0.5 leading-snug ${
-                      isSelected ? 'text-sky-100' : 'text-slate-600'
+                    className={`text-[9px] line-clamp-1 mt-0.5 ${
+                      isSelected ? 'text-sky-100' : 'text-slate-500'
                     }`}
                   >
                     {tpl.subtitle}
-                  </div>
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    <span
-                      className={`px-1 py-0.2 rounded font-mono text-[8.5px] ${
-                        isSelected ? 'bg-white/20 text-white' : 'bg-sky-50 text-sky-700'
-                      }`}
-                    >
-                      {tpl.structureBadge}
-                    </span>
-                    <span
-                      className={`px-1 py-0.2 rounded font-mono text-[8.5px] ${
-                        isSelected ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-800'
-                      }`}
-                    >
-                      1F {tpl.primaryMaterial.toUpperCase()} · 상층 {tpl.accentMaterial.toUpperCase()}
-                    </span>
                   </div>
                 </button>
               );
@@ -879,170 +773,8 @@ export default function BuildingSpecBuilder({
         </div>
       )}
 
-      {/* 제스처 · 마우스 드래그 자유 대지 경계 생성기 (동일 면적 내 자유 변형 + 집 형태 연동) */}
-      <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <span className="text-[10.5px] font-extrabold text-slate-800 block">
-              대지 경계 자유 드로잉 (마우스 · 제스처 드래그 → {specState.siteAreaSqm.toLocaleString()}㎡ 연동)
-            </span>
-            <span className="text-[9.5px] text-slate-500 block">
-              현재 형태: {specState.siteShape === 'freeform' ? `자유 곡선/다각형 (${specState.customSitePoints?.length ?? 0}점)` : specState.siteShape ?? 'rectangle'} · 경계에 맞춰 집 매스·방향 자동 변환
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setIsDrawingPadOpen((prev) => {
-                const nextOpen = !prev;
-                if (nextOpen && (!specState.customSitePoints || specState.customSitePoints.length < 3)) {
-                  setDraftPoints([]);
-                } else if (nextOpen && specState.customSitePoints) {
-                  setDraftPoints(specState.customSitePoints);
-                }
-                return nextOpen;
-              });
-            }}
-            className={`px-2.5 py-1.5 rounded-lg text-[10.5px] font-bold cursor-pointer shrink-0 transition ${
-              isDrawingPadOpen
-                ? 'bg-sky-600 text-white'
-                : 'bg-white text-sky-700 border border-sky-300 hover:bg-sky-50'
-            }`}
-          >
-            {isDrawingPadOpen ? '드로잉 패드 닫기' : '자유 경계 그리기'}
-          </button>
-        </div>
-
-        {/* 현재 대지 경계 미니맵 */}
-        <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-1.5">
-          <svg viewBox="0 0 100 100" className="w-12 h-12 shrink-0 bg-slate-50 rounded border border-slate-200">
-            <polygon
-              points={svgPolyString}
-              fill="rgba(2, 132, 199, 0.14)"
-              stroke="#0284c7"
-              strokeWidth="2.5"
-            />
-          </svg>
-          <div className="flex-1 min-w-0 text-[9.5px] text-slate-600 space-y-0.5">
-            <div className="font-bold text-slate-800">
-              실면적 {specState.siteAreaSqm.toLocaleString()}㎡ 고정 반영
-            </div>
-            <div>
-              드래그 또는 제스처 핀치로 그린 궤적의 면적을 {specState.siteAreaSqm.toLocaleString()}㎡로 환산하고 집 구조·각도를 맞춥니다.
-            </div>
-          </div>
-        </div>
-
-        {/* 제스처 & 마우스 드래그 패드 */}
-        {isDrawingPadOpen && (
-          <div className="bg-white border border-sky-300 rounded-xl p-2 space-y-1.5">
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="font-bold text-sky-900">
-                패드 위에서 마우스를 누르고 드래그하거나, 제스처 핀치로 경계를 그려보세요
-              </span>
-              <span className="font-mono text-slate-500">{draftPoints.length}개 좌표</span>
-            </div>
-
-            <div
-              ref={drawBoxRef}
-              onPointerDown={(e) => {
-                e.currentTarget.setPointerCapture(e.pointerId);
-                isPointerDrawingRef.current = true;
-                const pt = toLocalSitePoint(e.clientX, e.clientY);
-                if (pt) setDraftPoints([pt]);
-              }}
-              onPointerMove={(e) => {
-                if (!isPointerDrawingRef.current) return;
-                const pt = toLocalSitePoint(e.clientX, e.clientY);
-                if (pt) appendDraftPointIfFarEnough(pt);
-              }}
-              onPointerUp={(e) => {
-                if (!isPointerDrawingRef.current) return;
-                isPointerDrawingRef.current = false;
-                if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                  e.currentTarget.releasePointerCapture(e.pointerId);
-                }
-                if (draftPoints.length >= 3) {
-                  commitFreeformBoundary(draftPoints);
-                }
-              }}
-              onClick={(e) => {
-                if (isPointerDrawingRef.current) return;
-                const pt = toLocalSitePoint(e.clientX, e.clientY);
-                if (!pt) return;
-                const nextPts = [...draftPoints, pt];
-                setDraftPoints(nextPts);
-                if (nextPts.length >= 3) {
-                  commitFreeformBoundary(nextPts);
-                }
-              }}
-              className="relative w-full h-36 bg-slate-900 rounded-lg overflow-hidden touch-none select-none cursor-crosshair border border-slate-700"
-            >
-              <svg viewBox="0 0 100 100" className="w-full h-full pointer-events-none">
-                <line x1="0" y1="50" x2="100" y2="50" stroke="rgba(148,163,184,0.22)" strokeDasharray="2 2" />
-                <line x1="50" y1="0" x2="50" y2="100" stroke="rgba(148,163,184,0.22)" strokeDasharray="2 2" />
-                {draftPoints.length >= 2 && (
-                  <polyline
-                    fill={draftPoints.length >= 3 ? 'rgba(56, 189, 248, 0.22)' : 'none'}
-                    stroke="#38bdf8"
-                    strokeWidth="2.2"
-                    points={draftPoints
-                      .map((p) => `${(50 + (p.x / 4.5) * 44).toFixed(1)},${(50 + (p.z / 4.5) * 44).toFixed(1)}`)
-                      .join(' ')}
-                  />
-                )}
-                {draftPoints.map((p, idx) => (
-                  <circle
-                    key={idx}
-                    cx={50 + (p.x / 4.5) * 44}
-                    cy={50 + (p.z / 4.5) * 44}
-                    r={idx === 0 ? 3.5 : 2.3}
-                    fill={idx === 0 ? '#f59e0b' : '#38bdf8'}
-                  />
-                ))}
-              </svg>
-              <div className="absolute bottom-1.5 left-2 text-[9px] font-mono text-sky-200/90 pointer-events-none">
-                {draftPoints.length < 3
-                  ? `점을 ${3 - draftPoints.length}개 더 찍거나 드래그하세요`
-                  : `실시간 3D 반영 중 (${draftPoints.length}점 · ${specState.siteAreaSqm}㎡ 환산)`}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between gap-1.5">
-              <button
-                type="button"
-                onClick={() => {
-                  setDraftPoints([]);
-                  const resetSpec: BuildingSpec = {
-                    ...specState,
-                    siteShape: 'rectangle',
-                    customSitePoints: undefined,
-                  };
-                  setSpecState(resetSpec);
-                  onLivePreviewSpec(resetSpec, null, activePrimaryMaterial);
-                }}
-                className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold cursor-pointer"
-              >
-                지우기
-              </button>
-              <button
-                type="button"
-                disabled={draftPoints.length < 3}
-                onClick={() => {
-                  commitFreeformBoundary(draftPoints);
-                  setIsDrawingPadOpen(false);
-                }}
-                className="px-3 py-1 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white text-[10px] font-bold cursor-pointer"
-              >
-                이 대지 경계로 집 생성
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* 카테고리별 구분선이 적용된 아코디언 제원 리스트 */}
-      <div className="max-h-[22vh] overflow-y-auto pr-1 space-y-3">
+      <div className="max-h-[28vh] overflow-y-auto pr-1 space-y-3">
         {categories.map((cat) => (
           <div key={cat.groupTitle} className="space-y-1">
             <div className="flex items-center gap-2 pt-1">
@@ -1064,7 +796,7 @@ export default function BuildingSpecBuilder({
                 onToggle={() => {
                   const nextKey = expandedKey === item.key ? null : item.key;
                   setExpandedKey(nextKey);
-                  if (!nextKey) onLivePreviewSpec(specState, null, activePrimaryMaterial);
+                  if (!nextKey) onLivePreviewSpec(specState, null, extractedStyle?.material);
                 }}
                 label={item.label}
                 unit={item.unit}
@@ -1086,8 +818,8 @@ export default function BuildingSpecBuilder({
         <button
           onClick={() => {
             setBaselineSpec(specState);
-            onLivePreviewSpec(specState, null, activePrimaryMaterial);
-            onSubmitSpec(specState, activePrimaryMaterial);
+            onLivePreviewSpec(specState, null, extractedStyle?.material);
+            onSubmitSpec(specState, extractedStyle?.material);
           }}
           disabled={isGenerating}
           className="flex-1 py-2 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50 shadow-sm transition"

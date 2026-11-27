@@ -56,7 +56,7 @@ export default function App() {
       {
         id: 'welcome',
         role: 'assistant',
-        text: '기본 단독주택 5종 템플릿이 준비되었습니다. 사진을 여러 장 올리면 사진 특성에 따라 5가지 템플릿의 구조·지붕·실내가 모두 새로 생성됩니다.',
+        text: '기본 단독주택 템플릿이 배치되었습니다. 상단에서 원하는 집 느낌 사진을 여러 장 올리면 외벽·지붕·층별 매스·실내 벽체와 가구까지 자동으로 재설계됩니다.',
         timestamp: Date.now(),
       },
     ],
@@ -398,6 +398,7 @@ export default function App() {
         }
       />
 
+      {/* 손·음성 입력 연결점 */}
       <HandBridge
         structure={structure}
         setStructure={setStructure}
@@ -465,6 +466,7 @@ export default function App() {
         }}
       />
 
+      {/* 좌측 상단: 방 유형 2D 평면도 */}
       {selectedUnitType && (
         <FloorPlanViewer
           unitType={selectedUnitType}
@@ -472,6 +474,7 @@ export default function App() {
         />
       )}
 
+      {/* 우측 상단: 개별 요소 및 층 전체 일괄 선택 인스펙터 */}
       {selectedPart && (
         <PartInspector
           part={selectedPart}
@@ -507,6 +510,7 @@ export default function App() {
         />
       )}
 
+      {/* 우측 상단: KDS 41 12 00 하중 시뮬레이터 */}
       {!selectedPart && structure.buildingSpec && (
         <FloorLoadPanel
           spec={structure.buildingSpec}
@@ -549,7 +553,7 @@ export default function App() {
         />
       )}
 
-      {/* 우측 하단 액션 바 */}
+      {/* 우측 하단: 실내 투시 뷰 · 배관 투시 · 다른 디자인 뽑기 · 견적서 · STL 출력 */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-wrap gap-2 bg-white/95 backdrop-blur-md border border-slate-300 p-2.5 rounded-xl shadow-lg">
         {structure.buildingSpec && (
           <>
@@ -607,13 +611,13 @@ export default function App() {
         </button>
       </div>
 
-      {/* 좌측 하단 스튜디오 패널 */}
+      {/* 좌측 하단: 제원 설정 + 다중 사진 무드보드 + 방 유형 + 대화형 수정창 */}
       <FloatingPanel
         title={isFree3DMode ? '3D DESIGN & PRINTING STUDIO' : 'AIRFORGE ARCHITECT STUDIO'}
         subtitle="DRAG BAR TO MOVE · RESIZE"
         initialX={16}
-        initialY={Math.max(48, window.innerHeight - 680)}
-        baseWidth={490}
+        initialY={Math.max(64, window.innerHeight - 640)}
+        baseWidth={480}
         zIndex={50}
         headerRightExtra={
           (!isSpecBuilderOpen || isFree3DMode) && (
@@ -654,6 +658,7 @@ export default function App() {
             />
           )}
 
+          {/* 방(세대) 디자인 유형 선택기 */}
           {structure.buildingSpec?.unitTypes && structure.buildingSpec.unitTypes.length > 0 && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1.5">
               <div className="flex items-center justify-between text-[11px]">
@@ -706,6 +711,7 @@ export default function App() {
             </div>
           )}
 
+          {/* 대화창 접기/펼치기 바 */}
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <span className="font-mono text-[11px] font-bold text-sky-700">AI DESIGN CHAT</span>
             <button

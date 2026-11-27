@@ -1,7 +1,6 @@
 import {
   BuildingSpec,
   BuildingTemplateId,
-  BuildingTemplateOption,
   CadMaterial,
   DesignCategory,
   ExteriorWindow3D,
@@ -10,7 +9,6 @@ import {
   NodePoint,
   BeamMember,
   RoofStyle,
-  SitePoint2D,
   SiteShape,
   SolidPrimitive,
   UnitDesignType,
@@ -19,7 +17,12 @@ import {
 } from '../types/cad';
 import { getKdsLoadRange } from './buildingEstimator';
 
-export type { BuildingTemplateOption };
+export interface BuildingTemplateOption {
+  id: BuildingTemplateId;
+  name: string;
+  subtitle: string;
+  concept: string;
+}
 
 export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
   Exclude<DesignCategory, '3D 디자인'>,
@@ -31,467 +34,89 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       name: 'L자 중정 갤러리 하우스',
       subtitle: '1층 중정 데크와 2층 캔틸레버 매스가 교차하는 모던 주택',
       concept: 'L자 중정 갤러리 모던 스텝 테라스 하우스',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'wood',
-      wallColor: '#f5f2eb',
-      roofColor: '#c89b6e',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#faf7f2',
-      interiorFloorColor: '#c89b6e',
-      openPlanRatio: 1.05,
-      gardenMultiplier: 1.0,
-      structureBadge: 'L자 교차 중정 구조',
-      roofBadge: '밀착 처마 평지붕',
     },
     {
       id: 'U-terrace',
       name: 'ㄷ자 아트리움 테라스 하우스',
       subtitle: '중앙 선큰 정원을 양쪽 윙이 감싸고 상층부가 셋백된 3면 채광 주택',
       concept: 'ㄷ자 아트리움 중정 테라스 하우스',
-      roofStyle: 'shed',
-      primaryMaterial: 'wood',
-      accentMaterial: 'stucco',
-      wallColor: '#d4a373',
-      roofColor: '#475569',
-      interiorTheme: 'japandi',
-      interiorWallColor: '#faf6ef',
-      interiorFloorColor: '#d6b48c',
-      openPlanRatio: 1.1,
-      gardenMultiplier: 1.25,
-      structureBadge: 'ㄷ자 아트리움 윙 구조',
-      roofBadge: '밀착 경사지붕',
     },
     {
       id: 'stepped-wing',
       name: '스텝 캔틸레버 아틀리에',
       subtitle: '층마다 비대칭 돌출·후퇴를 두어 넓은 테라스와 입체감을 만든 주택',
-      concept: '스텝 캔틸레버 아틀리에 하우스',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'wood',
-      wallColor: '#e2e8f0',
-      roofColor: '#334155',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#f8f0e5',
-      interiorFloorColor: '#c48f5a',
-      openPlanRatio: 1.15,
-      gardenMultiplier: 1.15,
-      structureBadge: '계단식 셋백 테라스 구조',
-      roofBadge: '밀착 처마 평지붕',
-    },
-    {
-      id: 'bridge-cantilever',
-      name: '필로티 캔틸레버 브릿지 하우스',
-      subtitle: '1층 코어 위로 2층 매스가 과감히 돌출된 하이엔드 주택',
-      concept: '필로티 캔틸레버 브릿지 모던 하우스',
-      roofStyle: 'butterfly',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'steel',
-      wallColor: '#cbd5e1',
-      roofColor: '#1e293b',
-      interiorTheme: 'industrial-loft',
-      interiorWallColor: '#e2e8f0',
-      interiorFloorColor: '#8d99ae',
-      openPlanRatio: 1.24,
-      gardenMultiplier: 1.1,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
-      roofBadge: '밀착 나비형 역경사지붕',
-    },
-    {
-      id: 'twin-pavilion',
-      name: '스카이브릿지 트윈 파빌리온',
-      subtitle: '두 개의 주거 매스를 공중 연결 통로와 나비형 지붕으로 잇는 주택',
-      concept: '스카이브릿지 트윈 파빌리온 하우스',
-      roofStyle: 'butterfly',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'glass',
-      wallColor: '#f8fafc',
-      roofColor: '#334155',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.22,
-      gardenMultiplier: 1.12,
-      structureBadge: '스카이브릿지 트윈동 구조',
-      roofBadge: '밀착 나비형 역경사지붕',
-    },
-    {
-      id: 'split-gable',
-      name: '듀얼 스플릿 박공 하우스',
-      subtitle: '엇갈린 이중 지붕 매스 사이에 채광 틈과 박공벽이 밀착된 주택',
-      concept: '듀얼 스플릿 박공 채광 하우스',
-      roofStyle: 'split-gable',
-      primaryMaterial: 'wood',
-      accentMaterial: 'concrete',
-      wallColor: '#c89b6e',
-      roofColor: '#334155',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#f8f0e5',
-      interiorFloorColor: '#c48f5a',
-      openPlanRatio: 1.15,
-      gardenMultiplier: 1.15,
-      structureBadge: '이중 매스 스플릿 구조',
-      roofBadge: '밀착 스플릿 지붕',
-    },
-    {
-      id: 'atrium-ring',
-      name: '중앙 채광 아트리움 순환 하우스',
-      subtitle: '건물 중심 채광 코어 주위로 거실·서재·침실이 순환하는 주택',
-      concept: '중앙 채광 아트리움 순환형 갤러리 하우스',
-      roofStyle: 'gable',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'glass',
-      wallColor: '#f8fafc',
-      roofColor: '#475569',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.28,
-      gardenMultiplier: 1.2,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
-      roofBadge: '밀착 박공 지붕',
-    },
-    {
-      id: 'courtyard-pavilion',
-      name: '포켓 가든 중정 파빌리온',
-      subtitle: '대지 내 정원과 중정 테라스를 품은 재패니즈 모던 주택',
-      concept: '포켓 가든 중정 파빌리온 하우스',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'wood',
-      wallColor: '#faf6ef',
-      roofColor: '#b45309',
-      interiorTheme: 'japandi',
-      interiorWallColor: '#faf6ef',
-      interiorFloorColor: '#d6b48c',
-      openPlanRatio: 1.12,
-      gardenMultiplier: 1.3,
-      structureBadge: '포켓 중정 파빌리온 구조',
-      roofBadge: '밀착 처마 평지붕',
-    },
-    {
-      id: 'cantilever-studio',
-      name: '어시메트릭 캔틸레버 스튜디오',
-      subtitle: '작업실·스튜디오 매스가 비대칭 돌출된 인더스트리얼 로프트 주택',
-      concept: '어시메트릭 캔틸레버 스튜디오 하우스',
-      roofStyle: 'shed',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'steel',
-      wallColor: '#cbd5e1',
-      roofColor: '#1e293b',
-      interiorTheme: 'industrial-loft',
-      interiorWallColor: '#e2e8f0',
-      interiorFloorColor: '#8d99ae',
-      openPlanRatio: 1.25,
-      gardenMultiplier: 1.05,
-      structureBadge: '어시메트릭 캔틸레버 구조',
-      roofBadge: '밀착 경사지붕',
-    },
-    {
-      id: 'gable-garden',
-      name: '가든 포치 박공 하우스',
-      subtitle: '전면 가든 포치와 정원 조경이 조화된 따뜻한 박공 주택',
-      concept: '가든 포치 박공 단독주택',
-      roofStyle: 'gable',
-      primaryMaterial: 'wood',
-      accentMaterial: 'stucco',
-      wallColor: '#d4a373',
-      roofColor: '#3f3f46',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#f8f0e5',
-      interiorFloorColor: '#c48f5a',
-      openPlanRatio: 1.1,
-      gardenMultiplier: 1.25,
-      structureBadge: '가든 포치 박공 구조',
-      roofBadge: '밀착 박공 지붕',
+      concept: '스텝 캔틸레버 루프탑 아틀리에 하우스',
     },
   ],
   공동주택: [
     {
       id: 'U-terrace',
       name: 'ㄷ자 중정 스텝 레지던스',
-      subtitle: '중앙 커뮤니티 정원과 테라스형 세대가 결합된 주거',
+      subtitle: '중앙 커뮤니티 정원과 테라스형 세대가 결합된 중저층 아트 주거',
       concept: 'ㄷ자 중정 커뮤니티 테라스 레지던스',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'wood',
-      wallColor: '#f5f2eb',
-      roofColor: '#475569',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#faf7f2',
-      interiorFloorColor: '#c89b6e',
-      openPlanRatio: 1.0,
-      gardenMultiplier: 1.2,
-      structureBadge: 'ㄷ자 아트리움 윙 구조',
-      roofBadge: '밀착 처마 평지붕',
     },
     {
       id: 'twin-pavilion',
       name: '스카이 브릿지 트윈 타워',
-      subtitle: '두 개의 주거 동을 공중 브릿지로 연결한 주거',
-      concept: '스카이 브릿지 트윈 공동주택',
-      roofStyle: 'butterfly',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'glass',
-      wallColor: '#cbd5e1',
-      roofColor: '#334155',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.15,
-      gardenMultiplier: 1.1,
-      structureBadge: '스카이브릿지 트윈동 구조',
-      roofBadge: '밀착 나비형 역경사지붕',
+      subtitle: '두 개의 주거 동을 공중 스카이 라운지로 연결한 랜드마크 주거',
+      concept: '스카이 브릿지 트윈 아트리움 공동주택',
     },
     {
       id: 'stepped-wing',
       name: '계단식 테라스 가든 아파트',
-      subtitle: '전 세대 테라스와 조경 데크를 갖춘 계단형 주거',
+      subtitle: '전 세대 남향 테라스와 옥상 공원을 갖춘 계단형 공동주택',
       concept: '계단식 테라스 가든 공동주택',
-      roofStyle: 'shed',
-      primaryMaterial: 'wood',
-      accentMaterial: 'stucco',
-      wallColor: '#d4a373',
-      roofColor: '#475569',
-      interiorTheme: 'japandi',
-      interiorWallColor: '#faf6ef',
-      interiorFloorColor: '#d6b48c',
-      openPlanRatio: 1.08,
-      gardenMultiplier: 1.25,
-      structureBadge: '계단식 셋백 테라스 구조',
-      roofBadge: '밀착 경사지붕',
-    },
-    {
-      id: 'bridge-cantilever',
-      name: '포디움 캔틸레버 테라스 빌라',
-      subtitle: '저층부 로비 위로 주거 매스가 돌출된 입체 주거',
-      concept: '포디움 캔틸레버 테라스 빌라',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'wood',
-      wallColor: '#e2e8f0',
-      roofColor: '#334155',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#f8f0e5',
-      interiorFloorColor: '#c48f5a',
-      openPlanRatio: 1.1,
-      gardenMultiplier: 1.05,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
-      roofBadge: '밀착 처마 평지붕',
-    },
-    {
-      id: 'atrium-ring',
-      name: '중정 아트리움 코리빙 하우스',
-      subtitle: '중앙 채광 아트리움을 둘러싼 공유 라운지형 주거',
-      concept: '중정 아트리움 코리빙 레지던스',
-      roofStyle: 'split-gable',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'steel',
-      wallColor: '#f8fafc',
-      roofColor: '#1e293b',
-      interiorTheme: 'industrial-loft',
-      interiorWallColor: '#e2e8f0',
-      interiorFloorColor: '#94a3b8',
-      openPlanRatio: 1.2,
-      gardenMultiplier: 1.15,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
-      roofBadge: '밀착 스플릿 지붕',
     },
   ],
   '업무·상업시설': [
     {
       id: 'twin-pavilion',
       name: '아트리움 트윈 오피스 파빌리온',
-      subtitle: '오픈 플라자와 브릿지 오피스가 결합된 상업 빌딩',
+      subtitle: '저층부 오픈 플라자와 상층부 캔틸레버 오피스가 결합된 상업 빌딩',
       concept: '아트리움 트윈 오피스·리테일 파빌리온',
-      roofStyle: 'shed',
-      primaryMaterial: 'steel',
-      accentMaterial: 'glass',
-      wallColor: '#cbd5e1',
-      roofColor: '#1e293b',
-      interiorTheme: 'industrial-loft',
-      interiorWallColor: '#f1f5f9',
-      interiorFloorColor: '#94a3b8',
-      openPlanRatio: 1.25,
-      gardenMultiplier: 1.0,
-      structureBadge: '스카이브릿지 트윈동 구조',
-      roofBadge: '밀착 경사지붕',
     },
     {
       id: 'stepped-wing',
       name: '스텝 테라스 크리에이티브 사옥',
-      subtitle: '층별 야외 라운지를 갖춘 현대적 업무시설',
+      subtitle: '층별 야외 라운지와 전면 커튼월을 갖춘 현대적 업무시설',
       concept: '스텝 테라스 크리에이티브 사옥',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'wood',
-      wallColor: '#e2e8f0',
-      roofColor: '#334155',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#c89b6e',
-      openPlanRatio: 1.2,
-      gardenMultiplier: 1.15,
-      structureBadge: '계단식 셋백 테라스 구조',
-      roofBadge: '밀착 처마 평지붕',
     },
     {
       id: 'L-courtyard',
       name: 'L자 스트리트 갤러리 상가',
-      subtitle: '보행자 중정 광장을 품은 복합 근린생활 건축물',
+      subtitle: '보행자 중정 광장을 품은 복합 근린생활·오피스 건축물',
       concept: 'L자 스트리트 중정 상업시설',
-      roofStyle: 'split-gable',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'steel',
-      wallColor: '#f5f2eb',
-      roofColor: '#334155',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.22,
-      gardenMultiplier: 1.1,
-      structureBadge: 'L자 교차 중정 구조',
-      roofBadge: '밀착 스플릿 지붕',
-    },
-    {
-      id: 'bridge-cantilever',
-      name: '캔틸레버 랜드마크 스튜디오 사옥',
-      subtitle: '1층 코어 위로 상부 오피스 매스가 돌출된 사옥',
-      concept: '캔틸레버 랜드마크 스튜디오 사옥',
-      roofStyle: 'butterfly',
-      primaryMaterial: 'steel',
-      accentMaterial: 'wood',
-      wallColor: '#cbd5e1',
-      roofColor: '#1e293b',
-      interiorTheme: 'industrial-loft',
-      interiorWallColor: '#e2e8f0',
-      interiorFloorColor: '#8d99ae',
-      openPlanRatio: 1.28,
-      gardenMultiplier: 1.0,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
-      roofBadge: '밀착 나비형 역경사지붕',
-    },
-    {
-      id: 'atrium-ring',
-      name: '보이드 아트리움 테크 허브',
-      subtitle: '중앙 채광 아트리움을 중심으로 구성된 업무시설',
-      concept: '보이드 아트리움 테크 허브',
-      roofStyle: 'gable',
-      primaryMaterial: 'glass',
-      accentMaterial: 'concrete',
-      wallColor: '#e0f2fe',
-      roofColor: '#475569',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.3,
-      gardenMultiplier: 1.1,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
-      roofBadge: '밀착 박공 지붕',
     },
   ],
   복합문화시설: [
     {
       id: 'stepped-wing',
       name: '캔틸레버 아트 뮤지엄',
-      subtitle: '역동적인 전시 매스와 테라스를 품은 미술관',
-      concept: '캔틸레버 아트 뮤지엄',
-      roofStyle: 'butterfly',
-      primaryMaterial: 'concrete',
-      accentMaterial: 'glass',
-      wallColor: '#e2e8f0',
-      roofColor: '#334155',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.3,
-      gardenMultiplier: 1.2,
-      structureBadge: '계단식 셋백 테라스 구조',
-      roofBadge: '밀착 나비형 역경사지붕',
+      subtitle: '역동적인 캔틸레버 전시관과 옥상 조각 공원을 품은 미술관',
+      concept: '캔틸레버 아트 뮤지엄 & 조각 공원',
     },
     {
       id: 'U-terrace',
-      name: 'ㄷ자 야외 마당 문화센터',
-      subtitle: '중앙 야외 마당을 둘러싼 전시·도서관 문화공간',
-      concept: 'ㄷ자 야외 마당 복합문화센터',
-      roofStyle: 'shed',
-      primaryMaterial: 'wood',
-      accentMaterial: 'stucco',
-      wallColor: '#d4a373',
-      roofColor: '#475569',
-      interiorTheme: 'warm-wood',
-      interiorWallColor: '#faf6ef',
-      interiorFloorColor: '#c89b6e',
-      openPlanRatio: 1.22,
-      gardenMultiplier: 1.3,
-      structureBadge: 'ㄷ자 아트리움 윙 구조',
-      roofBadge: '밀착 경사지붕',
+      name: 'ㄷ자 야외 원형극장 문화센터',
+      subtitle: '중앙 야외 공연 마당을 둘러싼 전시·도서관 복합 문화공간',
+      concept: 'ㄷ자 야외 공연 마당 복합문화센터',
     },
     {
       id: 'twin-pavilion',
       name: '브릿지 갤러리 파빌리온',
-      subtitle: '수공간과 연결 브릿지가 어우러진 문화 파빌리온',
+      subtitle: '수공간과 공중 전시 브릿지가 어우러진 현대 건축 파빌리온',
       concept: '브릿지 갤러리 문화 파빌리온',
-      roofStyle: 'split-gable',
-      primaryMaterial: 'steel',
-      accentMaterial: 'glass',
-      wallColor: '#cbd5e1',
-      roofColor: '#1e293b',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.28,
-      gardenMultiplier: 1.15,
-      structureBadge: '스카이브릿지 트윈동 구조',
-      roofBadge: '밀착 스플릿 지붕',
-    },
-    {
-      id: 'bridge-cantilever',
-      name: '플로팅 매스 현대미술관',
-      subtitle: '야외 플라자 상공에 전시 매스가 돌출된 미술관',
-      concept: '플로팅 매스 현대미술관',
-      roofStyle: 'flat-overhang',
-      primaryMaterial: 'stucco',
-      accentMaterial: 'concrete',
-      wallColor: '#f5f2eb',
-      roofColor: '#334155',
-      interiorTheme: 'minimal-gallery',
-      interiorWallColor: '#f8fafc',
-      interiorFloorColor: '#cbd5e1',
-      openPlanRatio: 1.3,
-      gardenMultiplier: 1.2,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
-      roofBadge: '밀착 처마 평지붕',
-    },
-    {
-      id: 'atrium-ring',
-      name: '로툰다 채광 도서관·문화원',
-      subtitle: '중앙 채광 아트리움을 따라 공간이 이어지는 문화시설',
-      concept: '로툰다 채광 도서관·문화원',
-      roofStyle: 'gable',
-      primaryMaterial: 'wood',
-      accentMaterial: 'glass',
-      wallColor: '#c89b6e',
-      roofColor: '#475569',
-      interiorTheme: 'japandi',
-      interiorWallColor: '#faf6ef',
-      interiorFloorColor: '#d6b48c',
-      openPlanRatio: 1.25,
-      gardenMultiplier: 1.15,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
-      roofBadge: '밀착 박공 지붕',
     },
   ],
 };
 
 export const FLOOR_COLOR_PALETTE = [
-  '#f5f2eb',
-  '#e6d5be',
-  '#dce3ea',
-  '#ede7dd',
-  '#dde6e1',
-  '#e8e4ec',
+  '#f5f2eb', // 1F 웜 스타코
+  '#e6d5be', // 2F 내추럴 우드/샌드
+  '#dce3ea', // 3F 아키텍처 징크/스틸
+  '#ede7dd', // 4F 라임 플라스터
+  '#dde6e1', // 5F 세이지 스톤
+  '#e8e4ec', // 6F 쿨 미네랄
 ];
 
 export function getFloorColor(floorIndex: number): string {
@@ -500,108 +125,14 @@ export function getFloorColor(floorIndex: number): string {
   return FLOOR_COLOR_PALETTE[(Math.max(1, floorIndex) - 1) % FLOOR_COLOR_PALETTE.length];
 }
 
-// 자유 그린 2D 폴리곤 면적을 Shoelace 공식으로 계산하고, 지정된 siteAreaSqm(㎡)과 동일한 면적으로 정규화
-export function normalizeCustomSitePointsToArea(
-  rawPoints: SitePoint2D[],
-  siteAreaSqm: number
-): {
-  points: [number, number, number][];
-  halfW: number;
-  halfD: number;
-  dominantYaw: number;
-  vertexCount: number;
-} {
-  const SCALE_DIV = 3.2;
-  const targetAreaUnits = Math.max(2.5, Math.min(48, siteAreaSqm / (SCALE_DIV * SCALE_DIV)));
-
-  if (!rawPoints || rawPoints.length < 3) {
-    return getSiteBoundaryPoints(siteAreaSqm, 'rectangle');
-  }
-
-  // 중심 이동
-  let cx = 0;
-  let cz = 0;
-  for (const p of rawPoints) {
-    cx += p.x;
-    cz += p.z;
-  }
-  cx /= rawPoints.length;
-  cz /= rawPoints.length;
-
-  const centered = rawPoints.map((p) => ({ x: p.x - cx, z: p.z - cz }));
-
-  // Shoelace 면적 계산
-  let signedArea2 = 0;
-  for (let i = 0; i < centered.length; i++) {
-    const a = centered[i];
-    const b = centered[(i + 1) % centered.length];
-    signedArea2 += a.x * b.z - b.x * a.z;
-  }
-  const currentArea = Math.abs(signedArea2) * 0.5;
-  const scaleFactor =
-    currentArea > 1e-4 ? Math.sqrt(targetAreaUnits / currentArea) : Math.sqrt(targetAreaUnits / 6);
-
-  const scaled = centered.map((p) => ({
-    x: Number((p.x * scaleFactor).toFixed(3)),
-    z: Number((p.z * scaleFactor).toFixed(3)),
-  }));
-
-  // 최장 변 기준 대지 방향각 계산 (대지 경계에 맞춰 집이 정렬되도록 활용)
-  let maxEdgeLen = 0;
-  let dominantYaw = 0;
-  for (let i = 0; i < scaled.length; i++) {
-    const a = scaled[i];
-    const b = scaled[(i + 1) % scaled.length];
-    const dx = b.x - a.x;
-    const dz = b.z - a.z;
-    const len = Math.hypot(dx, dz);
-    if (len > maxEdgeLen) {
-      maxEdgeLen = len;
-      dominantYaw = Math.atan2(-dz, dx);
-    }
-  }
-
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minZ = Infinity;
-  let maxZ = -Infinity;
-  for (const p of scaled) {
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
-    if (p.z < minZ) minZ = p.z;
-    if (p.z > maxZ) maxZ = p.z;
-  }
-
-  const halfW = Math.max(0.6, (maxX - minX) * 0.5);
-  const halfD = Math.max(0.6, (maxZ - minZ) * 0.5);
-
-  const pts: [number, number, number][] = scaled.map((p) => [p.x, 0.015, p.z]);
-  pts.push([scaled[0].x, 0.015, scaled[0].z]);
-
-  return {
-    points: pts,
-    halfW: Number(halfW.toFixed(3)),
-    halfD: Number(halfD.toFixed(3)),
-    dominantYaw: Number(dominantYaw.toFixed(4)),
-    vertexCount: scaled.length,
-  };
-}
-
 export function getSiteBoundaryPoints(
   siteAreaSqm: number,
-  siteShape: SiteShape = 'rectangle',
-  customSitePoints?: SitePoint2D[]
+  siteShape: SiteShape = 'rectangle'
 ): {
   points: [number, number, number][];
   halfW: number;
   halfD: number;
-  dominantYaw: number;
-  vertexCount: number;
 } {
-  if (siteShape === 'freeform' && customSitePoints && customSitePoints.length >= 3) {
-    return normalizeCustomSitePointsToArea(customSitePoints, siteAreaSqm);
-  }
-
   const SCALE_DIV = 3.2;
   const areaUnits = Math.max(2.5, Math.min(48, siteAreaSqm / (SCALE_DIV * SCALE_DIV)));
 
@@ -613,7 +144,7 @@ export function getSiteBoundaryPoints(
       const a = (i / segs) * Math.PI * 2;
       pts.push([Number((Math.cos(a) * r).toFixed(3)), 0.015, Number((Math.sin(a) * r).toFixed(3))]);
     }
-    return { points: pts, halfW: r, halfD: r, dominantYaw: 0, vertexCount: 48 };
+    return { points: pts, halfW: r, halfD: r };
   }
 
   if (siteShape === 'triangle') {
@@ -628,10 +159,8 @@ export function getSiteBoundaryPoints(
         [-hw, 0.015, hd],
         [0, 0.015, -hd],
       ],
-      halfW: hw * 0.72,
-      halfD: hd * 0.68,
-      dominantYaw: 0,
-      vertexCount: 3,
+      halfW: hw * 0.78,
+      halfD: hd * 0.72,
     };
   }
 
@@ -649,10 +178,8 @@ export function getSiteBoundaryPoints(
         [-botHalf, 0.015, hd],
         [-topHalf, 0.015, -hd],
       ],
-      halfW: avgW * 0.44,
+      halfW: avgW * 0.46,
       halfD: hd,
-      dominantYaw: 0,
-      vertexCount: 4,
     };
   }
 
@@ -670,8 +197,6 @@ export function getSiteBoundaryPoints(
     ],
     halfW: hw,
     halfD: hd,
-    dominantYaw: 0,
-    vertexCount: 4,
   };
 }
 
@@ -679,23 +204,21 @@ export function getDefaultSpecForCategory(
   category: Exclude<DesignCategory, '3D 디자인'>,
   templateId?: BuildingTemplateId
 ): BuildingSpec {
-  const tplList = BUILDING_TEMPLATES_BY_CATEGORY[category];
-  const defaultTpl = templateId ?? tplList[0].id;
-  const tplObj = tplList.find((t) => t.id === defaultTpl) ?? tplList[0];
+  const defaultTpl = templateId ?? BUILDING_TEMPLATES_BY_CATEGORY[category][0].id;
+  const tplObj =
+    BUILDING_TEMPLATES_BY_CATEGORY[category].find((t) => t.id === defaultTpl) ??
+    BUILDING_TEMPLATES_BY_CATEGORY[category][0];
 
   if (category === '단독주택') {
     return {
       projectName: `AirForge ${tplObj.name}`,
       usageType: '단독주택',
       templateId: tplObj.id,
-      selectedTemplateName: tplObj.name,
-      dynamicTemplates: tplList,
-      roofStyle: tplObj.roofStyle,
-      accentMaterial: tplObj.accentMaterial,
-      interiorTheme: tplObj.interiorTheme,
-      interiorWallColor: tplObj.interiorWallColor,
-      interiorFloorColor: tplObj.interiorFloorColor,
-      openPlanRatio: tplObj.openPlanRatio,
+      roofStyle: 'flat-overhang',
+      accentMaterial: 'wood',
+      interiorTheme: 'warm-wood',
+      interiorWallColor: '#faf7f2',
+      interiorFloorColor: '#c89b6e',
       siteShape: 'rectangle',
       useHouseholds: true,
       siteAreaSqm: 450,
@@ -719,14 +242,11 @@ export function getDefaultSpecForCategory(
       projectName: `AirForge ${tplObj.name}`,
       usageType: '공동주택',
       templateId: tplObj.id,
-      selectedTemplateName: tplObj.name,
-      dynamicTemplates: tplList,
-      roofStyle: tplObj.roofStyle,
-      accentMaterial: tplObj.accentMaterial,
-      interiorTheme: tplObj.interiorTheme,
-      interiorWallColor: tplObj.interiorWallColor,
-      interiorFloorColor: tplObj.interiorFloorColor,
-      openPlanRatio: tplObj.openPlanRatio,
+      roofStyle: 'flat-overhang',
+      accentMaterial: 'wood',
+      interiorTheme: 'minimal-gallery',
+      interiorWallColor: '#f8fafc',
+      interiorFloorColor: '#d4a373',
       siteShape: 'rectangle',
       useHouseholds: true,
       siteAreaSqm: 1400,
@@ -750,14 +270,11 @@ export function getDefaultSpecForCategory(
       projectName: `AirForge ${tplObj.name}`,
       usageType: '업무·상업시설',
       templateId: tplObj.id,
-      selectedTemplateName: tplObj.name,
-      dynamicTemplates: tplList,
-      roofStyle: tplObj.roofStyle,
-      accentMaterial: tplObj.accentMaterial,
-      interiorTheme: tplObj.interiorTheme,
-      interiorWallColor: tplObj.interiorWallColor,
-      interiorFloorColor: tplObj.interiorFloorColor,
-      openPlanRatio: tplObj.openPlanRatio,
+      roofStyle: 'shed',
+      accentMaterial: 'steel',
+      interiorTheme: 'industrial-loft',
+      interiorWallColor: '#f1f5f9',
+      interiorFloorColor: '#94a3b8',
       siteShape: 'rectangle',
       useHouseholds: false,
       siteAreaSqm: 1200,
@@ -780,14 +297,11 @@ export function getDefaultSpecForCategory(
     projectName: `AirForge ${tplObj.name}`,
     usageType: '복합문화시설',
     templateId: tplObj.id,
-    selectedTemplateName: tplObj.name,
-    dynamicTemplates: tplList,
-    roofStyle: tplObj.roofStyle,
-    accentMaterial: tplObj.accentMaterial,
-    interiorTheme: tplObj.interiorTheme,
-    interiorWallColor: tplObj.interiorWallColor,
-    interiorFloorColor: tplObj.interiorFloorColor,
-    openPlanRatio: tplObj.openPlanRatio,
+    roofStyle: 'butterfly',
+    accentMaterial: 'glass',
+    interiorTheme: 'minimal-gallery',
+    interiorWallColor: '#f8fafc',
+    interiorFloorColor: '#cbd5e1',
     siteShape: 'rectangle',
     useHouseholds: false,
     siteAreaSqm: 1600,
@@ -807,6 +321,7 @@ export function getDefaultSpecForCategory(
   };
 }
 
+// 건물의 용도·면적·비율·템플릿·사진 개방감(openPlanRatio)에 따라 동적 방 평면 재설계
 export function generateDynamicRoomLayout(params: {
   usageType: DesignCategory;
   templateId: BuildingTemplateId;
@@ -828,14 +343,14 @@ export function generateDynamicRoomLayout(params: {
     openPlanRatio = 1.0,
   } = params;
 
-  const altOrder: BuildingTemplateId[] = [
-    templateId,
-    'U-terrace',
-    'atrium-ring',
-    'bridge-cantilever',
-    'split-gable',
-  ];
-  const effectiveLayout: BuildingTemplateId = altOrder[variantIdx % altOrder.length];
+  const effectiveLayout: BuildingTemplateId =
+    variantIdx === 0
+      ? templateId
+      : variantIdx === 1
+      ? 'U-terrace'
+      : variantIdx === 2
+      ? 'stepped-wing'
+      : 'L-courtyard';
 
   const clampedRatio = Math.max(0.68, Math.min(1.42, aspectRatio || 1.15));
   const pw = clampedRatio >= 1 ? 92 : Math.round(92 * clampedRatio);
@@ -878,77 +393,62 @@ export function generateDynamicRoomLayout(params: {
     };
   }
 
-  if (effectiveLayout === 'atrium-ring' || effectiveLayout === 'courtyard-pavilion') {
+  // 소형 스튜디오 OR 사진에서 개방형 로프트/갤러리 특성이 강하게 감지된 경우
+  if (areaSqm < 48 || (openPlanRatio > 1.15 && areaSqm < 75)) {
     return {
       planLayout: effectiveLayout,
-      efficiencyPct: 87,
+      efficiencyPct: 92,
       rooms: [
-        { name: '갤러리 거실 라운지', x: rx(0), y: ry(0), w: rw(36), h: rh(66), liveLoadKn: 2.0, windows: ['N', 'W'], hasPower: true },
-        { name: '중앙 채광 아트리움', x: rx(36), y: ry(18), w: rw(28), h: rh(48), liveLoadKn: 3.0, windows: ['N'] },
-        { name: '아일랜드 키친·다이닝', x: rx(0), y: ry(66), w: rw(48), h: rh(34), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true, hasPower: true },
-        { name: '마스터 침실 스위트', x: rx(64), y: ry(0), w: rw(36), h: rh(56), liveLoadKn: 2.0, windows: ['N', 'E'], hasPower: true },
-        { name: '서재·프라이빗 욕실', x: rx(48), y: ry(66), w: rw(52), h: rh(34), liveLoadKn: 2.0, windows: ['E', 'S'], hasWater: true, hasPower: true },
+        { name: '광폭 오픈 LDK·침실', x: rx(0), y: ry(0), w: rw(68), h: rh(74), liveLoadKn: 2.0, windows: ['N', 'W'], hasPower: true },
+        { name: '아일랜드 주방', x: rx(68), y: ry(0), w: rw(32), h: rh(48), liveLoadKn: 2.0, windows: ['N', 'E'], hasWater: true, hasPower: true },
+        { name: '욕실·드레스코어', x: rx(68), y: ry(48), w: rw(32), h: rh(52), liveLoadKn: 2.0, windows: ['E', 'S'], hasWater: true },
+        { name: '전면 테라스 데크', x: rx(0), y: ry(74), w: rw(68), h: rh(26), liveLoadKn: 3.0, windows: ['S', 'W'] },
       ],
     };
   }
 
-  if (effectiveLayout === 'twin-pavilion' || effectiveLayout === 'split-gable') {
+  if (areaSqm < 95) {
+    if (effectiveLayout === 'U-terrace') {
+      return {
+        planLayout: 'U-terrace',
+        efficiencyPct: 88,
+        rooms: [
+          { name: '거실 라운지', x: rx(0), y: ry(0), w: rw(34), h: rh(62), liveLoadKn: 2.0, windows: ['N', 'W'], hasPower: true },
+          { name: '대면형 주방·식당', x: rx(0), y: ry(62), w: rw(44), h: rh(38), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true, hasPower: true },
+          { name: '공용 욕실·다용도', x: rx(44), y: ry(62), w: rw(22), h: rh(38), liveLoadKn: 2.0, windows: ['S'], hasWater: true },
+          { name: '마스터 침실', x: rx(66), y: ry(0), w: rw(34), h: rh(54), liveLoadKn: 2.0, windows: ['N', 'E'], hasPower: true },
+          { name: '서브 침실·서재', x: rx(66), y: ry(54), w: rw(34), h: rh(46), liveLoadKn: 2.0, windows: ['E', 'S'], hasPower: true },
+          { name: '중앙 중정 테라스', x: rx(34), y: ry(0), w: rw(32), h: rh(62), liveLoadKn: 3.0, windows: ['N'] },
+        ],
+      };
+    }
+
     return {
       planLayout: effectiveLayout,
       efficiencyPct: 89,
       rooms: [
-        { name: '서측 파노라마 거실', x: rx(0), y: ry(0), w: rw(40), h: rh(62), liveLoadKn: 2.0, windows: ['N', 'W'], hasPower: true },
-        { name: '서측 오픈 키친', x: rx(0), y: ry(62), w: rw(40), h: rh(38), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true, hasPower: true },
-        { name: '스카이 브릿지 서재', x: rx(40), y: ry(24), w: rw(20), h: rh(46), liveLoadKn: 2.0, windows: ['N', 'S'], hasPower: true },
-        { name: '동측 마스터 침실', x: rx(60), y: ry(0), w: rw(40), h: rh(58), liveLoadKn: 2.0, windows: ['N', 'E'], hasPower: true },
-        { name: '동측 욕실·드레스룸', x: rx(60), y: ry(58), w: rw(40), h: rh(42), liveLoadKn: 2.0, windows: ['E', 'S'], hasWater: true },
-      ],
-    };
-  }
-
-  if (
-    areaSqm < 48 ||
-    effectiveLayout === 'bridge-cantilever' ||
-    effectiveLayout === 'cantilever-studio' ||
-    openPlanRatio > 1.2
-  ) {
-    return {
-      planLayout: effectiveLayout,
-      efficiencyPct: 91,
-      rooms: [
-        { name: '광폭 캔틸레버 거실', x: rx(0), y: ry(0), w: rw(66), h: rh(70), liveLoadKn: 2.0, windows: ['N', 'W'], hasPower: true },
-        { name: '아일랜드 주방·바', x: rx(66), y: ry(0), w: rw(34), h: rh(46), liveLoadKn: 2.0, windows: ['N', 'E'], hasWater: true, hasPower: true },
-        { name: '침실·욕실 코어', x: rx(66), y: ry(46), w: rw(34), h: rh(54), liveLoadKn: 2.0, windows: ['E', 'S'], hasWater: true, hasPower: true },
-        { name: '전면 캔틸레버 테라스', x: rx(0), y: ry(70), w: rw(66), h: rh(30), liveLoadKn: 3.0, windows: ['S', 'W'] },
-      ],
-    };
-  }
-
-  if (effectiveLayout === 'U-terrace') {
-    return {
-      planLayout: 'U-terrace',
-      efficiencyPct: 88,
-      rooms: [
-        { name: '거실 라운지', x: rx(0), y: ry(0), w: rw(34), h: rh(62), liveLoadKn: 2.0, windows: ['N', 'W'], hasPower: true },
-        { name: '대면형 주방·식당', x: rx(0), y: ry(62), w: rw(44), h: rh(38), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true, hasPower: true },
-        { name: '공용 욕실·다용도', x: rx(44), y: ry(62), w: rw(22), h: rh(38), liveLoadKn: 2.0, windows: ['S'], hasWater: true },
-        { name: '마스터 침실', x: rx(66), y: ry(0), w: rw(34), h: rh(54), liveLoadKn: 2.0, windows: ['N', 'E'], hasPower: true },
-        { name: '서브 침실·서재', x: rx(66), y: ry(54), w: rw(34), h: rh(46), liveLoadKn: 2.0, windows: ['E', 'S'], hasPower: true },
-        { name: '중앙 중정 테라스', x: rx(34), y: ry(0), w: rw(32), h: rh(62), liveLoadKn: 3.0, windows: ['N'] },
+        { name: '파노라마 거실', x: rx(0), y: ry(16), w: rw(52), h: rh(46), liveLoadKn: 2.0, windows: ['W'], hasPower: true },
+        { name: '아일랜드 주방', x: rx(0), y: ry(62), w: rw(38), h: rh(38), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true, hasPower: true },
+        { name: '욕실·수전코어', x: rx(38), y: ry(62), w: rw(18), h: rh(38), liveLoadKn: 2.0, windows: ['S'], hasWater: true },
+        { name: '마스터 침실', x: rx(56), y: ry(46), w: rw(44), h: rh(54), liveLoadKn: 2.0, windows: ['E', 'S'], hasPower: true },
+        { name: '중정 야외 데크', x: rx(52), y: ry(0), w: rw(48), h: rh(46), liveLoadKn: 3.0, windows: ['N', 'E'] },
+        { name: '북측 선큰 테라스', x: rx(0), y: ry(0), w: rw(52), h: rh(16), liveLoadKn: 3.0, windows: ['N'] },
       ],
     };
   }
 
   return {
     planLayout: effectiveLayout,
-    efficiencyPct: 89,
+    efficiencyPct: 86,
     rooms: [
-      { name: '파노라마 거실', x: rx(0), y: ry(16), w: rw(52), h: rh(46), liveLoadKn: 2.0, windows: ['W'], hasPower: true },
-      { name: '아일랜드 주방', x: rx(0), y: ry(62), w: rw(38), h: rh(38), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true, hasPower: true },
-      { name: '욕실·수전코어', x: rx(38), y: ry(62), w: rw(18), h: rh(38), liveLoadKn: 2.0, windows: ['S'], hasWater: true },
-      { name: '마스터 침실', x: rx(56), y: ry(46), w: rw(44), h: rh(54), liveLoadKn: 2.0, windows: ['E', 'S'], hasPower: true },
-      { name: '중정 야외 데크', x: rx(52), y: ry(0), w: rw(48), h: rh(46), liveLoadKn: 3.0, windows: ['N', 'E'] },
-      { name: '북측 선큰 테라스', x: rx(0), y: ry(0), w: rw(52), h: rh(16), liveLoadKn: 3.0, windows: ['N'] },
+      { name: '광폭 LDK 거실', x: rx(16), y: ry(14), w: rw(52), h: rh(44), liveLoadKn: 2.0, windows: ['N'], hasPower: true },
+      { name: '다이닝·오픈 키친', x: rx(16), y: ry(58), w: rw(34), h: rh(42), liveLoadKn: 2.0, windows: ['S'], hasWater: true, hasPower: true },
+      { name: '서측 서재·게스트룸', x: rx(0), y: ry(14), w: rw(16), h: rh(62), liveLoadKn: 2.0, windows: ['W'], hasPower: true },
+      { name: '공용 욕실·런드리', x: rx(0), y: ry(76), w: rw(16), h: rh(24), liveLoadKn: 2.0, windows: ['W', 'S'], hasWater: true },
+      { name: '마스터 스위트 침실', x: rx(50), y: ry(58), w: rw(32), h: rh(42), liveLoadKn: 2.0, windows: ['S'], hasPower: true },
+      { name: '드레스룸·부부욕실', x: rx(82), y: ry(58), w: rw(18), h: rh(42), liveLoadKn: 2.0, windows: ['E', 'S'], hasWater: true },
+      { name: '자녀 침실 2', x: rx(68), y: ry(26), w: rw(32), h: rh(32), liveLoadKn: 2.0, windows: ['E'], hasPower: true },
+      { name: '스카이 중정 데크', x: rx(68), y: ry(0), w: rw(32), h: rh(26), liveLoadKn: 3.5, windows: ['N', 'E'] },
     ],
   };
 }
@@ -988,17 +488,10 @@ export function generateWatertightArchitecture(
   const undergroundFloors = Math.max(0, Math.min(5, Math.round(rawSpec.undergroundFloors || 0)));
 
   const SCALE_DIV = 3.2;
-  const siteMeta = getSiteBoundaryPoints(
+  const { halfW: siteHalfW, halfD: siteHalfD } = getSiteBoundaryPoints(
     rawSpec.siteAreaSqm || 450,
-    siteShape,
-    rawSpec.customSitePoints
+    siteShape
   );
-  const { halfW: siteHalfW, halfD: siteHalfD, dominantYaw, vertexCount } = siteMeta;
-
-  // 대지 경계 형태(꼭짓점 수·폭/깊이 비율·방향각)에 따라 집의 평면 비율·캔틸레버·배치도 함께 변형
-  const siteRatio = siteHalfW / Math.max(0.5, siteHalfD);
-  const isFreeformPoly = siteShape === 'freeform' && vertexCount >= 3;
-  const polyBendFactor = isFreeformPoly ? (((vertexCount - 3) % 5) - 2) * 0.06 : 0;
 
   const effectiveFootprintSqm = Math.max(
     45,
@@ -1008,26 +501,20 @@ export function generateWatertightArchitecture(
     )
   );
   const footprintUnits = effectiveFootprintSqm / (SCALE_DIV * SCALE_DIV);
-
-  const tplAspectBoost =
-    templateId === 'twin-pavilion' || templateId === 'split-gable'
-      ? 1.24
-      : templateId === 'bridge-cantilever' || templateId === 'cantilever-studio'
-      ? 1.18
-      : templateId === 'U-terrace' || templateId === 'courtyard-pavilion'
-      ? 1.12
-      : 1.04;
-
-  const ratioAspect = Math.max(
-    0.58,
-    Math.min(1.85, siteRatio * 0.65 + tplAspectBoost * 0.35 + polyBendFactor)
-  );
+  const ratioAspect =
+    templateId === 'twin-pavilion'
+      ? 1.38
+      : templateId === 'U-terrace'
+      ? 1.28
+      : templateId === 'L-courtyard'
+      ? 1.22
+      : 1.15;
 
   let bldgW = Math.sqrt(footprintUnits * ratioAspect);
   let bldgD = footprintUnits / bldgW;
 
-  const maxAllowedW = siteHalfW * 1.44;
-  const maxAllowedD = siteHalfD * 1.44;
+  const maxAllowedW = siteHalfW * 1.48;
+  const maxAllowedD = siteHalfD * 1.48;
   if (bldgW > maxAllowedW) {
     bldgW = maxAllowedW;
     bldgD = Math.min(maxAllowedD, footprintUnits / bldgW);
@@ -1036,8 +523,8 @@ export function generateWatertightArchitecture(
     bldgD = maxAllowedD;
     bldgW = Math.min(maxAllowedW, footprintUnits / bldgD);
   }
-  bldgW = Number(Math.max(1.5, bldgW).toFixed(3));
-  bldgD = Number(Math.max(1.3, bldgD).toFixed(3));
+  bldgW = Number(Math.max(1.6, bldgW).toFixed(3));
+  bldgD = Number(Math.max(1.4, bldgD).toFixed(3));
 
   const totalHeightUnits = Number(
     Math.max(0.95, Math.min(12.0, (rawSpec.heightMeters || 7.2) / SCALE_DIV)).toFixed(3)
@@ -1059,8 +546,8 @@ export function generateWatertightArchitecture(
     Math.round(rawSpec.totalFloorAreaSqm / Math.max(1, useHouseholds ? activeHouseholds : floors))
   );
 
-  const freeSpaceX = Math.max(0, siteHalfW * 1.75 - bldgW);
-  const bldgOffsetX = Number((-freeSpaceX * 0.22).toFixed(3));
+  const freeSpaceX = Math.max(0, siteHalfW * 1.85 - bldgW);
+  const bldgOffsetX = Number((-freeSpaceX * 0.28).toFixed(3));
   const bldgOffsetZ = 0;
 
   // 1. 지하층 볼륨
@@ -1077,7 +564,6 @@ export function generateWatertightArchitecture(
       shape: 'box',
       position: [bldgOffsetX, -ugH * 0.5, bldgOffsetZ],
       scale: [Number((bldgW * ugRatio).toFixed(3)), ugH, Number((bldgD * ugRatio).toFixed(3))],
-      rotation: [0, dominantYaw, 0],
       color: '#94a3b8',
       material: 'concrete',
       isFixed: true,
@@ -1085,20 +571,20 @@ export function generateWatertightArchitecture(
     });
   }
 
-  // 2. 대지 여백 기반 정원 조경 배치
+  // 2. 유동적 정원 조경 배치
   const gardenReqSqm = Math.max(0, rawSpec.gardenAreaSqm || 0);
   const gardenUnitsReq = gardenReqSqm / (SCALE_DIV * SCALE_DIV);
   const bldgRightEdge = bldgOffsetX + bldgW * 0.5;
   const bldgFrontEdge = bldgOffsetZ + bldgD * 0.5;
 
-  const rightStripW = Math.max(0, siteHalfW * 0.9 - bldgRightEdge - 0.12);
-  const frontStripD = Math.max(0, siteHalfD * 0.9 - bldgFrontEdge - 0.12);
+  const rightStripW = Math.max(0, siteHalfW * 0.92 - bldgRightEdge - 0.12);
+  const frontStripD = Math.max(0, siteHalfD * 0.92 - bldgFrontEdge - 0.12);
   let placedGardenUnits = 0;
 
-  if (gardenUnitsReq > 0.05 && rightStripW > 0.22) {
-    const maxRightD = Math.min(siteHalfD * 1.5, bldgD + frontStripD * 0.6);
-    const gW = Number(Math.min(rightStripW, Math.max(0.32, gardenUnitsReq / maxRightD)).toFixed(3));
-    const gD = Number(Math.min(maxRightD, Math.max(0.38, gardenUnitsReq / gW)).toFixed(3));
+  if (gardenUnitsReq > 0.05 && rightStripW > 0.25) {
+    const maxRightD = Math.min(siteHalfD * 1.55, bldgD + frontStripD * 0.6);
+    const gW = Number(Math.min(rightStripW, Math.max(0.35, gardenUnitsReq / maxRightD)).toFixed(3));
+    const gD = Number(Math.min(maxRightD, Math.max(0.4, gardenUnitsReq / gW)).toFixed(3));
     const gX = Number((bldgRightEdge + 0.08 + gW * 0.5).toFixed(3));
 
     solids.push({
@@ -1108,7 +594,6 @@ export function generateWatertightArchitecture(
       shape: 'box',
       position: [gX, 0.025, 0],
       scale: [gW, 0.05, gD],
-      rotation: [0, dominantYaw, 0],
       color: '#4d7c0f',
       material: 'stucco',
       isFixed: true,
@@ -1118,10 +603,10 @@ export function generateWatertightArchitecture(
   }
 
   const remAfterSide = gardenUnitsReq - placedGardenUnits;
-  if (remAfterSide > 0.08 && frontStripD > 0.2) {
-    const maxFrontW = Math.min(siteHalfW * 1.6, bldgW + rightStripW * 0.7);
-    const fD = Number(Math.min(frontStripD, Math.max(0.26, remAfterSide / maxFrontW)).toFixed(3));
-    const fW = Number(Math.min(maxFrontW, Math.max(0.45, remAfterSide / fD)).toFixed(3));
+  if (remAfterSide > 0.08 && frontStripD > 0.22) {
+    const maxFrontW = Math.min(siteHalfW * 1.65, bldgW + rightStripW * 0.7);
+    const fD = Number(Math.min(frontStripD, Math.max(0.28, remAfterSide / maxFrontW)).toFixed(3));
+    const fW = Number(Math.min(maxFrontW, Math.max(0.5, remAfterSide / fD)).toFixed(3));
     const fZ = Number((bldgFrontEdge + 0.08 + fD * 0.5).toFixed(3));
 
     solids.push({
@@ -1131,15 +616,15 @@ export function generateWatertightArchitecture(
       shape: 'box',
       position: [bldgOffsetX, 0.025, fZ],
       scale: [fW, 0.05, fD],
-      rotation: [0, dominantYaw, 0],
       color: '#4d7c0f',
       material: 'stucco',
       isFixed: true,
       floorIndex: 0,
     });
+    placedGardenUnits += fW * fD;
   }
 
-  // 3. 10종 템플릿 & 대지 경계 연동 층별 매스·외피·실내 벽체·가구 생성
+  // 3. 층별 구조·매스·마감재 차별화 + 실내 바닥/내벽/가구 조립
   const slabThick = 0.07;
   const extWallThick = 0.09;
   const intWallThick = 0.045;
@@ -1147,6 +632,8 @@ export function generateWatertightArchitecture(
   let topFloorD = bldgD;
   let topFloorCx = bldgOffsetX;
   let topFloorCz = bldgOffsetZ;
+
+  // 층별 실내 방 구획 저장 (배관 라우팅에 재활용)
   let firstFloorIndoorRooms: UnitRoomZone[] = [];
 
   for (let f = 1; f <= floors; f++) {
@@ -1155,6 +642,7 @@ export function generateWatertightArchitecture(
     const clearWallH = Math.max(0.28, floorH - slabThick);
     const wallCenterY = floorBaseY + slabThick + clearWallH * 0.5;
 
+    // 1층은 주 외장재(baseMaterial), 2층 이상은 사진/템플릿에서 추출된 상층 포인트 외장재(accentMaterial) 교차 적용
     const floorMat: CadMaterial = f === 1 ? baseMaterial : accentMaterial;
     const floorColor =
       f === 1
@@ -1167,6 +655,7 @@ export function generateWatertightArchitecture(
         ? '#cbd5e1'
         : getFloorColor(f);
 
+    // 층마다 다른 구조적 매스 변형 (캔틸레버 돌출 / 테라스 셋백 / L자·ㄷ자 교차)
     let stepFactorX = 1.0;
     let stepFactorZ = 1.0;
     let stepShiftX = 0;
@@ -1174,40 +663,28 @@ export function generateWatertightArchitecture(
 
     if (templateId === 'L-courtyard') {
       if (f % 2 === 0) {
-        stepFactorX = 0.84;
-        stepFactorZ = 1.12;
+        stepFactorX = 0.86;
+        stepFactorZ = 1.08;
         stepShiftX = -bldgW * 0.09;
         stepShiftZ = bldgD * 0.05;
       }
-    } else if (templateId === 'U-terrace' || templateId === 'courtyard-pavilion') {
+    } else if (templateId === 'U-terrace') {
       if (f > 1) {
         stepFactorX = Math.max(0.76, 1 - (f - 1) * 0.06);
-        stepFactorZ = 0.84;
+        stepFactorZ = 0.86;
         stepShiftZ = -bldgD * 0.07;
       }
     } else if (templateId === 'stepped-wing') {
       stepFactorX = Math.max(0.68, 1 - (f - 1) * 0.08);
       stepFactorZ = Math.max(0.74, 1 - (f - 1) * 0.05);
       stepShiftX = (f % 2 === 0 ? 1 : -1) * Math.min(0.18, (f - 1) * 0.09);
-    } else if (templateId === 'bridge-cantilever' || templateId === 'cantilever-studio') {
-      if (f === 1) {
-        stepFactorX = 0.6;
-        stepFactorZ = 0.8;
-        stepShiftX = -bldgW * 0.12;
-      } else {
-        stepFactorX = 1.16;
-        stepFactorZ = 0.96;
-        stepShiftX = bldgW * 0.05;
-      }
     } else if (templateId === 'twin-pavilion') {
-      stepFactorX = f === 1 ? 0.96 : 1.05;
-      stepFactorZ = f === 1 ? 0.88 : 0.94;
-    } else if (templateId === 'split-gable') {
-      stepFactorX = f === 1 ? 0.98 : 0.92;
-      stepShiftX = f % 2 === 0 ? bldgW * 0.04 : -bldgW * 0.04;
-    } else if (templateId === 'atrium-ring' || templateId === 'gable-garden') {
-      stepFactorX = 1.0;
-      stepFactorZ = 1.0;
+      if (f === 1) {
+        stepFactorX = 0.94;
+      } else {
+        stepFactorX = 1.06; // 2층 스카이 브릿지 캔틸레버 확장
+        stepFactorZ = 0.88;
+      }
     }
 
     const curW = Number((bldgW * stepFactorX).toFixed(3));
@@ -1222,7 +699,7 @@ export function generateWatertightArchitecture(
       topFloorCz = cz;
     }
 
-    // 층 바닥 구조 슬래브
+    // 층별 바닥 구조 슬래브
     solids.push({
       id: `floor_${f}_slab`,
       groupName: `${f}층 바닥 슬래브 (${floorMat.toUpperCase()})`,
@@ -1230,14 +707,13 @@ export function generateWatertightArchitecture(
       shape: 'box',
       position: [cx, Number((floorBaseY + slabThick * 0.5).toFixed(3)), cz],
       scale: [curW, slabThick, curD],
-      rotation: [0, dominantYaw, 0],
       color: floorColor,
       material: floorMat,
       isFixed: true,
       floorIndex: f,
     });
 
-    // 실내 마감 바닥판
+    // 실내 마감 바닥판 (실내 투시 뷰에서 따뜻한 원목 마루 / 타일 / 폴리싱 콘크리트 마감 표현)
     const usableW = curW - extWallThick * 2;
     const usableD = curD - extWallThick * 2;
     const floorFinishMat: CadMaterial =
@@ -1250,65 +726,13 @@ export function generateWatertightArchitecture(
       shape: 'box',
       position: [cx, Number((floorBaseY + slabThick + 0.008).toFixed(3)), cz],
       scale: [Number(usableW.toFixed(3)), 0.014, Number(usableD.toFixed(3))],
-      rotation: [0, dominantYaw, 0],
       color: interiorFloorColor,
       material: floorFinishMat,
       isFixed: true,
       floorIndex: f,
     });
 
-    if (templateId === 'twin-pavilion' && f >= 2) {
-      solids.push({
-        id: `floor_${f}_sky_bridge`,
-        groupName: `${f}층 글라스 스카이브릿지`,
-        partRole: 'unit_divider',
-        shape: 'box',
-        position: [cx, Number(wallCenterY.toFixed(3)), cz],
-        scale: [
-          Number((curW * 0.24).toFixed(3)),
-          Number(clearWallH.toFixed(3)),
-          Number((curD * 0.62).toFixed(3)),
-        ],
-        rotation: [0, dominantYaw, 0],
-        color: '#bae6fd',
-        material: 'glass',
-        isFixed: true,
-        floorIndex: f,
-      });
-    } else if (templateId === 'atrium-ring') {
-      solids.push({
-        id: `floor_${f}_atrium_void`,
-        groupName: `${f}층 중앙 채광 아트리움 유리 코어`,
-        partRole: 'unit_divider',
-        shape: 'box',
-        position: [cx, Number(wallCenterY.toFixed(3)), cz],
-        scale: [
-          Number((curW * 0.26).toFixed(3)),
-          Number(clearWallH.toFixed(3)),
-          Number((curD * 0.28).toFixed(3)),
-        ],
-        rotation: [0, dominantYaw, 0],
-        color: '#bae6fd',
-        material: 'glass',
-        isFixed: true,
-        floorIndex: f,
-      });
-    } else if ((templateId === 'bridge-cantilever' || templateId === 'cantilever-studio') && f === 1) {
-      solids.push({
-        id: `floor_1_pilotis_plaza`,
-        groupName: '1층 캔틸레버 하부 데크',
-        partRole: 'slab',
-        shape: 'box',
-        position: [Number((bldgOffsetX + bldgW * 0.26).toFixed(3)), 0.03, cz],
-        scale: [Number((bldgW * 0.54).toFixed(3)), 0.05, curD],
-        rotation: [0, dominantYaw, 0],
-        color: '#b45309',
-        material: 'wood',
-        isFixed: true,
-        floorIndex: 1,
-      });
-    }
-
+    // 2층 이상 셋백 구간에 야외 우드 테라스 데크 자동 생성
     if (f > 1 && curD < bldgD * 0.94) {
       const deckD = Number(((bldgD - curD) * 0.85).toFixed(3));
       solids.push({
@@ -1316,13 +740,8 @@ export function generateWatertightArchitecture(
         groupName: `${f}층 야외 테라스 데크`,
         partRole: 'slab',
         shape: 'box',
-        position: [
-          cx,
-          Number((floorBaseY + slabThick * 0.5).toFixed(3)),
-          Number((cz + curD * 0.5 + deckD * 0.45).toFixed(3)),
-        ],
+        position: [cx, Number((floorBaseY + slabThick * 0.5).toFixed(3)), Number((cz + curD * 0.5 + deckD * 0.45).toFixed(3))],
         scale: [curW, slabThick * 0.85, deckD],
-        rotation: [0, dominantYaw, 0],
         color: '#b45309',
         material: 'wood',
         isFixed: true,
@@ -1330,10 +749,9 @@ export function generateWatertightArchitecture(
       });
     }
 
-    // 층 천장 슬래브/상부 마감벽이 floorTopY까지 빈틈없이 이어지도록 구성
-    const sillH = Number((clearWallH * 0.22).toFixed(3));
-    const headerH = Number((clearWallH * 0.22).toFixed(3));
-    const winH = Number(Math.max(0.08, clearWallH - sillH - headerH).toFixed(3));
+    const sillH = Number((clearWallH * 0.24).toFixed(3));
+    const headerH = Number((clearWallH * 0.2).toFixed(3));
+    const winH = Number((clearWallH - sillH - headerH).toFixed(3));
     const winMidY = Number((floorBaseY + slabThick + sillH + winH * 0.5).toFixed(3));
 
     const minX = cx - curW * 0.5;
@@ -1341,6 +759,7 @@ export function generateWatertightArchitecture(
     const minZ = cz - curD * 0.5;
     const maxZ = cz + curD * 0.5;
 
+    // 남·북 외벽 + 파노라마 통창
     (['S', 'N'] as const).forEach((dir) => {
       const wallZ = dir === 'S' ? maxZ - extWallThick * 0.5 : minZ + extWallThick * 0.5;
       solids.push(
@@ -1351,7 +770,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [cx, Number((floorBaseY + slabThick + sillH * 0.5).toFixed(3)), Number(wallZ.toFixed(3))],
           scale: [curW, sillH, extWallThick],
-          rotation: [0, dominantYaw, 0],
           color: floorColor,
           material: floorMat,
           isFixed: true,
@@ -1364,7 +782,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [cx, Number((floorTopY - headerH * 0.5).toFixed(3)), Number(wallZ.toFixed(3))],
           scale: [curW, headerH, extWallThick],
-          rotation: [0, dominantYaw, 0],
           color: floorColor,
           material: floorMat,
           isFixed: true,
@@ -1380,7 +797,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number((cx + curW * offsetRatio).toFixed(3)), winMidY, Number(wallZ.toFixed(3))],
           scale: [Number((curW * 0.08).toFixed(3)), winH, extWallThick],
-          rotation: [0, dominantYaw, 0],
           color: floorColor,
           material: floorMat,
           isFixed: true,
@@ -1395,11 +811,12 @@ export function generateWatertightArchitecture(
           wall: dir,
           position: [Number((cx + curW * winOffset).toFixed(3)), winMidY, Number(wallZ.toFixed(3))],
           scale: [Number((curW * 0.38).toFixed(3)), winH, Number((extWallThick * 0.55).toFixed(3))],
-          rotationY: dominantYaw,
+          rotationY: 0,
         });
       });
     });
 
+    // 동·서 외벽 + 창호
     (['E', 'W'] as const).forEach((dir) => {
       const wallX = dir === 'E' ? maxX - extWallThick * 0.5 : minX + extWallThick * 0.5;
       const innerD = Math.max(0.4, curD - extWallThick * 2);
@@ -1412,7 +829,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number(wallX.toFixed(3)), Number((floorBaseY + slabThick + sillH * 0.5).toFixed(3)), cz],
           scale: [extWallThick, sillH, innerD],
-          rotation: [0, dominantYaw, 0],
           color: floorColor,
           material: floorMat,
           isFixed: true,
@@ -1425,7 +841,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number(wallX.toFixed(3)), Number((floorTopY - headerH * 0.5).toFixed(3)), cz],
           scale: [extWallThick, headerH, innerD],
-          rotation: [0, dominantYaw, 0],
           color: floorColor,
           material: floorMat,
           isFixed: true,
@@ -1441,7 +856,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number(wallX.toFixed(3)), winMidY, Number((cz + innerD * offsetRatio).toFixed(3))],
           scale: [extWallThick, winH, Number((innerD * 0.1).toFixed(3))],
-          rotation: [0, dominantYaw, 0],
           color: floorColor,
           material: floorMat,
           isFixed: true,
@@ -1456,7 +870,7 @@ export function generateWatertightArchitecture(
           wall: dir,
           position: [Number(wallX.toFixed(3)), winMidY, Number((cz + innerD * winOffset).toFixed(3))],
           scale: [Number((innerD * 0.36).toFixed(3)), winH, Number((extWallThick * 0.55).toFixed(3))],
-          rotationY: dominantYaw + Math.PI / 2,
+          rotationY: Math.PI / 2,
         });
       });
     });
@@ -1464,13 +878,14 @@ export function generateWatertightArchitecture(
     const startX = minX + extWallThick;
     const startZ = minZ + extWallThick;
 
+    // 층마다 방 구조가 다르게 진화 (1층: 공용 LDK·접객 / 2층+: 프라이빗 침실·서재·스위트)
     const floorPlan = generateDynamicRoomLayout({
       usageType: rawSpec.usageType,
       templateId,
       areaSqm: avgUnitAreaSqm,
       aspectRatio: Number((curW / Math.max(0.4, curD)).toFixed(2)),
       variantIdx: (f - 1) % 3,
-      openPlanRatio: f === 1 ? (rawSpec.openPlanRatio ?? 1.0) * 1.12 : 0.95,
+      openPlanRatio: f === 1 ? (rawSpec.openPlanRatio ?? 1.0) * 1.15 : 0.9,
     });
     const floorIndoorRooms = floorPlan.rooms.filter((r) => r.liveLoadKn < 3.0);
     if (f === 1) firstFloorIndoorRooms = floorIndoorRooms;
@@ -1482,6 +897,7 @@ export function generateWatertightArchitecture(
         ? 'wood'
         : 'stucco';
 
+    // 실내 칸막이벽 + 각 실 기능에 맞는 3D 가구/설비 배치
     floorIndoorRooms.forEach((room, rIdx) => {
       const rx = startX + usableW * (room.x / 100);
       const rz = startZ + usableD * (room.y / 100);
@@ -1499,8 +915,7 @@ export function generateWatertightArchitecture(
             Number(wallCenterY.toFixed(3)),
             Number((rz + rd * 0.45).toFixed(3)),
           ],
-          scale: [intWallThick, Number(clearWallH.toFixed(3)), Number((rd * 0.84).toFixed(3))],
-          rotation: [0, dominantYaw, 0],
+          scale: [intWallThick, Number((clearWallH * 0.94).toFixed(3)), Number((rd * 0.84).toFixed(3))],
           color: interiorWallColor,
           material: intWallMat,
           isFixed: true,
@@ -1519,8 +934,7 @@ export function generateWatertightArchitecture(
             Number(wallCenterY.toFixed(3)),
             Number((rz + rd).toFixed(3)),
           ],
-          scale: [Number((rw * 0.84).toFixed(3)), Number(clearWallH.toFixed(3)), intWallThick],
-          rotation: [0, dominantYaw, 0],
+          scale: [Number((rw * 0.84).toFixed(3)), Number((clearWallH * 0.94).toFixed(3)), intWallThick],
           color: interiorWallColor,
           material: intWallMat,
           isFixed: true,
@@ -1528,6 +942,7 @@ export function generateWatertightArchitecture(
         });
       }
 
+      // 실내 가구 및 설비(소파, 아일랜드 식탁, 침대, 욕조/카운터) 생성
       const furnBaseY = floorBaseY + slabThick + 0.015;
       const roomCenterX = rx + rw * 0.5;
       const roomCenterZ = rz + rd * 0.5;
@@ -1541,7 +956,6 @@ export function generateWatertightArchitecture(
             shape: 'box',
             position: [Number(roomCenterX.toFixed(3)), Number((furnBaseY + 0.055).toFixed(3)), Number((roomCenterZ - rd * 0.14).toFixed(3))],
             scale: [Number((rw * 0.56).toFixed(3)), 0.11, Number((rd * 0.24).toFixed(3))],
-            rotation: [0, dominantYaw, 0],
             color: interiorTheme === 'industrial-loft' ? '#475569' : '#d6ccc2',
             material: 'stucco',
             isFixed: true,
@@ -1554,7 +968,6 @@ export function generateWatertightArchitecture(
             shape: 'box',
             position: [Number(roomCenterX.toFixed(3)), Number((furnBaseY + 0.032).toFixed(3)), Number((roomCenterZ + rd * 0.12).toFixed(3))],
             scale: [Number((rw * 0.34).toFixed(3)), 0.064, Number((rd * 0.18).toFixed(3))],
-            rotation: [0, dominantYaw, 0],
             color: '#9c6644',
             material: 'wood',
             isFixed: true,
@@ -1569,7 +982,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number(roomCenterX.toFixed(3)), Number((furnBaseY + 0.068).toFixed(3)), Number(roomCenterZ.toFixed(3))],
           scale: [Number((rw * 0.54).toFixed(3)), 0.135, Number((rd * 0.28).toFixed(3))],
-          rotation: [0, dominantYaw, 0],
           color: '#e2e8f0',
           material: 'concrete',
           isFixed: true,
@@ -1583,13 +995,12 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number(roomCenterX.toFixed(3)), Number((furnBaseY + 0.048).toFixed(3)), Number(roomCenterZ.toFixed(3))],
           scale: [Number((rw * 0.48).toFixed(3)), 0.095, Number((rd * 0.52).toFixed(3))],
-          rotation: [0, dominantYaw, 0],
           color: '#f1f5f9',
           material: 'stucco',
           isFixed: true,
           floorIndex: f,
         });
-      } else if (room.name.includes('오피스') || room.name.includes('회의') || room.name.includes('전시') || room.name.includes('서재')) {
+      } else if (room.name.includes('오피스') || room.name.includes('회의') || room.name.includes('전시')) {
         solids.push({
           id: `furn_${f}_${rIdx}_desk`,
           groupName: `${f}층 ${room.name} 워크 테이블`,
@@ -1597,7 +1008,6 @@ export function generateWatertightArchitecture(
           shape: 'box',
           position: [Number(roomCenterX.toFixed(3)), Number((furnBaseY + 0.06).toFixed(3)), Number(roomCenterZ.toFixed(3))],
           scale: [Number((rw * 0.58).toFixed(3)), 0.12, Number((rd * 0.32).toFixed(3))],
-          rotation: [0, dominantYaw, 0],
           color: '#b08968',
           material: 'wood',
           isFixed: true,
@@ -1606,6 +1016,7 @@ export function generateWatertightArchitecture(
       }
     });
 
+    // 구조 기둥 노드
     const corners: [number, number, number][] = [
       [minX + 0.04, floorTopY, minZ + 0.04],
       [maxX - 0.04, floorTopY, minZ + 0.04],
@@ -1655,44 +1066,27 @@ export function generateWatertightArchitecture(
     });
   }
 
-  // 4. 최상층 천장 밀착 베이스 + 5종 지붕(박공/경사/나비형/스플릿/처마평지붕) — 벽과 지붕 사이 틈이 없도록 밀착 시공
+  // 4. 사진/템플릿별 4종 3D 지붕 건축 (박공 / 경사 / 나비형 / 캔틸레버 평지붕)
   const topY = floors * floorH;
   const roofColor = rawSpec.customRoofColor ?? '#475569';
   const roofMat: CadMaterial = accentMaterial === 'wood' ? 'wood' : 'steel';
-  const topRoofW = Number((topFloorW + 0.16).toFixed(3));
-  const topRoofD = Number((topFloorD + 0.16).toFixed(3));
-
-  // 최상층 벽체 상단(topY)과 지붕 경사면 하부를 완전히 연결하는 밀착 천장 슬래브
-  solids.push({
-    id: 'arch_roof_sealing_deck',
-    groupName: '최상층 벽·지붕 밀착 천장 슬래브',
-    partRole: 'roof',
-    shape: 'box',
-    position: [topFloorCx, Number((topY - 0.02).toFixed(3)), topFloorCz],
-    scale: [topRoofW, 0.06, topRoofD],
-    rotation: [0, dominantYaw, 0],
-    color: getFloorColor(99),
-    material: baseMaterial,
-    isFixed: true,
-    floorIndex: 99,
-  });
 
   if (roofStyle === 'gable') {
-    const pitch = 0.28;
-    const halfSpan = topRoofW * 0.5;
-    const slopeW = Number((halfSpan / Math.cos(pitch) + 0.04).toFixed(3));
+    const pitch = 0.3;
+    const halfSpan = (topFloorW + 0.24) * 0.5;
+    const slopeW = Number((halfSpan / Math.cos(pitch)).toFixed(3));
     const rise = halfSpan * Math.tan(pitch);
-    const midY = Number((topY + rise * 0.5 - 0.01).toFixed(3));
+    const midY = Number((topY + rise * 0.5 + 0.02).toFixed(3));
 
     solids.push(
       {
         id: 'arch_roof_gable_left',
-        groupName: '밀착 박공 지붕 좌측 경사면',
+        groupName: '박공 지붕 좌측 경사면',
         partRole: 'roof',
         shape: 'box',
-        position: [Number((topFloorCx - halfSpan * 0.48).toFixed(3)), midY, topFloorCz],
-        scale: [slopeW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, pitch],
+        position: [Number((topFloorCx - halfSpan * 0.5).toFixed(3)), midY, topFloorCz],
+        scale: [slopeW, 0.08, Number((topFloorD + 0.22).toFixed(3))],
+        rotation: [0, 0, pitch],
         color: roofColor,
         material: roofMat,
         isFixed: true,
@@ -1700,127 +1094,63 @@ export function generateWatertightArchitecture(
       },
       {
         id: 'arch_roof_gable_right',
-        groupName: '밀착 박공 지붕 우측 경사면',
+        groupName: '박공 지붕 우측 경사면',
         partRole: 'roof',
         shape: 'box',
-        position: [Number((topFloorCx + halfSpan * 0.48).toFixed(3)), midY, topFloorCz],
-        scale: [slopeW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, -pitch],
-        color: roofColor,
-        material: roofMat,
-        isFixed: true,
-        floorIndex: 99,
-      },
-      // 좌·우 경사면 사이 틈을 막는 밀착 박공벽(Gable Wall)
-      {
-        id: 'arch_roof_gable_infills',
-        groupName: '박공 상부 마감벽',
-        partRole: 'exterior_wall',
-        shape: 'box',
-        position: [topFloorCx, Number((topY + rise * 0.36).toFixed(3)), topFloorCz],
-        scale: [Number((topFloorW * 0.52).toFixed(3)), Number((rise * 0.78).toFixed(3)), Number((topFloorD * 0.96).toFixed(3))],
-        rotation: [0, dominantYaw, 0],
-        color: getFloorColor(99),
-        material: baseMaterial,
-        isFixed: true,
-        floorIndex: 99,
-      }
-    );
-  } else if (roofStyle === 'split-gable') {
-    const pitch = 0.22;
-    const leftW = Number(((topRoofW * 0.56) / Math.cos(pitch)).toFixed(3));
-    const rightW = Number(((topRoofW * 0.54) / Math.cos(pitch)).toFixed(3));
-    solids.push(
-      {
-        id: 'arch_roof_split_left',
-        groupName: '밀착 스플릿 상부 경사 지붕',
-        partRole: 'roof',
-        shape: 'box',
-        position: [Number((topFloorCx - topRoofW * 0.23).toFixed(3)), Number((topY + 0.16).toFixed(3)), topFloorCz],
-        scale: [leftW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, pitch],
+        position: [Number((topFloorCx + halfSpan * 0.5).toFixed(3)), midY, topFloorCz],
+        scale: [slopeW, 0.08, Number((topFloorD + 0.22).toFixed(3))],
+        rotation: [0, 0, -pitch],
         color: roofColor,
         material: roofMat,
         isFixed: true,
         floorIndex: 99,
       },
       {
-        id: 'arch_roof_split_right',
-        groupName: '밀착 스플릿 하부 경사 지붕',
+        id: 'arch_roof_ridge_beam',
+        groupName: '박공 지붕 마룻대 보',
         partRole: 'roof',
         shape: 'box',
-        position: [Number((topFloorCx + topRoofW * 0.25).toFixed(3)), Number((topY + 0.08).toFixed(3)), topFloorCz],
-        scale: [rightW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, -pitch * 0.8],
+        position: [topFloorCx, Number((topY + rise + 0.03).toFixed(3)), topFloorCz],
+        scale: [0.09, 0.09, Number((topFloorD + 0.26).toFixed(3))],
         color: '#9c6644',
         material: 'wood',
-        isFixed: true,
-        floorIndex: 99,
-      },
-      // 스플릿 지붕 하부 밀착 코어벽
-      {
-        id: 'arch_roof_split_core',
-        groupName: '스플릿 지붕 밀착 마감벽',
-        partRole: 'exterior_wall',
-        shape: 'box',
-        position: [topFloorCx, Number((topY + 0.06).toFixed(3)), topFloorCz],
-        scale: [Number((topFloorW * 0.96).toFixed(3)), 0.14, Number((topFloorD * 0.96).toFixed(3))],
-        rotation: [0, dominantYaw, 0],
-        color: getFloorColor(99),
-        material: baseMaterial,
         isFixed: true,
         floorIndex: 99,
       }
     );
   } else if (roofStyle === 'shed') {
-    const pitch = 0.18;
-    const spanW = Number((topRoofW / Math.cos(pitch) + 0.04).toFixed(3));
-    const rise = topRoofW * Math.tan(pitch);
-    const midY = Number((topY + rise * 0.42 - 0.01).toFixed(3));
-    solids.push(
-      {
-        id: 'arch_roof_shed',
-        groupName: '밀착 모던 경사 지붕',
-        partRole: 'roof',
-        shape: 'box',
-        position: [topFloorCx, midY, topFloorCz],
-        scale: [spanW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, pitch],
-        color: roofColor,
-        material: roofMat,
-        isFixed: true,
-        floorIndex: 99,
-      },
-      {
-        id: 'arch_roof_shed_curtain',
-        groupName: '경사 지붕 하부 밀착 마감대',
-        partRole: 'exterior_wall',
-        shape: 'box',
-        position: [topFloorCx, Number((topY + rise * 0.25).toFixed(3)), topFloorCz],
-        scale: [Number((topFloorW * 0.96).toFixed(3)), Number((rise * 0.55).toFixed(3)), Number((topFloorD * 0.96).toFixed(3))],
-        rotation: [0, dominantYaw, 0],
-        color: getFloorColor(99),
-        material: baseMaterial,
-        isFixed: true,
-        floorIndex: 99,
-      }
-    );
+    const pitch = 0.2;
+    const spanW = Number(((topFloorW + 0.28) / Math.cos(pitch)).toFixed(3));
+    const midY = Number((topY + (topFloorW * Math.tan(pitch)) * 0.45 + 0.05).toFixed(3));
+    solids.push({
+      id: 'arch_roof_shed',
+      groupName: '모던 경사 지붕 (Shed Roof)',
+      partRole: 'roof',
+      shape: 'box',
+      position: [topFloorCx, midY, topFloorCz],
+      scale: [spanW, 0.09, Number((topFloorD + 0.24).toFixed(3))],
+      rotation: [0, 0, pitch],
+      color: roofColor,
+      material: roofMat,
+      isFixed: true,
+      floorIndex: 99,
+    });
   } else if (roofStyle === 'butterfly') {
-    const pitch = 0.22;
-    const halfSpan = topRoofW * 0.5;
-    const slopeW = Number((halfSpan / Math.cos(pitch) + 0.04).toFixed(3));
+    const pitch = 0.24;
+    const halfSpan = (topFloorW + 0.24) * 0.5;
+    const slopeW = Number((halfSpan / Math.cos(pitch)).toFixed(3));
     const rise = halfSpan * Math.tan(pitch);
-    const midY = Number((topY + rise * 0.44 - 0.01).toFixed(3));
+    const midY = Number((topY + rise * 0.48 + 0.04).toFixed(3));
 
     solids.push(
       {
         id: 'arch_roof_butterfly_left',
-        groupName: '밀착 나비형 지붕 좌측 윙',
+        groupName: '나비형 지붕 좌측 윙',
         partRole: 'roof',
         shape: 'box',
-        position: [Number((topFloorCx - halfSpan * 0.48).toFixed(3)), midY, topFloorCz],
-        scale: [slopeW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, -pitch],
+        position: [Number((topFloorCx - halfSpan * 0.5).toFixed(3)), midY, topFloorCz],
+        scale: [slopeW, 0.08, Number((topFloorD + 0.22).toFixed(3))],
+        rotation: [0, 0, -pitch],
         color: roofColor,
         material: roofMat,
         isFixed: true,
@@ -1828,45 +1158,48 @@ export function generateWatertightArchitecture(
       },
       {
         id: 'arch_roof_butterfly_right',
-        groupName: '밀착 나비형 지붕 우측 윙',
+        groupName: '나비형 지붕 우측 윙',
         partRole: 'roof',
         shape: 'box',
-        position: [Number((topFloorCx + halfSpan * 0.48).toFixed(3)), midY, topFloorCz],
-        scale: [slopeW, 0.09, topRoofD],
-        rotation: [0, dominantYaw, pitch],
+        position: [Number((topFloorCx + halfSpan * 0.5).toFixed(3)), midY, topFloorCz],
+        scale: [slopeW, 0.08, Number((topFloorD + 0.22).toFixed(3))],
+        rotation: [0, 0, pitch],
         color: roofColor,
         material: roofMat,
-        isFixed: true,
-        floorIndex: 99,
-      },
-      {
-        id: 'arch_roof_butterfly_band',
-        groupName: '나비형 지붕 밀착 파라펫',
-        partRole: 'exterior_wall',
-        shape: 'box',
-        position: [topFloorCx, Number((topY + 0.05).toFixed(3)), topFloorCz],
-        scale: [Number((topFloorW * 0.98).toFixed(3)), 0.12, Number((topFloorD * 0.98).toFixed(3))],
-        rotation: [0, dominantYaw, 0],
-        color: getFloorColor(99),
-        material: baseMaterial,
         isFixed: true,
         floorIndex: 99,
       }
     );
   } else {
-    solids.push({
-      id: 'arch_roof_slab',
-      groupName: `밀착 처마 지붕 슬래브 (${rawSpec.rooftops}개소)`,
-      partRole: 'roof',
-      shape: 'box',
-      position: [topFloorCx, Number((topY + 0.025).toFixed(3)), topFloorCz],
-      scale: [topRoofW, 0.09, topRoofD],
-      rotation: [0, dominantYaw, 0],
-      color: '#c89b6e',
-      material: 'wood',
-      isFixed: true,
-      floorIndex: 99,
-    });
+    // 캔틸레버 처마 평지붕 + 유리 난간
+    const rW = Number((topFloorW + 0.24).toFixed(3));
+    const rD = Number((topFloorD + 0.24).toFixed(3));
+    solids.push(
+      {
+        id: 'arch_roof_slab',
+        groupName: `캔틸레버 처마 지붕 슬래브 (${rawSpec.rooftops}개소)`,
+        partRole: 'roof',
+        shape: 'box',
+        position: [topFloorCx, Number((topY + 0.05).toFixed(3)), topFloorCz],
+        scale: [rW, 0.1, rD],
+        color: '#c89b6e',
+        material: 'wood',
+        isFixed: true,
+        floorIndex: 99,
+      },
+      {
+        id: 'roof_glass_balustrade_s',
+        groupName: '옥상 유리 난간',
+        partRole: 'roof',
+        shape: 'box',
+        position: [topFloorCx, Number((topY + 0.18).toFixed(3)), Number((topFloorCz + rD * 0.48).toFixed(3))],
+        scale: [rW, 0.16, 0.03],
+        color: '#bae6fd',
+        material: 'glass',
+        isFixed: true,
+        floorIndex: 99,
+      }
+    );
   }
 
   // 5. 승강기 & 직통계단 수직 코어
@@ -1880,7 +1213,6 @@ export function generateWatertightArchitecture(
       shape: 'box',
       position: [Number(kx.toFixed(3)), Number((topY * 0.5).toFixed(3)), Number((-topFloorD * 0.22).toFixed(3))],
       scale: [0.32, Number(topY.toFixed(3)), 0.32],
-      rotation: [0, dominantYaw, 0],
       color: '#cbd5e1',
       material: 'concrete',
       isFixed: true,

@@ -25,10 +25,7 @@ export type BuildingTemplateId =
   | 'twin-pavilion'
   | 'bridge-cantilever'
   | 'split-gable'
-  | 'atrium-ring'
-  | 'courtyard-pavilion'
-  | 'cantilever-studio'
-  | 'gable-garden';
+  | 'atrium-ring';
 
 export type RoofStyle =
   | 'flat-overhang'
@@ -45,17 +42,7 @@ export type InteriorTheme =
 
 export type StudioViewMode = 'exterior' | 'interior_cutaway';
 
-export type SiteShape =
-  | 'rectangle'
-  | 'triangle'
-  | 'circle'
-  | 'trapezoid'
-  | 'freeform';
-
-export interface SitePoint2D {
-  x: number;
-  z: number;
-}
+export type SiteShape = 'rectangle' | 'triangle' | 'circle' | 'trapezoid';
 
 export interface BuildingTemplateOption {
   id: BuildingTemplateId;
@@ -216,8 +203,6 @@ export interface BuildingSpec {
   interiorFloorColor?: string;
   openPlanRatio?: number;
   siteShape?: SiteShape;
-  customSitePoints?: SitePoint2D[];
-  isSiteDrawingActive?: boolean;
   useHouseholds?: boolean;
   siteAreaSqm: number;
   buildingAreaSqm: number;

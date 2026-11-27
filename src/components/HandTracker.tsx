@@ -372,7 +372,7 @@ const NO_CURSOR_POSES: ReadonlySet<HandPose> = new Set(['pan', 'grab']);
 const POSE_LABEL: Record<HandPose, string> = {
   none: '미분류',
   draw: '그리기',
-  select: '선택(✌️)',
+  select: '선택(V)',
   pan: '3손가락',
   fist: '주먹',
   open: '펼침',
@@ -456,11 +456,11 @@ const rotObserve = (s: PoseSnapshot) =>
     : `${AXIS_LABEL[s.rotView]}축 ${Math.round(s.rotViewDeg)}°`;
 const GESTURE_TEST_STEPS: GestureTestStep[] = [
   { id: 'draw', title: '그리기', how: '오른손 엄지·검지만 펴고 중·약·새끼 접기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, X, X, X] }] }, check: (s) => s.right === 'draw' },
-  { id: 'select', title: '선택 커서', how: '오른손 ✌️ (검지·중지만, 엄지는 접기)', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }] }, check: (s) => s.right === 'select' },
+  { id: 'select', title: '선택 커서', how: '오른손 V자 (검지·중지만, 엄지는 접기)', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }] }, check: (s) => s.right === 'select' },
   {
     id: 'select_fist',
     title: '선택 확정 (동작)',
-    how: '✌️ 유지하다가 그대로 주먹 쥐기',
+    how: 'V자 유지하다가 그대로 주먹 쥐기',
     hand: 'right',
     glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }, { side: 'right', fingers: [X, X, X, X, X] }] },
     instant: true,
@@ -504,7 +504,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
   {
     id: 'orbit',
     title: '카메라 회전',
-    how: '양손 보이게. 오른손은 펴거나 ✌️, 왼손 엄지·검지·중지 펴기',
+    how: '양손 보이게. 오른손은 펴거나 V자, 왼손 엄지·검지·중지 펴기',
     hand: 'left',
     glyph: {
       hands: [
@@ -683,7 +683,7 @@ function tickGestureTest(test: GestureTest, s: PoseSnapshot, now: number) {
 function formatTestResults(results: TestResult[]) {
   const pass = results.filter((r) => r.pass).length;
   const lines = results.map((r) => {
-    const mark = r.pass ? '✓' : r.skipped ? '-' : '✗';
+    const mark = r.pass ? 'O' : r.skipped ? '-' : 'X';
     const time = r.timeMs != null ? ` ${(r.timeMs / 1000).toFixed(1)}s` : '';
     const tg = r.t != null ? ` t${r.t.toFixed(2)} s${r.s!.toFixed(2)}` : '';
     const miss = !r.pass && r.topMiss ? ` → ${r.topMiss} ${Math.round(r.missPct * 100)}%` : '';
@@ -1553,7 +1553,7 @@ export default function HandTracker(props: Props) {
                 title={`손 인식: 초당 처리 프레임/카메라 최대 · 추론+제스처처리 · 캡처→결과 지연 · W=워커 M=메인스레드${camInfo ? ` · 카메라 ${camInfo.w}x${camInfo.h} 최대 ${Math.round(camInfo.fps)}fps` : ''}${backend ? ` · WebGL: ${backend.gl}` : ''}`}
               >
                 {`${Math.round(perf.fps)}${camInfo ? `/${Math.round(camInfo.fps)}` : ''}fps · 인식${perf.inf.toFixed(0)}+${perf.logic.toFixed(0)} 지연${perf.lat.toFixed(0)}ms`}
-                {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '⚠SW' : ''}`}
+                {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '·SW' : ''}`}
               </span>
             )}
           </span>
@@ -1686,7 +1686,7 @@ function GestureTestPanel(props: {
         <ul className="space-y-0.5">
           {ui.results.map((r) => (
             <li key={r.id} className={r.pass ? 'text-[#7dff8a]' : r.skipped ? 'text-cyan-200/50' : 'text-[#ff1e42]'}>
-              <span className="inline-block w-4">{r.pass ? '✓' : r.skipped ? '-' : '✗'}</span>
+              <span className="inline-block w-4">{r.pass ? 'O' : r.skipped ? '-' : 'X'}</span>
               {r.title}
               <span className="text-cyan-200/70">
                 {r.timeMs != null && ` ${(r.timeMs / 1000).toFixed(1)}s`}
@@ -1724,7 +1724,7 @@ function GestureTestPanel(props: {
 
       {ui.inGap && last ? (
         <div className={`py-3 text-center text-base font-bold ${last.pass ? 'text-[#7dff8a]' : 'text-[#ff1e42]'}`}>
-          {last.pass ? `✓ ${last.title} 통과` : last.skipped ? `- ${last.title} 건너뜀` : `✗ ${last.title} 실패`}
+          {last.pass ? `${last.title} 통과` : last.skipped ? `${last.title} 건너뜀` : `${last.title} 실패`}
         </div>
       ) : (
         <>

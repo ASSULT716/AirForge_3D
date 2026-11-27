@@ -11,6 +11,16 @@ interface Props {
   onPinchAction: (tool: CadTool, rawPos: [number, number, number], isNewStroke?: boolean) => void;
   /** 음성 최종 텍스트 / 직접 입력 → App(executeNaturalCommand)이 해석 */
   onVoiceCommand: (rawText: string) => void;
+  /** 3D 씬에 커서 표시용. 스냅된 월드 좌표가 바뀔 때만 호출 (손 없으면 null) */
+  onCursor?: (cursor: HandCursorState | null) => void;
+}
+
+export interface HandCursorState {
+  /** 핀치 시 노드가 찍힐 스냅 좌표 */
+  position: [number, number, number];
+  pinching: boolean;
+  /** true면 다음 핀치가 직전 노드와 빔으로 이어짐 */
+  chainActive: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -240,6 +250,9 @@ export default function HandTracker(props: Props) {
       if (k !== lastInfoKey) {
         lastInfoKey = k;
         setInfo(next);
+        propsRef.current.onCursor?.(
+          next.cursor ? { position: next.cursor, pinching: next.pinching, chainActive: next.chainLen > 0 } : null,
+        );
       }
     };
 
@@ -390,6 +403,7 @@ export default function HandTracker(props: Props) {
 
     return () => {
       cancelled = true;
+      propsRef.current.onCursor?.(null);
       cancelAnimationFrame(raf);
       stream?.getTracks().forEach((t) => t.stop());
       video.srcObject = null;

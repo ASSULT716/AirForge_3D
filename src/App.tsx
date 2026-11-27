@@ -8,7 +8,7 @@ import {
 } from './types/cad';
 import { WEAK_BRIDGE_PRESET, TABLE_3D_PRESET } from './data/presets';
 import SceneCanvas from './components/SceneCanvas';
-import HandTracker from './components/HandTracker';
+import HandTracker, { type HandCursorState } from './components/HandTracker';
 import HudOverlay from './components/HudOverlay';
 import { reinforceStructure, executeNaturalCommand } from './services/aiReinforce';
 
@@ -19,6 +19,11 @@ export default function App() {
   const [isReinforcing, setIsReinforcing] = useState(false);
   const [testVoiceInput, setTestVoiceInput] = useState('');
   const lastDrawnNodeIdRef = useRef<string | null>(null);
+  const [handCursor, setHandCursor] = useState<HandCursorState | null>(null);
+  const linkFrom =
+    handCursor?.chainActive && structure.activeTool === 'draw'
+      ? structure.nodes.find((n) => n.id === lastDrawnNodeIdRef.current)?.position ?? null
+      : null;
 
   const handlePinchAction = (
     tool: CadTool,
@@ -207,12 +212,14 @@ export default function App() {
       <SceneCanvas
         structure={structure}
         onUpdateStress={(beams) => setStructure((prev) => ({ ...prev, beams }))}
+        handCursor={handCursor && { position: handCursor.position, pinching: handCursor.pinching, linkFrom }}
       />
 
       <HandTracker
         activeTool={structure.activeTool}
         onPinchAction={handlePinchAction}
         onVoiceCommand={handleVoiceCommand}
+        onCursor={setHandCursor}
       />
 
       <HudOverlay

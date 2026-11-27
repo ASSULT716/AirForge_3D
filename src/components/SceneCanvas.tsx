@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Grid, OrbitControls } from '@react-three/drei';
+import { Billboard, Grid, Line, OrbitControls } from '@react-three/drei';
 import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import {
@@ -12,9 +12,17 @@ import {
   CameraControlState,
 } from '../types/cad';
 
+export interface SceneHandCursor {
+  position: [number, number, number];
+  pinching: boolean;
+  /** 핀치하면 이 좌표에서 커서까지 빔이 생김 (없으면 새 스트로크) */
+  linkFrom: [number, number, number] | null;
+}
+
 interface Props {
   structure: StructureState;
   onUpdateStress: (updatedBeams: StructureState['beams']) => void;
+  handCursor?: SceneHandCursor | null;
 }
 
 const DANGER_RED = new THREE.Color('#ff1e42');
@@ -456,7 +464,46 @@ function DynamicPhysicsStructure({
   );
 }
 
-export default function SceneCanvas({ structure, onUpdateStress }: Props) {
+/** 손 커서: 핀치 시 노드가 찍힐 위치. 기존 노드에 겹치면 초록(병합), 핀치 중이면 빨강 */
+function HandCursor({ cursor, nodes }: { cursor: SceneHandCursor; nodes: NodePoint[] }) {
+  const [x, y, z] = cursor.position;
+  const onNode = nodes.some(
+    (n) => Math.hypot(n.position[0] - x, n.position[1] - y, n.position[2] - z) < 0.15
+  );
+  const color = cursor.pinching ? '#ff1e42' : onNode ? '#39ff88' : '#00f3ff';
+  const r = cursor.pinching ? 0.09 : 0.14;
+
+  return (
+    <group renderOrder={10}>
+      <Billboard position={cursor.position}>
+        <mesh>
+          <ringGeometry args={[r, r + 0.025, 40]} />
+          <meshBasicMaterial color={color} transparent opacity={0.95} depthTest={false} toneMapped={false} />
+        </mesh>
+        <mesh>
+          <circleGeometry args={[r, 40]} />
+          <meshBasicMaterial color={color} transparent opacity={0.18} depthTest={false} toneMapped={false} />
+        </mesh>
+      </Billboard>
+
+      {/* 깊이 가늠용: 바닥까지 수직선 + 바닥 그림자 링 */}
+      {y > 0 && (
+        <Line points={[cursor.position, [x, 0, z]]} color={color} lineWidth={1} dashed dashSize={0.06} gapSize={0.06} transparent opacity={0.5} />
+      )}
+      <mesh position={[x, 0.005, z]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.1, 0.13, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.45} toneMapped={false} />
+      </mesh>
+
+      {/* 다음 핀치로 생길 빔 미리보기 */}
+      {cursor.linkFrom && (
+        <Line points={[cursor.linkFrom, cursor.position]} color={color} lineWidth={2} dashed dashSize={0.1} gapSize={0.07} transparent opacity={0.8} depthTest={false} />
+      )}
+    </group>
+  );
+}
+
+export default function SceneCanvas({ structure, onUpdateStress, handCursor }: Props) {
   const simKey = `${structure.nodes.length}-${structure.beams.length}`;
 
   return (
@@ -493,6 +540,8 @@ export default function SceneCanvas({ structure, onUpdateStress }: Props) {
         ) : (
           <StaticStructure structure={structure} />
         )}
+
+        {handCursor && <HandCursor cursor={handCursor} nodes={structure.nodes} />}
 
         <CameraController control={structure.cameraControl} />
       </Canvas>

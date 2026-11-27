@@ -15,8 +15,8 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [react(), tailwindcss()],
     server: {
-      // ngrok 터널로 접속 허용 (Vite는 기본적으로 모르는 Host 헤더 차단)
-      allowedHosts: ['.ngrok-free.app'],
+      // ngrok / Cloudflare 터널로 접속 허용 (Vite는 기본적으로 모르는 Host 헤더 차단)
+      allowedHosts: ['.ngrok-free.app', '.trycloudflare.com'],
       proxy: {
         // (조원호) 음성 명령 → TypeSafe Jev. 키 없으면 401 → 클라이언트가 Groq로 넘김
         '/api/jev': {

@@ -4,6 +4,7 @@
 import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
+import { Html } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { SolidPrimitive, StructureState } from '../types/cad';
 import { cameraGesture, consumeCameraDrag, consumeCameraZoom } from '../services/cameraGesture';
@@ -25,6 +26,7 @@ export default function HandSceneLayer({ structure }: { structure: StructureStat
         <SelectionHighlight structure={structure} sel={hover} color={HOVER_YELLOW} />
       )}
       {!structure.isSimulating && selected && <SelectionHighlight structure={structure} sel={selected} color={SELECT_GREEN} />}
+      {!structure.isSimulating && selected && <SelectionAxes structure={structure} sel={selected} />}
       {cursor && <HandCursor cursor={cursor} hovering={!!hover} />}
     </>
   );
@@ -320,6 +322,69 @@ function SelectionHighlight({ structure, sel, color }: { structure: StructureSta
             </mesh>
           </group>
         ))}
+    </group>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 선택 시 회전축 표시: 무게중심(회전 중심)에서 X/Y/Z 화살표 + "X축" 라벨 → 음성으로 축 이름 말하기 쉽게
+// ─────────────────────────────────────────────────────────────
+const AXIS_GIZMO: Array<{ name: string; color: string; dir: THREE.Vector3 }> = [
+  { name: 'X축', color: '#ff5566', dir: new THREE.Vector3(1, 0, 0) },
+  { name: 'Y축', color: '#55ff88', dir: new THREE.Vector3(0, 1, 0) },
+  { name: 'Z축', color: '#4d9bff', dir: new THREE.Vector3(0, 0, 1) },
+];
+
+function SelectionAxes({ structure, sel }: { structure: StructureState; sel: Selection }) {
+  const c = new THREE.Vector3(...sel.center);
+  // 화살표 길이: 선택 묶음 크기 + 여유 (작은 구조물도 보이게 최소 1m)
+  const nodeSet = new Set(sel.nodeIds);
+  const solidSet = new Set(sel.solidIds);
+  let radius = 0;
+  for (const n of structure.nodes) if (nodeSet.has(n.id)) radius = Math.max(radius, c.distanceTo(new THREE.Vector3(...n.position)));
+  for (const so of structure.solids ?? []) {
+    if (!solidSet.has(so.id)) continue;
+    const half = Math.max(...so.scale) / 2;
+    radius = Math.max(radius, c.distanceTo(new THREE.Vector3(...so.position)) + half);
+  }
+  const len = Math.max(1, radius + 0.6);
+
+  return (
+    <group position={c} renderOrder={1000}>
+      {AXIS_GIZMO.map(({ name, color, dir }) => {
+        const quat = new THREE.Quaternion().setFromUnitVectors(UP_VEC, dir);
+        const mat = <meshBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.9} toneMapped={false} />;
+        return (
+          <group key={name} quaternion={quat}>
+            {/* 음수 방향은 흐리게 (축이 양쪽으로 관통한다는 표시) */}
+            <mesh position={[0, -len / 2, 0]} renderOrder={1000}>
+              <cylinderGeometry args={[0.012, 0.012, len, 6]} />
+              <meshBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.3} toneMapped={false} />
+            </mesh>
+            <mesh position={[0, len / 2, 0]} renderOrder={1000}>
+              <cylinderGeometry args={[0.025, 0.025, len, 8]} />
+              {mat}
+            </mesh>
+            <mesh position={[0, len + 0.09, 0]} renderOrder={1000}>
+              <coneGeometry args={[0.07, 0.18, 12]} />
+              {mat}
+            </mesh>
+            <Html position={[0, len + 0.35, 0]} center zIndexRange={[40, 0]} style={{ pointerEvents: 'none' }}>
+              <div
+                style={{ color, borderColor: color }}
+                className="whitespace-nowrap rounded border bg-black/70 px-1.5 py-0.5 font-mono text-[12px] font-bold"
+              >
+                {name}
+              </div>
+            </Html>
+          </group>
+        );
+      })}
+      <Html position={[0, -0.35, 0]} center zIndexRange={[40, 0]} style={{ pointerEvents: 'none' }}>
+        <div className="whitespace-nowrap rounded bg-black/70 px-1.5 py-0.5 font-mono text-[11px] text-cyan-200">
+          예: "Y축으로 90도 돌려줘" / "X축 반바퀴"
+        </div>
+      </Html>
     </group>
   );
 }

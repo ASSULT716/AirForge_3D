@@ -14,12 +14,22 @@ export interface ObjectRotateEvent {
   deg: number;
 }
 
+/** 음성 해석 결과 표시 (HandBridge가 채움). pending = "맞나요?" 확인 대기 */
+export interface VoiceFeedback {
+  label: string;
+  tone: 'ok' | 'warn' | 'error' | 'info';
+  pending?: boolean;
+}
+
 interface Props {
   activeTool: CadTool;
   /** 핀치 확정 시 호출. 스냅·기존 노드 병합·빔 연결은 App이 처리 */
   onPinchAction: (tool: CadTool, rawPos: [number, number, number], isNewStroke?: boolean) => void;
-  /** 음성 최종 텍스트 / 직접 입력 → App(executeNaturalCommand)이 해석 */
+  /** 음성 최종 텍스트 / 직접 입력 → HandBridge가 Jev로 해석 (빠른 조작 외엔 Groq로 전달) */
   onVoiceCommand: (rawText: string) => void;
+  voiceFeedback?: VoiceFeedback | null;
+  /** 확인 대기 명령 실행(true) / 취소(false) */
+  onVoiceConfirm?: (ok: boolean) => void;
   /** 3D 씬에 커서 표시용. 화면 좌표가 바뀔 때만 호출 (손 없으면 null) */
   onCursor?: (cursor: HandCursorState | null) => void;
   /** 양손 펴고 벌리기/모으기 → 카메라 줌. factor > 1 확대, < 1 축소 (프레임 간 상대 배율) */
@@ -731,6 +741,13 @@ interface TestUi {
   live: GlyphHand[];
   results: TestResult[];
 }
+
+const VOICE_TONE: Record<VoiceFeedback['tone'], string> = {
+  ok: 'text-[#00f3ff]',
+  warn: 'text-[#ff9f43]',
+  error: 'text-[#ff1e42]',
+  info: 'text-cyan-200/70',
+};
 
 // ── Web Speech API 최소 타입 (lib.dom에 없음) ──
 interface SpeechResultAlt { transcript: string }
@@ -1467,7 +1484,7 @@ export default function HandTracker(props: Props) {
 
   // ── 음성 인식 ──
   const submitText = useCallback((text: string) => {
-    setVoiceMsg(`전송: "${text}"`);
+    setVoiceMsg('');
     propsRef.current.onVoiceCommand(text);
   }, []);
 
@@ -1567,7 +1584,7 @@ export default function HandTracker(props: Props) {
   return (
     <div
       ref={panelRef}
-      className="fixed bottom-4 right-4 z-50 w-[320px] select-none font-mono text-[11px] text-cyan-300"
+      className="fixed bottom-[78px] right-4 z-50 w-[320px] select-none font-mono text-[11px] text-cyan-300"
     >
       <div
         className="relative overflow-hidden rounded border border-cyan-400/60 bg-black/70 shadow-[0_0_18px_rgba(0,243,255,0.25)]"
@@ -1682,6 +1699,21 @@ export default function HandTracker(props: Props) {
         {!speechSupported && <div className="mt-1 text-cyan-200/60">이 브라우저는 음성 인식 미지원 → 직접 입력</div>}
         {voiceText && <div className="mt-1 truncate text-cyan-100">“{voiceText}”</div>}
         {voiceMsg && <div className="mt-0.5 text-cyan-200/70">{voiceMsg}</div>}
+        {props.voiceFeedback && (
+          <div className="mt-0.5 flex items-center gap-1.5">
+            <span className={`truncate ${VOICE_TONE[props.voiceFeedback.tone]}`}>{props.voiceFeedback.label}</span>
+            {props.voiceFeedback.pending && (
+              <>
+                <button onClick={() => props.onVoiceConfirm?.(true)} className="rounded border border-[#00f3ff]/70 px-1.5 hover:bg-cyan-400/20">
+                  실행
+                </button>
+                <button onClick={() => props.onVoiceConfirm?.(false)} className="rounded border border-cyan-400/40 px-1.5 hover:bg-cyan-400/20">
+                  취소
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

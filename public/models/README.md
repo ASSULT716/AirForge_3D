@@ -1,0 +1,1 @@
+MediaPipe .task 모델 보관용 폴더

@@ -14,6 +14,12 @@ import { setHover, useHandState, type SceneHandCursor } from './handStore';
 const SELECT_GREEN = '#7dff8a';
 const HOVER_YELLOW = '#ffd54a';
 const UP_VEC = new THREE.Vector3(0, 1, 0);
+/** 손 줌 거리 한계 (m) */
+const ZOOM_MIN_DIST = 1.2;
+const ZOOM_MAX_DIST = 50;
+/** SceneCanvas 안개 기본값 (멀리 빼면 구조물이 안개에 묻히지 않게 카메라 거리 따라 밀어냄) */
+const FOG_NEAR = 18;
+const FOG_FAR = 40;
 
 export default function HandSceneLayer({ structure }: { structure: StructureState }) {
   const { cursor, hover, selected } = useHandState();
@@ -35,6 +41,7 @@ export default function HandSceneLayer({ structure }: { structure: StructureStat
 /** 손 제스처 줌(양손 벌리기/모으기) + 팬·오빗 ("장면을 잡고 끄는" 느낌) */
 function HandCamera() {
   const camera = useThree((s) => s.camera);
+  const scene = useThree((s) => s.scene);
   const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
 
   useFrame((_, delta) => {
@@ -45,10 +52,18 @@ function HandCamera() {
     const ctrl = controls;
     if (!ctrl) return;
 
+    // 멀리 빼도 구조물이 보이게: 안개 시작·끝을 카메라 거리 뒤로 (가까우면 원래 값)
+    const fog = scene.fog;
+    if (fog instanceof THREE.Fog) {
+      const dist = camera.position.distanceTo(ctrl.target);
+      fog.near = Math.max(FOG_NEAR, dist + 8);
+      fog.far = Math.max(FOG_FAR, dist * 2.5);
+    }
+
     const zoomLog = consumeCameraZoom(Math.min(delta, 0.05));
     if (zoomLog !== 0) {
       const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
-      offset.setLength(THREE.MathUtils.clamp(offset.length() * Math.exp(-zoomLog), 1.2, 18.0));
+      offset.setLength(THREE.MathUtils.clamp(offset.length() * Math.exp(-zoomLog), ZOOM_MIN_DIST, ZOOM_MAX_DIST));
       camera.position.copy(ctrl.target).add(offset);
       ctrl.update();
     }

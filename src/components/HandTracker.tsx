@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { CadTool } from '../types/cad';
 import { createHandDetector, type HandDetector, type HandFrame } from '../services/handDetector';
 import { cameraGesture, pushCameraOrbit, pushCameraPan } from '../services/cameraGesture';
-import { handQuat, pickAxis, snapDeg, twistDeg, viewAxisToWorld, type Axis } from '../services/handRotate';
+import { detentDeg, handQuat, pickAxis, snapDeg, twistDeg, viewAxisToWorld, type Axis } from '../services/handRotate';
 
 /** 움켜쥐기 회전 이벤트. axis = 월드 축 (축 잠금 전엔 null), deg = 잡은 순간 대비 누적 각도 */
 export interface ObjectRotateEvent {
@@ -78,8 +78,10 @@ const ROT_LOCK_DEG = 12;
 const ROT_LOCK_RATIO = 1.8;
 /** 출력 각도 데드존: 이보다 작은 변화는 무시 (손떨림) */
 const ROT_DEADZONE_DEG = 2;
-/** 놓을 때 스냅 단위 */
+/** 놓을 때 스냅 단위 (회전 중 걸림 간격도 같음) */
 const ROT_SNAP_DEG = 15;
+/** 회전 중 걸림: 스냅 각도 ±이 범위 안이면 그 각도에 붙어 있음 (클수록 강하게 걸림, ROT_SNAP_DEG/2 미만) */
+const ROT_DETENT_HOLD_DEG = 5.5;
 /**
  * 인식은 20~30Hz라 각도가 계단식으로 들어옴 → 화면 프레임마다 목표 각도로 보간해서 보냄.
  * 이 시간(≈인식 간격)에 걸쳐 따라감. 너무 크면 손보다 늦게 따라옴
@@ -1067,8 +1069,12 @@ export default function HandTracker(props: Props) {
           if (r.view !== null) r.viewDeg = tw[r.view];
           if (r.view !== null && r.world) {
             const raw = tw[r.view] * r.world.sign;
+            // 15°마다 탁 걸림 → 정확한 각도에 맞추기 쉬움
+            const target = detentDeg(raw, ROT_SNAP_DEG, ROT_DETENT_HOLD_DEG);
+            const onDetent = target === snapDeg(target, ROT_SNAP_DEG);
             // 목표 각도만 갱신. 실제 전달은 animateRot이 화면 프레임마다 보간해서 함
-            if (Math.abs(raw - r.out) > ROT_DEADZONE_DEG) r.out = raw;
+            // 걸림 각도는 데드존 무시하고 바로 붙임 (안 그러면 13.5° 같은 데서 멈춤)
+            if (onDetent ? target !== r.out : Math.abs(target - r.out) > ROT_DEADZONE_DEG) r.out = target;
           }
         }
       } else if (r.active) {

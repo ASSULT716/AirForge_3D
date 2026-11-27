@@ -64,6 +64,19 @@ export function viewAxisToWorld(viewAxis: number, cameraQuat: readonly number[])
 
 export const snapDeg = (deg: number, step: number) => Math.round(deg / step) * step;
 
+/**
+ * 회전 중 걸림(디텐트): step 배수 ±hold 안에서는 그 배수에 붙어 있고,
+ * 벗어나면 남은 구간을 늘려서 다음 배수까지 이어줌 (연속·단조 → 튀지 않음)
+ *   hold=4, step=15: 손 11°~19° → 15° 고정, 19°~22.5° → 15°~22.5°로 빠르게 넘어감
+ */
+export function detentDeg(deg: number, step: number, hold: number): number {
+  const k = snapDeg(deg, step);
+  const d = deg - k;
+  const half = step / 2;
+  if (Math.abs(d) <= hold) return k;
+  return k + Math.sign(d) * ((Math.abs(d) - hold) * half) / (half - hold);
+}
+
 // ─────────────────────────────────────────────────────────────
 // App 쪽: 회전 세션 (잡은 순간 원본 저장 → 매번 원본에 적용 → 오차 누적 없음)
 // ─────────────────────────────────────────────────────────────

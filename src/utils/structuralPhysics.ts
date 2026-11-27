@@ -1,4 +1,11 @@
-import { BuildingSpec, CadMaterial, DesignCategory } from '../types/cad';
+import type {
+  BuildingSpec,
+  CadMaterial,
+  DesignCategory,
+  SolidPrimitive,
+} from '../types/cad';
+
+const SCALE_DIV = 3.2;
 
 /** 실제 건축 주구조 시스템 (유리 단독·무골조 구조 원천 방지) */
 export type StructuralSystemId =
@@ -86,6 +93,72 @@ export const STRUCTURAL_SYSTEM_DB: Record<StructuralSystemId, StructuralMaterial
   },
 };
 
+/** 외장·마감재별 현실적 한국 시공 단가 및 표면 면밀도 (proceduralTextures.ts 단가와 100% 일치) */
+export const CLADDING_COST_DB: Record<
+  CadMaterial,
+  {
+    label: string;
+    matPerSqm: number;
+    laborPerSqm: number;
+    surfaceDeadLoadKnM2: number; // 마감재 ㎡당 자중 (kN/㎡)
+  }
+> = {
+  stucco: {
+    label: '스타코플렉스(외단열 마감)',
+    matPerSqm: 78000,
+    laborPerSqm: 58000,
+    surfaceDeadLoadKnM2: 0.35,
+  },
+  wood: {
+    label: '적삼목·탄화목 우드 사이딩',
+    matPerSqm: 125000,
+    laborPerSqm: 72000,
+    surfaceDeadLoadKnM2: 0.22,
+  },
+  concrete: {
+    label: '노출 콘크리트 마감',
+    matPerSqm: 85000,
+    laborPerSqm: 78000,
+    surfaceDeadLoadKnM2: 0.85,
+  },
+  steel: {
+    label: '브러시드 리얼징크·강재',
+    matPerSqm: 118000,
+    laborPerSqm: 68000,
+    surfaceDeadLoadKnM2: 0.42,
+  },
+  titanium: {
+    label: '티타늄 아연판(VMZINC)',
+    matPerSqm: 195000,
+    laborPerSqm: 88000,
+    surfaceDeadLoadKnM2: 0.46,
+  },
+  gold: {
+    label: '샴페인 골드 아노다이징 메탈',
+    matPerSqm: 225000,
+    laborPerSqm: 90000,
+    surfaceDeadLoadKnM2: 0.48,
+  },
+  carbon: {
+    label: '세라믹·탄소복합재(CFRP) 패널',
+    matPerSqm: 175000,
+    laborPerSqm: 82000,
+    surfaceDeadLoadKnM2: 0.28,
+  },
+  glass: {
+    label: '고단열 투명 로이(Low-E) 유리',
+    matPerSqm: 265000,
+    laborPerSqm: 115000,
+    surfaceDeadLoadKnM2: 0.55,
+  },
+  hologram: {
+    label: '반투명 에칭 로이 유리',
+    matPerSqm: 245000,
+    laborPerSqm: 105000,
+    surfaceDeadLoadKnM2: 0.52,
+  },
+};
+
 export interface FloorPhysicsResult {
   floor: number;
   deadLoadKnM2: number;        // D: 바닥 슬래브 + 마감 + 칸막이 + 보 자중 (kN/m²)
@@ -164,7 +237,6 @@ export function resolveSafeStructuralSystem(params: {
 }): StructuralSystemId {
   const { floors, windowWallRatio = 0.5, primaryMaterial, requestedSystem } = params;
 
-  // 유리가 많은 집(창호비율 65% 이상 또는 유리 주재질)은 순수 목조·무골조 금지 -> 철골/복합조 강제
   if (primaryMaterial === 'glass' || windowWallRatio >= 0.65) {
     if (requestedSystem === 'steel_frame' || requestedSystem === 'hybrid_rc_steel') {
       return requestedSystem;
@@ -173,7 +245,6 @@ export function resolveSafeStructuralSystem(params: {
   }
 
   if (requestedSystem) {
-    // 4층 이상인데 중목구조 요청 시 안전을 위해 RC 또는 하이브리드로 상향
     if (requestedSystem === 'heavy_timber' && floors >= 4) {
       return 'hybrid_rc_steel';
     }
@@ -192,14 +263,14 @@ export function resolveSafeStructuralSystem(params: {
  */
 export function runStructuralAnalysis(
   spec: BuildingSpec,
-  matSpec: ElementMaterialSpec
+  matSpec: ElementMaterialSpec,
+  floorDeadLoadDeltaKnM2?: Record<number, number>
 ): StructuralAnalysisReport {
   const system = STRUCTURAL_SYSTEM_DB[matSpec.structuralSystem];
   const floors = Math.max(1, Math.round(spec.floors || 2));
   const floorHeightM = Math.max(2.6, (spec.heightMeters || floors * 3.3) / floors);
   const footprintSqm = Math.max(40, spec.buildingAreaSqm || 150);
 
-  // 건축면적 기반 가로·세로 실치수 및 구조 기둥 그리드(경간 4.2m ~ 6.2m) 자동 배치
   const aspect = 1.22;
   const widthM = Math.sqrt(footprintSqm * aspect);
   const depthM = footprintSqm / widthM;
@@ -214,76 +285,65 @@ export function runStructuralAnalysis(
   const tributaryAreaM2 = spanXM * spanZM;
   const totalColumnsPerFloor = (baysX + 1) * (baysZ + 1);
 
-  // 바닥 슬래브 및 마감 고정하중 (kN/m²)
   const slabThickM =
     matSpec.structuralSystem === 'heavy_timber'
-      ? 0.14 // CLT/목재 장선 바닥
+      ? 0.14
       : matSpec.structuralSystem === 'steel_frame'
-      ? 0.15 // 데크플레이트 RC 토핑 슬래브
-      : 0.18; // 일반 RC 슬래브 (KDS 최소두께 및 바닥충격음 고려)
+      ? 0.15
+      : 0.18;
 
   const slabSelfWeight =
     matSpec.structuralSystem === 'heavy_timber'
-      ? slabThickM * 5.5 + 0.6 // 목재 바닥 + 방통/마감
+      ? slabThickM * 5.5 + 0.6
       : slabThickM * 24.0;
 
-  // 바닥 마감(온돌 모르타르 0.9) + 천장/설비(0.4) + 경량칸막이 등가하중(1.0) + 보 자중 등가(0.5)
   const superDeadKnM2 =
     spec.usageType === '단독주택' || spec.usageType === '공동주택' ? 2.6 : 2.2;
   const claddingLineDeadKnM2 =
     matSpec.glazingSpec === 'curtain_wall'
       ? 0.55
-      : matSpec.exteriorCladding === 'concrete'
-      ? 0.95
-      : matSpec.exteriorCladding === 'wood'
-      ? 0.35
-      : 0.55;
+      : CLADDING_COST_DB[matSpec.exteriorCladding]?.surfaceDeadLoadKnM2 ?? 0.55;
 
   const baseFloorDeadKnM2 = Number(
     (slabSelfWeight + superDeadKnM2 + claddingLineDeadKnM2).toFixed(2)
   );
-  const roofDeadKnM2 = Number((slabSelfWeight + 1.4).toFixed(2)); // 지붕 방수·단열·지붕재 자중
+  const roofDeadKnM2 = Number((slabSelfWeight + 1.4).toFixed(2));
 
-  // 구조 시스템별 단면 치수 자동 사이징 (층수 반영)
   let colCapacityKn = 1500;
   let colEulerKn = 4000;
   let beamCapacityKnM = 180;
-  let beamEI_Nmm2 = 2e13; // E * I (N·mm²)
+  let beamEI_Nmm2 = 2e13;
   let columnSectionLabel = '';
   let beamSectionLabel = '';
 
   const L_col_mm = floorHeightM * 1000;
-  const K_eff = 1.0; // 횡변위 구속 라멘 유효좌굴길이계수
+  const K_eff = 1.0;
 
   if (matSpec.structuralSystem === 'rc_frame') {
     const colSideMm = floors <= 2 ? 350 : floors <= 5 ? 400 : 500;
     const beamB = 300;
     const beamH = floors <= 3 ? 450 : 550;
     const Ag = colSideMm * colSideMm;
-    const rhoG = 0.016; // 철근비 1.6% (KDS 14 20 20 최소 1%~최대 8% 범위)
+    const rhoG = 0.016;
     const Ast = Ag * rhoG;
     const fck = system.designStrengthMpa;
     const fy = system.rebarYieldMpa ?? 400;
 
-    // KDS 14 20 20 띠철근 기둥 최대 설계축강도 φPn,max
     const Pn_max_N = 0.8 * (0.85 * fck * (Ag - Ast) + fy * Ast);
     colCapacityKn = (system.phiCompression * Pn_max_N) / 1000;
 
-    // 오일러 탄성좌굴하중 Pcr = π² * (0.4 Ec Ig) / (KL)² (균열단면 강성 0.7Ig 중 장기 0.4Ig)
-    const Ig_col = (Math.pow(colSideMm, 4)) / 12;
+    const Ig_col = Math.pow(colSideMm, 4) / 12;
     colEulerKn =
       (Math.PI * Math.PI * system.elasticModulusMpa * (0.7 * Ig_col)) /
       Math.pow(K_eff * L_col_mm, 2) /
       1000;
 
-    // RC 보 설계휨강도 φMn (인장철근비 0.85%, d = h - 60mm)
     const d_mm = beamH - 60;
     const As_beam = beamB * d_mm * 0.0085;
     const a_mm = (As_beam * fy) / (0.85 * fck * beamB);
     const Mn_Nmm = As_beam * fy * (d_mm - a_mm * 0.5);
     beamCapacityKnM = (system.phiFlexure * Mn_Nmm) / 1e6;
 
-    // RC 보 균열유효단면2차모멘트 Ie ≈ 0.35 Ig (KDS 14 20 30)
     const Ig_beam = (beamB * Math.pow(beamH, 3)) / 12;
     beamEI_Nmm2 = system.elasticModulusMpa * (0.35 * Ig_beam);
 
@@ -293,26 +353,22 @@ export function runStructuralAnalysis(
     matSpec.structuralSystem === 'steel_frame' ||
     matSpec.structuralSystem === 'hybrid_rc_steel'
   ) {
-    // 표준 KS H형강 단면 (층수별 자동 선택)
     const heavy = floors >= 4;
-    const Ag = heavy ? 9218 : 6353; // H-250x250x9x14 vs H-200x200x8x12 (mm²)
-    const Iy = heavy ? 36500000 : 16000000; // 약축 단면2차모멘트 (mm⁴)
+    const Ag = heavy ? 9218 : 6353;
+    const Iy = heavy ? 36500000 : 16000000;
     const ry = Math.sqrt(Iy / Ag);
     const Fy = system.designStrengthMpa;
     const Es = system.elasticModulusMpa;
 
-    // KDS 14 31 10 강구조 압축부재 좌굴응력 Fcr
     const slenderness = (K_eff * L_col_mm) / ry;
     const Fe = (Math.PI * Math.PI * Es) / (slenderness * slenderness);
-    const Fcr =
-      Fy / Fe <= 2.25 ? Math.pow(0.658, Fy / Fe) * Fy : 0.877 * Fe;
+    const Fcr = Fy / Fe <= 2.25 ? Math.pow(0.658, Fy / Fe) * Fy : 0.877 * Fe;
 
     colCapacityKn = (system.phiCompression * Fcr * Ag) / 1000;
     colEulerKn = (Fe * Ag) / 1000;
 
-    // H형강 보 (H-300x150x6.5x9 또는 H-350x175x7x11)
-    const Zx = heavy ? 865000 : 542000; // 소성단면계수 (mm³)
-    const Ix_beam = heavy ? 136000000 : 72100000; // 강축 단면2차모멘트 (mm⁴)
+    const Zx = heavy ? 865000 : 542000;
+    const Ix_beam = heavy ? 136000000 : 72100000;
     beamCapacityKnM = (system.phiFlexure * Fy * Zx) / 1e6;
     beamEI_Nmm2 = Es * Ix_beam;
 
@@ -323,15 +379,13 @@ export function runStructuralAnalysis(
       ? 'H-350×175×7×11 (SS275)'
       : 'H-300×150×6.5×9 (SS275)';
   } else {
-    // heavy_timber (구조용 집성재 Glulam)
     const colD = floors <= 2 ? 210 : 240;
     const beamB = 180;
     const beamH = 330;
     const Ag = colD * colD;
-    const FcStar = system.designStrengthMpa; // 18 MPa
-    const E_min = system.elasticModulusMpa * 0.55; // 좌굴용 최소탄성계수
+    const FcStar = system.designStrengthMpa;
+    const E_min = system.elasticModulusMpa * 0.55;
 
-    // Ylinen 기둥 안정계수 Cp (KDS 41 50 / NDS 목구조 기준)
     const leOverD = (K_eff * L_col_mm) / colD;
     const FcE = (0.822 * E_min) / (leOverD * leOverD);
     const c_glulam = 0.9;
@@ -346,7 +400,6 @@ export function runStructuralAnalysis(
       Math.pow(K_eff * L_col_mm, 2) /
       1000;
 
-    // 목재 보 휨강도 (Fb = 24 MPa)
     const Sx = (beamB * beamH * beamH) / 6;
     beamCapacityKnM = (system.phiFlexure * 24.0 * Sx) / 1e6;
     const I_beam = (beamB * Math.pow(beamH, 3)) / 12;
@@ -356,7 +409,6 @@ export function runStructuralAnalysis(
     beamSectionLabel = `Glulam 집성재 ${beamB}×${beamH}mm`;
   }
 
-  // 상층(지붕) -> 하층(1층) 순으로 실제 누적 축하중 전달 계산
   const floorResults: FloorPhysicsResult[] = [];
   let cumulativeFactoredColumnKn = 0;
   let cumulativeServiceColumnKn = 0;
@@ -372,10 +424,13 @@ export function runStructuralAnalysis(
 
   for (let f = floors; f >= 1; f--) {
     const isTopFloor = f === floors;
-    const deadKnM2 = isTopFloor ? Number(((baseFloorDeadKnM2 + roofDeadKnM2) * 0.55).toFixed(2)) : baseFloorDeadKnM2;
+    const baseD = isTopFloor
+      ? (baseFloorDeadKnM2 + roofDeadKnM2) * 0.55
+      : baseFloorDeadKnM2;
+    const customDeltaD = floorDeadLoadDeltaKnM2?.[f] ?? 0;
+    const deadKnM2 = Number(Math.max(1.8, baseD + customDeltaD).toFixed(2));
     const liveKnM2 = spec.floorLoadsKn?.[f] ?? defaultLiveKn;
 
-    // KDS 41 12 00 강도설계법 하중조합 U = max(1.4D, 1.2D + 1.6L)
     const factoredKnM2 = Number(
       Math.max(1.4 * deadKnM2, 1.2 * deadKnM2 + 1.6 * liveKnM2).toFixed(2)
     );
@@ -384,20 +439,17 @@ export function runStructuralAnalysis(
     totalDeadWeightKn += deadKnM2 * footprintSqm;
     totalLiveWeightKn += liveKnM2 * footprintSqm;
 
-    // 보 등분포하중 wu (kN/m) 및 휨모멘트 Mu = wu * L² / 8
     const wu_beam = factoredKnM2 * tribWidthM;
-    const ws_beam = serviceKnM2 * tribWidthM; // 1 kN/m = 1 N/mm
+    const ws_beam = serviceKnM2 * tribWidthM;
     const beamMomentKnM = (wu_beam * govSpanM * govSpanM) / 8;
     const beamFlexureDcr = beamMomentKnM / Math.max(1, beamCapacityKnM);
 
-    // 보 탄성 처짐 δ = 5 * ws * L⁴ / (384 * E * I) [단위: N, mm -> 결과 mm]
     const L_beam_mm = govSpanM * 1000;
     const beamDeflectionMm =
       (5 * ws_beam * Math.pow(L_beam_mm, 4)) / (384 * Math.max(1e9, beamEI_Nmm2));
     const allowableDeflectionMm = L_beam_mm / 240;
     const beamDeflectionDcr = beamDeflectionMm / Math.max(1, allowableDeflectionMm);
 
-    // 기둥 자체 자중 + 해당 층 분담면적 하중 누적
     const colSelfKn =
       matSpec.structuralSystem === 'heavy_timber'
         ? 0.21 * 0.21 * floorHeightM * 5.5
@@ -408,11 +460,9 @@ export function runStructuralAnalysis(
     cumulativeFactoredColumnKn += factoredKnM2 * tributaryAreaM2 + 1.2 * colSelfKn;
     cumulativeServiceColumnKn += serviceKnM2 * tributaryAreaM2 + colSelfKn;
 
-    // 오일러 좌굴과 단면 압축강도 중 지배값으로 DCR 계산
     const effectiveColCapKn = Math.min(colCapacityKn, colEulerKn * 0.75);
     const columnDcr = cumulativeFactoredColumnKn / Math.max(1, effectiveColCapKn);
 
-    // 슬래브 응력비 (기준 한계 14 kN/m² 대비 계수하중 비율)
     const slabLimitKnM2 = matSpec.structuralSystem === 'heavy_timber' ? 11.5 : 15.5;
     const slabDcr = factoredKnM2 / slabLimitKnM2;
 
@@ -443,7 +493,6 @@ export function runStructuralAnalysis(
 
   floorResults.sort((a, b) => a.floor - b.floor);
 
-  // 최하부 기초 지반접지압 검토 (보통 풍화토 허용지내력 qa = 200 kPa = 200 kN/m²)
   const allowableSoilKpa = 200;
   const footingAreaM2 =
     matSpec.foundationMaterial === 'rc_mat'
@@ -514,27 +563,75 @@ export function runStructuralAnalysis(
   };
 }
 
-/** 외장 마감재별 현실적 한국 시공 단가 (자재 + 시공 분리, 원/㎡) */
-const CLADDING_COST_DB: Record<CadMaterial, { label: string; matPerSqm: number; laborPerSqm: number }> = {
-  stucco: { label: '스타코플렉스 + 외단열(EPS 150T)', matPerSqm: 78000, laborPerSqm: 58000 },
-  wood: { label: '적삼목/탄화목 우드 사이딩 + 방습지', matPerSqm: 125000, laborPerSqm: 72000 },
-  concrete: { label: '노출콘크리트 발수코팅 + 내단열', matPerSqm: 85000, laborPerSqm: 78000 },
-  steel: { label: '리얼징크/알루미늄 복합패널 마감', matPerSqm: 118000, laborPerSqm: 68000 },
-  titanium: { label: '티타늄 아연판(VMZINC) 고급 외장', matPerSqm: 195000, laborPerSqm: 88000 },
-  glass: { label: '알루미늄 로이(Low-E) 복층 커튼월', matPerSqm: 265000, laborPerSqm: 115000 },
-  hologram: { label: '복층 로이 유리 파사드', matPerSqm: 245000, laborPerSqm: 105000 },
-  carbon: { label: '세라믹/복합재(CFRP) 외장 패널', matPerSqm: 175000, laborPerSqm: 82000 },
-  gold: { label: '샴페인 아노다이징 알루미늄 패널', matPerSqm: 185000, laborPerSqm: 85000 },
-};
+/** 개별 부위의 실제 건축 면적(㎡) 추정 (SceneCanvas 호버 툴팁과 동일 공식) */
+function computeSolidFaceAreaM2(solid: SolidPrimitive): number {
+  const dims = [
+    solid.scale[0] * SCALE_DIV,
+    solid.scale[1] * SCALE_DIV,
+    solid.scale[2] * SCALE_DIV,
+  ].sort((a, b) => b - a);
+  return Math.max(0.5, Number((dims[0] * dims[1]).toFixed(2)));
+}
+
+/** 부위별 기본(초기 생성) 재질을 판별해 개별·층별 변경 차액을 정확히 산출 */
+function getBaselineMaterialForSolid(
+  solid: SolidPrimitive,
+  matSpec: ElementMaterialSpec,
+  spec: BuildingSpec
+): CadMaterial | null {
+  const role = solid.partRole;
+  const floor = solid.floorIndex ?? 1;
+
+  if (
+    role === 'garden' ||
+    role === 'furniture' ||
+    role === 'sculpture' ||
+    role === 'site_boundary' ||
+    role === 'unit_divider' ||
+    role === 'basement' ||
+    role === 'structural_footing'
+  ) {
+    return null;
+  }
+  if (role === 'roof') return matSpec.roofMaterial;
+  if (role === 'roof_infill') {
+    return floor > 1 || spec.floors > 1 ? matSpec.upperCladding : matSpec.exteriorCladding;
+  }
+  if (role === 'exterior_wall') {
+    return floor <= 1 ? matSpec.exteriorCladding : matSpec.upperCladding;
+  }
+  if (role === 'slab') {
+    return matSpec.structuralSystem === 'heavy_timber' ? 'wood' : 'concrete';
+  }
+  if (role === 'structural_column' || role === 'structural_beam') {
+    if (matSpec.structuralSystem === 'steel_frame') return 'steel';
+    if (matSpec.structuralSystem === 'heavy_timber') return 'wood';
+    if (matSpec.structuralSystem === 'hybrid_rc_steel') {
+      return floor <= 1 ? 'concrete' : 'steel';
+    }
+    return 'concrete';
+  }
+  if (role === 'interior_wall') {
+    if (spec.interiorTheme === 'industrial-loft') return 'concrete';
+    if (spec.interiorTheme === 'japandi') return 'wood';
+    return 'stucco';
+  }
+  if (role === 'interior_floor') {
+    return spec.interiorTheme === 'industrial-loft' ? 'concrete' : 'wood';
+  }
+  if (role === 'core') return 'concrete';
+  return matSpec.exteriorCladding;
+}
 
 /**
  * 실제 부재 물량산출(QTO) 기반 대한민국 현실적 건축 공사비 산출
- * (중복 계상 제거 — 단독주택 기준 평당 약 550만~950만 원 수준의 합리적 공사비 산출)
+ * (solids를 전달하면 개별 부위·층별 재질 변경에 따른 자재비·시공비 차액까지 실시간 합산)
  */
 export function calculateRealisticBudget(
   spec: BuildingSpec,
   matSpec: ElementMaterialSpec,
-  physics: StructuralAnalysisReport
+  physics: StructuralAnalysisReport,
+  solids?: SolidPrimitive[]
 ): RealisticBudgetReport {
   const floors = Math.max(1, spec.floors || 2);
   const aboveArea = Math.max(40, spec.totalFloorAreaSqm || 200);
@@ -543,7 +640,6 @@ export function calculateRealisticBudget(
   const heightM = Math.max(3.2, spec.heightMeters || floors * 3.3);
   const wwr = Math.max(0.22, Math.min(0.82, spec.windowWallRatio ?? 0.5));
 
-  // 외벽 총 면적 추정 (평면 둘레 × 건물 높이)
   const perimeterM = 2 * (Math.sqrt(footprint * 1.22) + footprint / Math.sqrt(footprint * 1.22));
   const grossFacadeArea = perimeterM * heightM;
   const windowAreaSqm = Math.round(grossFacadeArea * wwr);
@@ -553,7 +649,7 @@ export function calculateRealisticBudget(
 
   const lines: QtoBudgetLine[] = [];
 
-  // 1. 기초 및 토공사 (매트/독립기초 + 지하 터파기)
+  // 1. 기초 및 토공사
   const foundationConcreteM3 = Math.round(footprint * 0.35 + ugArea * 0.42);
   const foundationMat = foundationConcreteM3 * 165000 + ugArea * 180000;
   const foundationLabor = foundationConcreteM3 * 115000 + ugArea * 190000;
@@ -572,12 +668,12 @@ export function calculateRealisticBudget(
     totalCostKrw: Math.round(foundationMat + foundationLabor),
   });
 
-  // 2. 주 구조 골조 (구조 시스템별 실제 물량 산출)
+  // 2. 주 구조 골조
   if (matSpec.structuralSystem === 'rc_frame') {
     const concreteM3 = Math.round(aboveArea * 0.38);
     const rebarTon = Number((concreteM3 * 0.105).toFixed(1));
-    const matCost = Math.round(concreteM3 * 110000 + rebarTon * 980000); // 레미콘 + SD400 철근
-    const laborCost = Math.round(concreteM3 * 220000 + rebarTon * 720000); // 거푸집 + 철근가공·타설
+    const matCost = Math.round(concreteM3 * 110000 + rebarTon * 980000);
+    const laborCost = Math.round(concreteM3 * 220000 + rebarTon * 720000);
     lines.push({
       category: '주구조 골조',
       itemName: '철근콘크리트(RC) 기둥·보·슬래브 골조',
@@ -593,7 +689,7 @@ export function calculateRealisticBudget(
     matSpec.structuralSystem === 'steel_frame' ||
     matSpec.structuralSystem === 'hybrid_rc_steel'
   ) {
-    const steelTon = Number((aboveArea * 0.058).toFixed(1)); // 약 58kg/㎡
+    const steelTon = Number((aboveArea * 0.058).toFixed(1));
     const deckConcreteM3 = Math.round(aboveArea * 0.16);
     const matCost = Math.round(steelTon * 1450000 + deckConcreteM3 * 135000);
     const laborCost = Math.round(steelTon * 980000 + deckConcreteM3 * 145000);
@@ -612,9 +708,8 @@ export function calculateRealisticBudget(
       totalCostKrw: matCost + laborCost,
     });
   } else {
-    // heavy_timber
     const timberM3 = Number((aboveArea * 0.24).toFixed(1));
-    const matCost = Math.round(timberM3 * 980000 + aboveArea * 65000); // 집성재 + 구조철물
+    const matCost = Math.round(timberM3 * 980000 + aboveArea * 65000);
     const laborCost = Math.round(timberM3 * 640000 + aboveArea * 55000);
     lines.push({
       category: '주구조 골조',
@@ -629,7 +724,7 @@ export function calculateRealisticBudget(
     });
   }
 
-  // 3. 외벽 마감재 (1층 + 상층부 분리 물량 산출)
+  // 3. 외벽 마감재 (1층 + 상층부)
   const c1 = CLADDING_COST_DB[matSpec.exteriorCladding] ?? CLADDING_COST_DB.stucco;
   const c2 = CLADDING_COST_DB[matSpec.upperCladding] ?? CLADDING_COST_DB.wood;
   const wallMatCost = floor1WallSqm * c1.matPerSqm + upperWallSqm * c2.matPerSqm;
@@ -638,7 +733,7 @@ export function calculateRealisticBudget(
     category: '외장·단열',
     itemName:
       upperWallSqm > 0 && matSpec.exteriorCladding !== matSpec.upperCladding
-        ? `외벽 이종 마감 (1F ${c1.label.split(' ')[0]} + 상층 ${c2.label.split(' ')[0]})`
+        ? `외벽 이종 마감 (1F ${c1.label.split('(')[0]} + 상층 ${c2.label.split('(')[0]})`
         : `외벽 마감 (${c1.label})`,
     specDetail: `불투명 외벽 ${opaqueWallSqm}㎡ (1F ${floor1WallSqm}㎡ / 상층 ${upperWallSqm}㎡)`,
     quantity: opaqueWallSqm,
@@ -678,7 +773,7 @@ export function calculateRealisticBudget(
   const roofLabor = roofAreaSqm * (roofInfo.laborPerSqm + 35000);
   lines.push({
     category: '지붕·방수',
-    itemName: `지붕 구조 마감 및 복합방수 (${roofInfo.label.split(' ')[0]})`,
+    itemName: `지붕 구조 마감 및 복합방수 (${roofInfo.label.split('(')[0]})`,
     specDetail: `지붕 투영/경사 면적 ${roofAreaSqm}㎡ (우레탄·시트방수 및 지붕단열 포함)`,
     quantity: roofAreaSqm,
     unit: '㎡',
@@ -688,7 +783,7 @@ export function calculateRealisticBudget(
     totalCostKrw: roofMat + roofLabor,
   });
 
-  // 6. 실내 인테리어 마감 (바닥 마루/타일 + 내벽 도배/도장 + 주방·욕실)
+  // 6. 실내 인테리어 마감
   const totalUsableArea = aboveArea + ugArea * 0.6;
   const intMat = Math.round(totalUsableArea * 260000);
   const intLabor = Math.round(totalUsableArea * 210000);
@@ -704,7 +799,7 @@ export function calculateRealisticBudget(
     totalCostKrw: intMat + intLabor,
   });
 
-  // 7. 기계설비·전기·배관(MEP) + 승강기(선택)
+  // 7. 기계설비·전기·배관(MEP) + 승강기
   const mepArea = aboveArea + ugArea;
   const elevCount = Math.max(0, spec.elevators || 0);
   const mepMat = Math.round(mepArea * 155000 + elevCount * 42000000);
@@ -742,8 +837,61 @@ export function calculateRealisticBudget(
     });
   }
 
-  const totalMaterialCostKrw = lines.reduce((acc, l) => acc + l.materialCostKrw, 0);
-  const totalLaborCostKrw = lines.reduce((acc, l) => acc + l.laborCostKrw, 0);
+  // 9. 개별 부위·층 전체 재질 커스텀 변경 차액 정산 (금·유리·티타늄·카본 등 즉시 반영)
+  if (solids && solids.length > 0) {
+    let deltaMatTotal = 0;
+    let deltaLaborTotal = 0;
+    let changedAreaM2 = 0;
+    let changedCount = 0;
+    const changedLabels = new Set<string>();
+
+    solids.forEach((solid) => {
+      if (!solid.material) return;
+      const baseMat = getBaselineMaterialForSolid(solid, matSpec, spec);
+      if (!baseMat || baseMat === solid.material) return;
+
+      const curCost = CLADDING_COST_DB[solid.material];
+      const baseCost = CLADDING_COST_DB[baseMat];
+      if (!curCost || !baseCost) return;
+
+      const areaM2 = computeSolidFaceAreaM2(solid);
+      deltaMatTotal += (curCost.matPerSqm - baseCost.matPerSqm) * areaM2;
+      deltaLaborTotal += (curCost.laborPerSqm - baseCost.laborPerSqm) * areaM2;
+      changedAreaM2 += areaM2;
+      changedCount += 1;
+      changedLabels.add(curCost.label.split('(')[0]);
+    });
+
+    const totalDelta = Math.round(deltaMatTotal + deltaLaborTotal);
+    if (changedCount > 0 && Math.abs(totalDelta) >= 10000) {
+      const labelArr = Array.from(changedLabels);
+      const summaryName =
+        labelArr.length === 1
+          ? `${labelArr[0]} 변경 차액`
+          : `${labelArr[0]} 외 ${labelArr.length - 1}종 변경 차액`;
+
+      lines.push({
+        category: '자재 변경 차액',
+        itemName: summaryName,
+        specDetail: `개별·층별 변경 ${changedCount}개 부위 (총 ${changedAreaM2.toFixed(1)}㎡ 적용)`,
+        quantity: Number(changedAreaM2.toFixed(1)),
+        unit: '㎡',
+        unitPriceKrw: Math.round(totalDelta / Math.max(1, changedAreaM2)),
+        materialCostKrw: Math.round(deltaMatTotal),
+        laborCostKrw: Math.round(deltaLaborTotal),
+        totalCostKrw: totalDelta,
+      });
+    }
+  }
+
+  const totalMaterialCostKrw = Math.max(
+    5000000,
+    lines.reduce((acc, l) => acc + l.materialCostKrw, 0)
+  );
+  const totalLaborCostKrw = Math.max(
+    5000000,
+    lines.reduce((acc, l) => acc + l.laborCostKrw, 0)
+  );
   const directConstructionKrw = totalMaterialCostKrw + totalLaborCostKrw;
   const indirectAndDesignKrw = Math.round(directConstructionKrw * 0.16);
   const grandTotalKrw = directConstructionKrw + indirectAndDesignKrw;
@@ -762,6 +910,127 @@ export function calculateRealisticBudget(
     costPerSqmKrw,
     costPerPyeongKrw,
     referenceNote:
-      '대한건설협회 시중노임·자재 물량산출(QTO) 기준 추정치 (순수 자재비·시공비·간접/설계비 분리 산출, 토지구입비 및 취득세 제외)',
+      '대한건설협회 시중노임·자재 물량산출(QTO) 기준 추정치 (부위·층별 재질 변경 차액 실시간 반영, 토지구입비·취득세 제외)',
+  };
+}
+
+/**
+ * 개별 부위 또는 층 전체의 재질/치수가 변경되었을 때
+ * 1) 자재 단위중량 변화에 따른 층별 자중(D) 및 KDS 구조역학(DCR) 재계산
+ * 2) 실제 변경 면적 × 단가 차액을 반영한 총 예상 공사비(budgetReport) 재계산
+ * 3) 각 SolidPrimitive의 dcr·stressLabel까지 최신 수치로 갱신
+ */
+export function syncPhysicsAndBudgetForSolids(
+  spec: BuildingSpec,
+  solids: SolidPrimitive[]
+): {
+  nextSpec: BuildingSpec;
+  nextSolids: SolidPrimitive[];
+} {
+  const floors = Math.max(1, spec.floors || 2);
+  const footprint = Math.max(40, spec.buildingAreaSqm || 150);
+
+  const matSpec: ElementMaterialSpec = spec.elementMaterials ?? {
+    structuralSystem:
+      spec.structuralSystem ??
+      resolveSafeStructuralSystem({
+        usageType: spec.usageType,
+        floors,
+        windowWallRatio: spec.windowWallRatio,
+        primaryMaterial: 'stucco',
+      }),
+    foundationMaterial: floors >= 3 ? 'rc_mat' : 'rc_footing',
+    exteriorCladding: 'stucco',
+    upperCladding: spec.accentMaterial ?? 'wood',
+    roofMaterial: spec.roofMaterial ?? 'steel',
+    glazingSpec: (spec.windowWallRatio ?? 0.5) >= 0.65 ? 'curtain_wall' : 'double_lowe',
+    insulationSpec: 'eps_150',
+  };
+
+  // 층별 자재 변경에 따른 마감 자중 증감분(kN/㎡) 집계
+  const floorWeightDeltaKn: Record<number, number> = {};
+  solids.forEach((solid) => {
+    if (!solid.material) return;
+    const baseMat = getBaselineMaterialForSolid(solid, matSpec, spec);
+    if (!baseMat || baseMat === solid.material) return;
+
+    const curW = CLADDING_COST_DB[solid.material]?.surfaceDeadLoadKnM2 ?? 0.4;
+    const baseW = CLADDING_COST_DB[baseMat]?.surfaceDeadLoadKnM2 ?? 0.4;
+    const areaM2 = computeSolidFaceAreaM2(solid);
+    const fIdx =
+      typeof solid.floorIndex === 'number' && solid.floorIndex >= 1 && solid.floorIndex <= floors
+        ? solid.floorIndex
+        : floors;
+    floorWeightDeltaKn[fIdx] = (floorWeightDeltaKn[fIdx] ?? 0) + (curW - baseW) * areaM2;
+  });
+
+  const floorDeadLoadDeltaKnM2: Record<number, number> = {};
+  Object.entries(floorWeightDeltaKn).forEach(([fKey, totalKn]) => {
+    floorDeadLoadDeltaKnM2[Number(fKey)] = Number((totalKn / footprint).toFixed(3));
+  });
+
+  const structuralReport = runStructuralAnalysis(spec, matSpec, floorDeadLoadDeltaKnM2);
+  const budgetReport = calculateRealisticBudget(spec, matSpec, structuralReport, solids);
+
+  // 각 3D 부재의 dcr 및 stressLabel을 최신 물리 해석 결과로 갱신
+  const footingLabel = `기초 지반압 ${structuralReport.soilBearingPressureKpa}kPa / 허용 ${structuralReport.allowableSoilKpa}kPa (DCR ${(
+    structuralReport.foundationDcr * 100
+  ).toFixed(0)}%)`;
+
+  const nextSolids = solids.map((solid) => {
+    const fIdx =
+      typeof solid.floorIndex === 'number' && solid.floorIndex >= 1 && solid.floorIndex <= floors
+        ? solid.floorIndex
+        : 1;
+    const fp =
+      structuralReport.floors.find((r) => r.floor === fIdx) ?? structuralReport.floors[0];
+    if (!fp) return solid;
+
+    if (solid.partRole === 'structural_footing' || solid.partRole === 'basement') {
+      return {
+        ...solid,
+        dcr: structuralReport.foundationDcr,
+        stressLabel: footingLabel,
+      };
+    }
+    if (solid.partRole === 'structural_column') {
+      return {
+        ...solid,
+        dcr: fp.columnDcr,
+        stressLabel: `${fIdx}F ${structuralReport.columnSectionLabel} · 축하중 ${fp.columnAxialDemandKn}kN / 설계강도 ${fp.columnCapacityKn}kN (DCR ${(
+          fp.columnDcr * 100
+        ).toFixed(0)}%)`,
+      };
+    }
+    if (solid.partRole === 'structural_beam') {
+      const bDcr = Math.max(fp.beamFlexureDcr, fp.beamDeflectionDcr);
+      return {
+        ...solid,
+        dcr: bDcr,
+        stressLabel: `${fIdx}F ${structuralReport.beamSectionLabel} · 모멘트 ${fp.beamMomentKnM}/${fp.beamCapacityKnM}kN·m · 처짐 ${fp.beamDeflectionMm}/${fp.allowableDeflectionMm}mm (DCR ${(
+          bDcr * 100
+        ).toFixed(0)}%)`,
+      };
+    }
+    if (solid.partRole === 'slab') {
+      return {
+        ...solid,
+        dcr: fp.slabDcr,
+        stressLabel: `${fIdx}F 슬래브 · 고정 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2} → 계수하중 ${fp.factoredLoadKnM2}kN/㎡ (DCR ${(
+          fp.slabDcr * 100
+        ).toFixed(0)}%)`,
+      };
+    }
+    return solid;
+  });
+
+  return {
+    nextSpec: {
+      ...spec,
+      elementMaterials: matSpec,
+      structuralReport,
+      budgetReport,
+    },
+    nextSolids,
   };
 }

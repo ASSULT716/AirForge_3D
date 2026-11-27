@@ -702,6 +702,42 @@ export function getFloorColor(floorIndex: number): string {
   return FLOOR_COLOR_PALETTE[(Math.max(1, floorIndex) - 1) % FLOOR_COLOR_PALETTE.length];
 }
 
+// ---------- 2D 직사각형 차집합 (층간 어긋남 상·하부 빈틈 밀봉용) ----------
+
+interface Rect2D {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+/** A \ B: A에서 B와 겹치지 않는 노출 영역을 최대 4개의 비중첩 직사각형으로 정밀 분할 */
+function subtractRect2D(a: Rect2D, b: Rect2D, eps = 0.015): Rect2D[] {
+  const ix0 = Math.max(a.minX, b.minX);
+  const ix1 = Math.min(a.maxX, b.maxX);
+  const iz0 = Math.max(a.minZ, b.minZ);
+  const iz1 = Math.min(a.maxZ, b.maxZ);
+
+  if (ix0 >= ix1 - 1e-4 || iz0 >= iz1 - 1e-4) {
+    return [a];
+  }
+
+  const strips: Rect2D[] = [];
+  if (ix0 - a.minX > eps) {
+    strips.push({ minX: a.minX, maxX: ix0, minZ: a.minZ, maxZ: a.maxZ });
+  }
+  if (a.maxX - ix1 > eps) {
+    strips.push({ minX: ix1, maxX: a.maxX, minZ: a.minZ, maxZ: a.maxZ });
+  }
+  if (iz0 - a.minZ > eps) {
+    strips.push({ minX: ix0, maxX: ix1, minZ: a.minZ, maxZ: iz0 });
+  }
+  if (a.maxZ - iz1 > eps) {
+    strips.push({ minX: ix0, maxX: ix1, minZ: iz1, maxZ: a.maxZ });
+  }
+  return strips;
+}
+
 // ---------- 자유형 대지 경계 폴리곤 기하 유틸리티 ----------
 
 export function createDefaultSitePolygon(
@@ -1150,7 +1186,6 @@ export function getDefaultSpecForCategory(
   };
 }
 
-// 10종 구조 아키타입 및 면적·개방감에 따른 동적 방 평면 재설계
 export function generateDynamicRoomLayout(params: {
   usageType: DesignCategory;
   templateId: BuildingTemplateId;
@@ -1340,7 +1375,6 @@ export function getRoomsForTemplate(
 
 const UNIT_TYPE_PALETTE = ['#0284c7', '#d97706', '#7c3aed', '#0d9488', '#db2777'];
 
-/** 구조 시스템별 3D 골조 시각 물성 (RC 콘크리트 / H-Beam 스틸 / 중목 집성재) */
 function getStructuralFrameStyle(
   sys: StructuralSystemId,
   floor: number
@@ -1387,7 +1421,6 @@ function getStructuralFrameStyle(
       beamW: 0.075,
     };
   }
-  // rc_frame
   return {
     colMat: 'concrete',
     colColor: '#94a3b8',
@@ -1395,6 +1428,18 @@ function getStructuralFrameStyle(
     beamH: 0.12,
     beamW: 0.1,
   };
+}
+
+interface FloorLayoutBox extends Rect2D {
+  floor: number;
+  cx: number;
+  cz: number;
+  curW: number;
+  curD: number;
+  floorBaseY: number;
+  floorTopY: number;
+  floorMat: CadMaterial;
+  floorColor: string;
 }
 
 export function generateWatertightArchitecture(
@@ -1418,7 +1463,7 @@ export function generateWatertightArchitecture(
   const floors = Math.max(1, Math.min(15, Math.round(rawSpec.floors || 1)));
   const undergroundFloors = Math.max(0, Math.min(5, Math.round(rawSpec.undergroundFloors || 0)));
 
-  // 0. 안전한 주구조 시스템 및 부위별 자재 명세 확정 (유리 단독·무골조 원천 차단)
+  // 0. 안전한 주구조 시스템 및 부위별 자재 명세 확정
   const resolvedSystem: StructuralSystemId = resolveSafeStructuralSystem({
     usageType: rawSpec.usageType,
     floors,
@@ -1551,7 +1596,7 @@ export function generateWatertightArchitecture(
     Math.round(rawSpec.totalFloorAreaSqm / Math.max(1, useHouseholds ? activeHouseholds : floors))
   );
 
-  // 3. 실제 철근콘크리트 기초 구조 생성 (매트기초 또는 기둥별 독립기초)
+  // 3. 실제 철근콘크리트 기초 구조 생성
   const footingStressLabel = `기초 지반압 ${structuralReport.soilBearingPressureKpa}kPa / 허용 ${structuralReport.allowableSoilKpa}kPa (DCR ${(
     structuralReport.foundationDcr * 100
   ).toFixed(0)}%)`;
@@ -1573,7 +1618,6 @@ export function generateWatertightArchitecture(
     });
   }
 
-  // 지하층 볼륨 (있을 경우 기초 아래 밀착)
   if (undergroundFloors > 0 && rawSpec.undergroundAreaSqm > 0) {
     const ugRatio = Math.min(
       1.0,
@@ -1672,53 +1716,11 @@ export function generateWatertightArchitecture(
     }
   }
 
-  // 5. 층별 실제 구조 골조(기둥 그리드 + X/Z축 거더 보 + 슬래브) + 외벽·창호·실내 조립
-  const slabThick = 0.075;
-  const extWallThick = 0.085;
-  const intWallThick = 0.045;
-  let topFloorW = bldgW;
-  let topFloorD = bldgD;
-  let topFloorCx = bldgOffsetX;
-  let topFloorCz = bldgOffsetZ;
-  let topFloorMat: CadMaterial = safeFloor1Cladding;
-  let topFloorColor = rawSpec.customWallColor ?? getFloorColor(1);
-  let firstFloorIndoorRooms: UnitRoomZone[] = [];
-
-  const gridCountX = Math.max(2, Math.min(4, structuralReport.columnGridCountX));
-  const gridCountZ = Math.max(2, Math.min(4, structuralReport.columnGridCountZ));
-  const sysMeta = STRUCTURAL_SYSTEM_DB[resolvedSystem];
-
+  // 5-0. 전 층의 정확한 2D 평면 박스 사전 계산 (층간 어긋남 구간 밀봉·캔틸레버 보강용)
+  const floorBoxes: FloorLayoutBox[] = [];
   for (let f = 1; f <= floors; f++) {
     const floorBaseY = (f - 1) * floorH;
     const floorTopY = f * floorH;
-    const clearWallH = Math.max(0.28, floorH - slabThick);
-    const wallCenterY = floorBaseY + slabThick + clearWallH * 0.5;
-
-    const fp =
-      structuralReport.floors.find((r) => r.floor === f) ??
-      structuralReport.floors[0];
-    const colDcr = fp?.columnDcr ?? 0.3;
-    const beamDcr = fp ? Math.max(fp.beamFlexureDcr, fp.beamDeflectionDcr) : 0.3;
-    const slabDcr = fp?.slabDcr ?? 0.25;
-    const nonBearingWallDcr = Number((slabDcr * 0.25).toFixed(3));
-
-    const colStressLabel = fp
-      ? `${f}F ${structuralReport.columnSectionLabel} · 축하중 ${fp.columnAxialDemandKn}kN / 설계강도 ${fp.columnCapacityKn}kN (DCR ${(
-          fp.columnDcr * 100
-        ).toFixed(0)}%)`
-      : `${f}F 수직 기둥`;
-    const beamStressLabel = fp
-      ? `${f}F ${structuralReport.beamSectionLabel} · 모멘트 ${fp.beamMomentKnM}/${fp.beamCapacityKnM}kN·m · 처짐 ${fp.beamDeflectionMm}/${fp.allowableDeflectionMm}mm (DCR ${(
-          beamDcr * 100
-        ).toFixed(0)}%)`
-      : `${f}F 수평 보`;
-    const slabStressLabel = fp
-      ? `${f}F 슬래브 · 고정 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2} → 계수하중 ${fp.factoredLoadKnM2}kN/㎡ (DCR ${(
-          fp.slabDcr * 100
-        ).toFixed(0)}%)`
-      : `${f}F 슬래브`;
-
-    const frameStyle = getStructuralFrameStyle(resolvedSystem, f);
     const floorMat: CadMaterial = f === 1 ? safeFloor1Cladding : safeUpperCladding;
     const floorColor =
       f === 1
@@ -1732,7 +1734,6 @@ export function generateWatertightArchitecture(
             ? '#cbd5e1'
             : getFloorColor(f));
 
-    // 10종 아키타입별 층별 구조 변형
     let stepFactorX = 1.0;
     let stepFactorZ = 1.0;
     let stepShiftX = 0;
@@ -1806,19 +1807,83 @@ export function generateWatertightArchitecture(
       curD = Math.min(curD, bldgD);
     }
 
-    if (f === floors) {
-      topFloorW = curW;
-      topFloorD = curD;
-      topFloorCx = cx;
-      topFloorCz = cz;
-      topFloorMat = floorMat;
-      topFloorColor = floorColor;
-    }
+    floorBoxes.push({
+      floor: f,
+      cx,
+      cz,
+      curW,
+      curD,
+      minX: cx - curW * 0.5,
+      maxX: cx + curW * 0.5,
+      minZ: cz - curD * 0.5,
+      maxZ: cz + curD * 0.5,
+      floorBaseY,
+      floorTopY,
+      floorMat,
+      floorColor,
+    });
+  }
 
-    const minX = cx - curW * 0.5;
-    const maxX = cx + curW * 0.5;
-    const minZ = cz - curD * 0.5;
-    const maxZ = cz + curD * 0.5;
+  // 5. 층별 실제 구조 골조(기둥 그리드 + X/Z축 거더 보 + 슬래브) + 외벽·창호·실내 조립
+  const slabThick = 0.075;
+  const extWallThick = 0.085;
+  const intWallThick = 0.045;
+  const floorFinishMat: CadMaterial =
+    interiorTheme === 'industrial-loft' ? 'concrete' : 'wood';
+  const structSlabMat: CadMaterial =
+    resolvedSystem === 'heavy_timber' ? 'wood' : 'concrete';
+
+  let firstFloorIndoorRooms: UnitRoomZone[] = [];
+
+  const gridCountX = Math.max(2, Math.min(4, structuralReport.columnGridCountX));
+  const gridCountZ = Math.max(2, Math.min(4, structuralReport.columnGridCountZ));
+  const sysMeta = STRUCTURAL_SYSTEM_DB[resolvedSystem];
+
+  for (let f = 1; f <= floors; f++) {
+    const box = floorBoxes[f - 1];
+    const {
+      cx,
+      cz,
+      curW,
+      curD,
+      minX,
+      maxX,
+      minZ,
+      maxZ,
+      floorBaseY,
+      floorTopY,
+      floorMat,
+      floorColor,
+    } = box;
+
+    const clearWallH = Math.max(0.28, floorH - slabThick);
+    const wallCenterY = floorBaseY + slabThick + clearWallH * 0.5;
+
+    const fp =
+      structuralReport.floors.find((r) => r.floor === f) ??
+      structuralReport.floors[0];
+    const colDcr = fp?.columnDcr ?? 0.3;
+    const beamDcr = fp ? Math.max(fp.beamFlexureDcr, fp.beamDeflectionDcr) : 0.3;
+    const slabDcr = fp?.slabDcr ?? 0.25;
+    const nonBearingWallDcr = Number((slabDcr * 0.25).toFixed(3));
+
+    const colStressLabel = fp
+      ? `${f}F ${structuralReport.columnSectionLabel} · 축하중 ${fp.columnAxialDemandKn}kN / 설계강도 ${fp.columnCapacityKn}kN (DCR ${(
+          fp.columnDcr * 100
+        ).toFixed(0)}%)`
+      : `${f}F 수직 기둥`;
+    const beamStressLabel = fp
+      ? `${f}F ${structuralReport.beamSectionLabel} · 모멘트 ${fp.beamMomentKnM}/${fp.beamCapacityKnM}kN·m · 처짐 ${fp.beamDeflectionMm}/${fp.allowableDeflectionMm}mm (DCR ${(
+          beamDcr * 100
+        ).toFixed(0)}%)`
+      : `${f}F 수평 보`;
+    const slabStressLabel = fp
+      ? `${f}F 슬래브 · 고정 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2} → 계수하중 ${fp.factoredLoadKnM2}kN/㎡ (DCR ${(
+          fp.slabDcr * 100
+        ).toFixed(0)}%)`
+      : `${f}F 슬래브`;
+
+    const frameStyle = getStructuralFrameStyle(resolvedSystem, f);
 
     // 5-A. 실제 주구조 골조: 수직 기둥 그리드 + 상부 X/Z축 횡보 거더 (+ 1층 독립기초)
     const insetX = frameStyle.colSize * 0.55;
@@ -1836,7 +1901,6 @@ export function generateWatertightArchitecture(
 
     xs.forEach((colX, ix) => {
       zs.forEach((colZ, iz) => {
-        // 1층 독립기초판 (매트기초가 아닐 때 각 기둥 하부에 실제 콘크리트 패드 배치)
         if (f === 1 && elementMaterials.foundationMaterial === 'rc_footing') {
           solids.push({
             id: `struct_footing_${ix}_${iz}`,
@@ -1854,7 +1918,6 @@ export function generateWatertightArchitecture(
           });
         }
 
-        // 수직 주구조 기둥 (RC / H-Beam 스틸 / 중목 집성재)
         solids.push({
           id: `struct_col_f${f}_${ix}_${iz}`,
           groupName: `${f}층 주구조 기둥 (${sysMeta.nameKo})`,
@@ -1872,7 +1935,6 @@ export function generateWatertightArchitecture(
       });
     });
 
-    // 층 상부 수평 거더 보 (X방향 및 Z방향으로 모든 기둥 머리를 강접합)
     const beamY = Number((floorTopY - frameStyle.beamH * 0.5).toFixed(3));
     zs.forEach((colZ, iz) => {
       solids.push({
@@ -1907,7 +1969,7 @@ export function generateWatertightArchitecture(
       });
     });
 
-    // 5-B. 층 바닥 구조 슬래브 (실제 슬래브 DCR 부착)
+    // 5-B. 층 바닥 구조 슬래브
     solids.push({
       id: `floor_${f}_slab`,
       groupName: `${f}층 바닥 구조 슬래브`,
@@ -1916,7 +1978,7 @@ export function generateWatertightArchitecture(
       position: [cx, Number((floorBaseY + slabThick * 0.5).toFixed(3)), cz],
       scale: [curW, slabThick, curD],
       color: floorColor,
-      material: resolvedSystem === 'heavy_timber' ? 'wood' : 'concrete',
+      material: structSlabMat,
       isFixed: true,
       floorIndex: f,
       dcr: slabDcr,
@@ -1926,8 +1988,6 @@ export function generateWatertightArchitecture(
     // 실내 마감 바닥판
     const usableW = Math.max(0.4, curW - extWallThick * 2);
     const usableD = Math.max(0.4, curD - extWallThick * 2);
-    const floorFinishMat: CadMaterial =
-      interiorTheme === 'industrial-loft' ? 'concrete' : 'wood';
 
     solids.push({
       id: `floor_${f}_interior_finish`,
@@ -2007,7 +2067,7 @@ export function generateWatertightArchitecture(
       });
     }
 
-    // 5-C. 불투명 외벽 스팬드럴(허리벽·인방벽) + 창호 개구부 (구조 기둥 사이를 채우는 커튼월/조적 외피)
+    // 5-C. 불투명 외벽 스팬드럴(허리벽·인방벽) + 창호 개구부
     const sillRatio = Math.max(0.08, 0.34 - windowWallRatio * 0.3);
     const headerRatio = Math.max(0.11, 0.26 - windowWallRatio * 0.15);
     const sillH = Number((clearWallH * sillRatio).toFixed(3));
@@ -2142,7 +2202,217 @@ export function generateWatertightArchitecture(
       });
     });
 
-    // 5-D. 실내 내벽 및 가구 배치
+    // 5-D. 층간 어긋남 상·하부 빈틈 완전 밀봉 (노출 지붕 테라스 캡 + 난간 + 캔틸레버 하부 소핏/필로티)
+    if (f < floors) {
+      const nextBox = floorBoxes[f];
+      const seamOverlap = 0.014;
+
+      // (1) 아래층이 위층보다 튀어나와 상부가 뚫리는 노출 구간: Rect(f) \ Rect(f+1)
+      const exposedStrips = subtractRect2D(box, nextBox, 0.012);
+      exposedStrips.forEach((strip, sIdx) => {
+        const isOuterW = Math.abs(strip.minX - minX) < 0.005;
+        const isOuterE = Math.abs(strip.maxX - maxX) < 0.005;
+        const isOuterN = Math.abs(strip.minZ - minZ) < 0.005;
+        const isOuterS = Math.abs(strip.maxZ - maxZ) < 0.005;
+
+        // 위층 슬래브와 만나는 내부 이음새만 1.4cm 안쪽으로 물려 빈틈 0mm 밀봉
+        const capMinX = isOuterW ? strip.minX : strip.minX - seamOverlap;
+        const capMaxX = isOuterE ? strip.maxX : strip.maxX + seamOverlap;
+        const capMinZ = isOuterN ? strip.minZ : strip.minZ - seamOverlap;
+        const capMaxZ = isOuterS ? strip.maxZ : strip.maxZ + seamOverlap;
+
+        const capW = Math.max(0.02, capMaxX - capMinX);
+        const capD = Math.max(0.02, capMaxZ - capMinZ);
+        const capCx = (capMinX + capMaxX) * 0.5;
+        const capCz = (capMinZ + capMaxZ) * 0.5;
+
+        // 위층 바닥 슬래브와 높이를 미세하게 어긋내 Z-fighting 없이 1층 외벽 상단에 밀착
+        const capThick = slabThick + 0.001;
+        const capCenterY = floorTopY + capThick * 0.5 - 0.004;
+
+        solids.push({
+          id: `floor_${f}_terrace_cap_${sIdx}`,
+          groupName: `${f}층 상부 단차 지붕·테라스 슬래브`,
+          partRole: 'slab',
+          shape: 'box',
+          position: [
+            Number(capCx.toFixed(3)),
+            Number(capCenterY.toFixed(3)),
+            Number(capCz.toFixed(3)),
+          ],
+          scale: [Number(capW.toFixed(3)), Number(capThick.toFixed(3)), Number(capD.toFixed(3))],
+          color: floorColor,
+          material: structSlabMat,
+          isFixed: true,
+          floorIndex: f,
+          dcr: slabDcr,
+          stressLabel: slabStressLabel,
+        });
+
+        // 보행 가능한 테라스 크기(>= 0.18)이면 야외 테라스 데크 마감 + 외곽 유리 난간·핸드레일 설치
+        const rawW = strip.maxX - strip.minX;
+        const rawD = strip.maxZ - strip.minZ;
+        if (rawW >= 0.18 && rawD >= 0.18) {
+          const deckInset = 0.032;
+          const dMinX = strip.minX + (isOuterW ? deckInset : 0.004);
+          const dMaxX = strip.maxX - (isOuterE ? deckInset : 0.004);
+          const dMinZ = strip.minZ + (isOuterN ? deckInset : 0.004);
+          const dMaxZ = strip.maxZ - (isOuterS ? deckInset : 0.004);
+
+          if (dMaxX - dMinX > 0.06 && dMaxZ - dMinZ > 0.06) {
+            solids.push({
+              id: `floor_${f}_terrace_deck_${sIdx}`,
+              groupName: `${f + 1}층 연계 야외 테라스 데크`,
+              partRole: 'interior_floor',
+              shape: 'box',
+              position: [
+                Number(((dMinX + dMaxX) * 0.5).toFixed(3)),
+                Number((floorTopY + slabThick + 0.006).toFixed(3)),
+                Number(((dMinZ + dMaxZ) * 0.5).toFixed(3)),
+              ],
+              scale: [
+                Number((dMaxX - dMinX).toFixed(3)),
+                0.018,
+                Number((dMaxZ - dMinZ).toFixed(3)),
+              ],
+              color: interiorFloorColor,
+              material: floorFinishMat,
+              isFixed: true,
+              floorIndex: f + 1,
+              dcr: slabDcr,
+            });
+          }
+
+          // 노출 테라스의 바깥쪽 경계선에만 유리 난간 + 알루미늄 핸드레일 배치
+          const railH = 0.15;
+          const railT = 0.02;
+          const railY = Number((floorTopY + slabThick + railH * 0.5).toFixed(3));
+          const handY = Number((floorTopY + slabThick + railH + 0.01).toFixed(3));
+          const edgeInset = 0.022;
+
+          const pushRail = (
+            side: string,
+            rx: number,
+            rz: number,
+            rw: number,
+            rd: number
+          ) => {
+            if (Math.max(rw, rd) < 0.12) return;
+            solids.push(
+              {
+                id: `floor_${f}_terrace_rail_${sIdx}_${side}`,
+                groupName: `${f + 1}층 테라스 안전 유리 난간`,
+                partRole: 'sculpture',
+                shape: 'box',
+                position: [Number(rx.toFixed(3)), railY, Number(rz.toFixed(3))],
+                scale: [Number(rw.toFixed(3)), railH, Number(rd.toFixed(3))],
+                color: '#bae6fd',
+                material: 'glass',
+                isFixed: true,
+                floorIndex: f + 1,
+              },
+              {
+                id: `floor_${f}_terrace_handrail_${sIdx}_${side}`,
+                groupName: `${f + 1}층 테라스 알루미늄 핸드레일`,
+                partRole: 'sculpture',
+                shape: 'box',
+                position: [Number(rx.toFixed(3)), handY, Number(rz.toFixed(3))],
+                scale: [
+                  Number((rw + (rw < rd ? 0.008 : 0)).toFixed(3)),
+                  0.02,
+                  Number((rd + (rd < rw ? 0.008 : 0)).toFixed(3)),
+                ],
+                color: '#334155',
+                material: 'steel',
+                isFixed: true,
+                floorIndex: f + 1,
+              }
+            );
+          };
+
+          const midX = (strip.minX + strip.maxX) * 0.5;
+          const midZ = (strip.minZ + strip.maxZ) * 0.5;
+          if (isOuterW) pushRail('W', strip.minX + edgeInset, midZ, railT, rawD - edgeInset * 2);
+          if (isOuterE) pushRail('E', strip.maxX - edgeInset, midZ, railT, rawD - edgeInset * 2);
+          if (isOuterN) pushRail('N', midX, strip.minZ + edgeInset, rawW - edgeInset * 2, railT);
+          if (isOuterS) pushRail('S', midX, strip.maxZ - edgeInset, rawW - edgeInset * 2, railT);
+        }
+      });
+
+      // (2) 위층이 아래층보다 바깥으로 돌출된 캔틸레버 구간: Rect(f+1) \ Rect(f)
+      const cantileverStrips = subtractRect2D(nextBox, box, 0.03);
+      const placedPilotisKeys = new Set<string>();
+
+      cantileverStrips.forEach((ov, oIdx) => {
+        const ovW = ov.maxX - ov.minX;
+        const ovD = ov.maxZ - ov.minZ;
+        const ovCx = (ov.minX + ov.maxX) * 0.5;
+        const ovCz = (ov.minZ + ov.maxZ) * 0.5;
+
+        // 캔틸레버 하부 천장 소핏 마감판 (아래에서 올려다볼 때 깔끔한 마감)
+        solids.push({
+          id: `floor_${f + 1}_cantilever_soffit_${oIdx}`,
+          groupName: `${f + 1}층 캔틸레버 하부 소핏 마감`,
+          partRole: 'slab',
+          shape: 'box',
+          position: [
+            Number(ovCx.toFixed(3)),
+            Number((floorTopY - 0.016).toFixed(3)),
+            Number(ovCz.toFixed(3)),
+          ],
+          scale: [Number(ovW.toFixed(3)), 0.032, Number(ovD.toFixed(3))],
+          color: nextBox.floorColor,
+          material: structSlabMat,
+          isFixed: true,
+          floorIndex: f + 1,
+          dcr: beamDcr,
+          stressLabel: beamStressLabel,
+        });
+
+        // 1층 위로 크게 돌출(> 0.30)된 캔틸레버 외곽 모서리에는 지면까지 내려오는 필로티 구조 기둥 보강
+        if (f === 1 && (ovW >= 0.3 || ovD >= 0.3)) {
+          const inset = frameStyle.colSize * 0.85;
+          const candidateCorners: [number, number][] = [
+            [ov.minX + inset, ov.minZ + inset],
+            [ov.maxX - inset, ov.minZ + inset],
+            [ov.maxX - inset, ov.maxZ - inset],
+            [ov.minX + inset, ov.maxZ - inset],
+          ];
+
+          candidateCorners.forEach(([px, pz], cIdx) => {
+            // 1층 본체에서 충분히 떨어진 바깥 모서리에만 필로티 기둥 세우기
+            const dxOutside = Math.max(0, minX - px, px - maxX);
+            const dzOutside = Math.max(0, minZ - pz, pz - maxZ);
+            if (Math.hypot(dxOutside, dzOutside) < 0.24) return;
+
+            const dedupeKey = `${Math.round(px * 10)}_${Math.round(pz * 10)}`;
+            if (placedPilotisKeys.has(dedupeKey)) return;
+            placedPilotisKeys.add(dedupeKey);
+
+            solids.push({
+              id: `struct_pilotis_col_${oIdx}_${cIdx}`,
+              groupName: `1층 캔틸레버 지지 필로티 기둥 (${sysMeta.nameKo})`,
+              partRole: 'structural_column',
+              shape: 'box',
+              position: [
+                Number(px.toFixed(3)),
+                Number((floorTopY * 0.5).toFixed(3)),
+                Number(pz.toFixed(3)),
+              ],
+              scale: [frameStyle.colSize, Number(floorTopY.toFixed(3)), frameStyle.colSize],
+              color: frameStyle.colColor,
+              material: frameStyle.colMat,
+              isFixed: true,
+              floorIndex: 1,
+              dcr: colDcr,
+              stressLabel: colStressLabel,
+            });
+          });
+        }
+      });
+    }
+
+    // 5-E. 실내 내벽 및 가구 배치
     const startX = minX + extWallThick;
     const startZ = minZ + extWallThick;
 
@@ -2283,7 +2553,7 @@ export function generateWatertightArchitecture(
       }
     });
 
-    // 5-E. 코너 물리 노드·부재 동기화 (실제 계산된 columnDcr / axialLoadKn 주입)
+    // 5-F. 코너 물리 노드·부재 동기화
     const corners: [number, number, number][] = [
       [minX + insetX, floorTopY, minZ + insetZ],
       [maxX - insetX, floorTopY, minZ + insetZ],
@@ -2342,6 +2612,14 @@ export function generateWatertightArchitecture(
   }
 
   // 6. 지붕-벽체 틈새 0mm 완전 밀봉 3D 지붕 엔진
+  const topBox = floorBoxes[floorBoxes.length - 1];
+  const topFloorW = topBox.curW;
+  const topFloorD = topBox.curD;
+  const topFloorCx = topBox.cx;
+  const topFloorCz = topBox.cz;
+  const topFloorMat = topBox.floorMat;
+  const topFloorColor = topBox.floorColor;
+
   const topY = floors * floorH;
   const roofColor = rawSpec.customRoofColor ?? '#3f3f46';
   const roofT = 0.08;
@@ -2356,6 +2634,27 @@ export function generateWatertightArchitecture(
   const pitchRad = (Math.max(8, Math.min(36, roofPitchDeg || 20)) * Math.PI) / 180;
   const topFloorPhysics = structuralReport.floors[structuralReport.floors.length - 1];
   const roofDcr = Number(((topFloorPhysics?.slabDcr ?? 0.22) * 0.72).toFixed(3));
+
+  // 경사 지붕 하부 최상층 천장 밀봉판 (벽체 상단과 지붕 사이 미세 틈 차단)
+  if (roofStyle !== 'flat-overhang') {
+    solids.push({
+      id: 'arch_top_ceiling_slab',
+      groupName: `${floors}층 최상부 천장 밀봉 슬래브`,
+      partRole: 'roof',
+      shape: 'box',
+      position: [topFloorCx, Number((topY - 0.022).toFixed(3)), topFloorCz],
+      scale: [
+        Number(Math.max(0.3, topFloorW - 0.016).toFixed(3)),
+        0.044,
+        Number(Math.max(0.3, topFloorD - 0.016).toFixed(3)),
+      ],
+      color: interiorWallColor,
+      material: safeRoofMaterial,
+      isFixed: true,
+      floorIndex: 99,
+      dcr: roofDcr,
+    });
+  }
 
   if (roofStyle === 'gable' || roofStyle === 'hip-eaves') {
     const eaveOv = roofStyle === 'hip-eaves' ? ov * 1.35 : ov;
@@ -2758,7 +3057,7 @@ export function generateWatertightArchitecture(
       {
         id: 'roof_glass_balustrade_s',
         groupName: '옥상 유리 난간',
-        partRole: 'roof',
+        partRole: 'sculpture',
         shape: 'box',
         position: [topFloorCx, Number((topY + 0.18).toFixed(3)), Number((topFloorCz + rD * 0.48).toFixed(3))],
         scale: [rW, 0.16, 0.03],

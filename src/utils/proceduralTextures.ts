@@ -2,14 +2,24 @@ import * as THREE from 'three';
 import { CadMaterial } from '../types/cad';
 
 export interface PbrTextureBundle {
-  map: THREE.CanvasTexture;
-  bumpMap: THREE.CanvasTexture;
-  roughnessMap: THREE.CanvasTexture;
+  map: THREE.CanvasTexture | null;
+  bumpMap: THREE.CanvasTexture | null;
+  roughnessMap: THREE.CanvasTexture | null;
+  baseTintHex: string;
   metalness: number;
   roughness: number;
   bumpScale: number;
-  transparent?: boolean;
-  opacity?: number;
+  clearcoat: number;
+  clearcoatRoughness: number;
+  reflectivity: number;
+  ior: number;
+  envMapIntensity: number;
+  transparent: boolean;
+  opacity: number;
+  castShadow: boolean;
+  labelKo: string;
+  /** 자재 + 시공 포함 현실 단가 (원/㎡, 개별 부위 및 층 재질 변경 예산 산출용) */
+  unitCostPerM2Krw: number;
 }
 
 const textureCache = new Map<CadMaterial, PbrTextureBundle>();
@@ -22,7 +32,12 @@ function makeCanvas(size = 256): [HTMLCanvasElement, CanvasRenderingContext2D] {
   return [canvas, ctx];
 }
 
-function finalizeTex(canvas: HTMLCanvasElement, repeatX = 2, repeatY = 2, isColor = true): THREE.CanvasTexture {
+function finalizeTex(
+  canvas: HTMLCanvasElement,
+  repeatX = 2,
+  repeatY = 2,
+  isColor = true
+): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
@@ -34,18 +49,18 @@ function finalizeTex(canvas: HTMLCanvasElement, repeatX = 2, repeatY = 2, isColo
   return tex;
 }
 
-// 1. 내추럴 목재(세다·오크 사이딩 판재 + 나뭇결 섬유)
+/** 1. 내추럴 목재 (적삼목·오크 사이딩 판재 + 자연 나뭇결) */
 function buildWoodBundle(): PbrTextureBundle {
   const size = 256;
   const [cCol, ctxCol] = makeCanvas(size);
   const [cBump, ctxBump] = makeCanvas(size);
   const [cRough, ctxRough] = makeCanvas(size);
 
-  ctxCol.fillStyle = '#c89b6e';
+  ctxCol.fillStyle = '#c29162';
   ctxCol.fillRect(0, 0, size, size);
   ctxBump.fillStyle = '#808080';
   ctxBump.fillRect(0, 0, size, size);
-  ctxRough.fillStyle = '#a8a8a8';
+  ctxRough.fillStyle = '#bababa';
   ctxRough.fillRect(0, 0, size, size);
 
   const planks = 8;
@@ -53,18 +68,18 @@ function buildWoodBundle(): PbrTextureBundle {
 
   for (let p = 0; p < planks; p++) {
     const x0 = p * plankW;
-    const toneShift = ((p * 37) % 24) - 12;
-    const r = Math.min(240, Math.max(120, 198 + toneShift));
-    const g = Math.min(210, Math.max(90, 152 + Math.round(toneShift * 0.8)));
-    const b = Math.min(175, Math.max(60, 106 + Math.round(toneShift * 0.6)));
+    const shift = ((p * 37) % 24) - 12;
+    const r = Math.min(228, Math.max(125, 194 + shift));
+    const g = Math.min(196, Math.max(92, 146 + Math.round(shift * 0.8)));
+    const b = Math.min(162, Math.max(64, 100 + Math.round(shift * 0.6)));
 
     ctxCol.fillStyle = `rgb(${r},${g},${b})`;
     ctxCol.fillRect(x0, 0, plankW - 1, size);
 
-    // 나뭇결 파동 섬유
-    for (let i = 0; i < 42; i++) {
+    for (let i = 0; i < 40; i++) {
       const lx = x0 + ((i * 19 + p * 7) % (plankW - 3)) + 1;
-      ctxCol.strokeStyle = i % 2 === 0 ? 'rgba(92, 56, 28, 0.22)' : 'rgba(245, 218, 185, 0.16)';
+      ctxCol.strokeStyle =
+        i % 2 === 0 ? 'rgba(84, 50, 24, 0.24)' : 'rgba(242, 214, 182, 0.16)';
       ctxCol.lineWidth = (i % 3) * 0.45 + 0.5;
       ctxCol.beginPath();
       for (let y = 0; y <= size; y += 16) {
@@ -74,7 +89,7 @@ function buildWoodBundle(): PbrTextureBundle {
       }
       ctxCol.stroke();
 
-      ctxBump.strokeStyle = i % 2 === 0 ? 'rgba(40,40,40,0.35)' : 'rgba(210,210,210,0.25)';
+      ctxBump.strokeStyle = i % 2 === 0 ? 'rgba(40,40,40,0.34)' : 'rgba(215,215,215,0.24)';
       ctxBump.lineWidth = 0.8;
       ctxBump.beginPath();
       ctxBump.moveTo(lx, 0);
@@ -82,10 +97,9 @@ function buildWoodBundle(): PbrTextureBundle {
       ctxBump.stroke();
     }
 
-    // 판재 사이 음영 홈
-    ctxCol.fillStyle = 'rgba(58, 34, 16, 0.55)';
+    ctxCol.fillStyle = 'rgba(54, 30, 14, 0.55)';
     ctxCol.fillRect(x0 + plankW - 1.5, 0, 1.5, size);
-    ctxBump.fillStyle = '#181818';
+    ctxBump.fillStyle = '#1a1a1a';
     ctxBump.fillRect(x0 + plankW - 2, 0, 2, size);
     ctxRough.fillStyle = '#e5e5e5';
     ctxRough.fillRect(x0 + plankW - 2, 0, 2, size);
@@ -95,48 +109,79 @@ function buildWoodBundle(): PbrTextureBundle {
     map: finalizeTex(cCol, 2, 2, true),
     bumpMap: finalizeTex(cBump, 2, 2, false),
     roughnessMap: finalizeTex(cRough, 2, 2, false),
-    metalness: 0.04,
-    roughness: 0.68,
+    baseTintHex: '#ffffff',
+    metalness: 0.03,
+    roughness: 0.72,
     bumpScale: 0.022,
+    clearcoat: 0.1,
+    clearcoatRoughness: 0.52,
+    reflectivity: 0.28,
+    ior: 1.5,
+    envMapIntensity: 0.48,
+    transparent: false,
+    opacity: 1,
+    castShadow: true,
+    labelKo: '내추럴 적삼목·오크 목재',
+    unitCostPerM2Krw: 197000,
   };
 }
 
-// 2. 브러시드 구조용 강재 / 징크 메탈 패널
-function buildSteelBundle(baseRgb = [176, 186, 198], metalness = 0.86, roughness = 0.28): PbrTextureBundle {
+/** 2. 브러시드 금속 패널 (강재 / 티타늄 / 샴페인 골드 — 고대비 금속 광택 유지) */
+function buildBrushedMetalBundle(params: {
+  baseRgb: [number, number, number];
+  highlightRgba: string;
+  shadowRgba: string;
+  metalness: number;
+  roughness: number;
+  clearcoat: number;
+  envMapIntensity: number;
+  labelKo: string;
+  unitCostPerM2Krw: number;
+}): PbrTextureBundle {
   const size = 256;
   const [cCol, ctxCol] = makeCanvas(size);
   const [cBump, ctxBump] = makeCanvas(size);
   const [cRough, ctxRough] = makeCanvas(size);
 
-  ctxCol.fillStyle = `rgb(${baseRgb[0]},${baseRgb[1]},${baseRgb[2]})`;
+  const [br, bg, bb] = params.baseRgb;
+  const grad = ctxCol.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(
+    0,
+    `rgb(${Math.min(255, br + 18)},${Math.min(255, bg + 16)},${Math.min(255, bb + 12)})`
+  );
+  grad.addColorStop(0.5, `rgb(${br},${bg},${bb})`);
+  grad.addColorStop(
+    1,
+    `rgb(${Math.max(0, br - 14)},${Math.max(0, bg - 14)},${Math.max(0, bb - 12)})`
+  );
+  ctxCol.fillStyle = grad;
   ctxCol.fillRect(0, 0, size, size);
+
   ctxBump.fillStyle = '#808080';
   ctxBump.fillRect(0, 0, size, size);
-  ctxRough.fillStyle = '#585858';
+  ctxRough.fillStyle = '#787878';
   ctxRough.fillRect(0, 0, size, size);
 
-  // 미세 브러시 헤어라인
   for (let y = 0; y < size; y++) {
-    const delta = ((y * 29) % 18) - 9;
-    ctxCol.fillStyle = delta > 0 ? `rgba(255,255,255,${delta * 0.008})` : `rgba(15,23,42,${-delta * 0.009})`;
+    const delta = ((y * 29) % 16) - 8;
+    ctxCol.fillStyle = delta > 0 ? params.highlightRgba : params.shadowRgba;
     ctxCol.fillRect(0, y, size, 1);
 
-    const rVal = Math.max(45, Math.min(130, 82 + delta * 2));
+    const rVal = Math.max(70, Math.min(155, 112 + delta * 3));
     ctxRough.fillStyle = `rgb(${rVal},${rVal},${rVal})`;
     ctxRough.fillRect(0, y, size, 1);
   }
 
-  // 건축 메탈 커튼월/징크 패널 조인트
-  ctxCol.strokeStyle = 'rgba(30, 41, 59, 0.35)';
-  ctxCol.lineWidth = 1.5;
+  ctxCol.strokeStyle = 'rgba(30, 41, 59, 0.28)';
+  ctxCol.lineWidth = 1.4;
   ctxCol.strokeRect(1, 1, size - 2, size - 2);
   ctxCol.beginPath();
   ctxCol.moveTo(0, size / 2);
   ctxCol.lineTo(size, size / 2);
   ctxCol.stroke();
 
-  ctxBump.strokeStyle = '#252525';
-  ctxBump.lineWidth = 2;
+  ctxBump.strokeStyle = '#303030';
+  ctxBump.lineWidth = 1.8;
   ctxBump.strokeRect(1, 1, size - 2, size - 2);
   ctxBump.beginPath();
   ctxBump.moveTo(0, size / 2);
@@ -147,40 +192,93 @@ function buildSteelBundle(baseRgb = [176, 186, 198], metalness = 0.86, roughness
     map: finalizeTex(cCol, 2, 2, true),
     bumpMap: finalizeTex(cBump, 2, 2, false),
     roughnessMap: finalizeTex(cRough, 2, 2, false),
-    metalness,
-    roughness,
-    bumpScale: 0.01,
+    baseTintHex: '#ffffff',
+    metalness: params.metalness,
+    roughness: params.roughness,
+    bumpScale: 0.008,
+    clearcoat: params.clearcoat,
+    clearcoatRoughness: 0.18,
+    reflectivity: 0.92,
+    ior: 1.5,
+    envMapIntensity: params.envMapIntensity,
+    transparent: false,
+    opacity: 1,
+    castShadow: true,
+    labelKo: params.labelKo,
+    unitCostPerM2Krw: params.unitCostPerM2Krw,
   };
 }
 
-// 3. 노출 콘크리트 (송판 거푸집 라인 + 콘크리트 기공·콘 홀)
+/** 3. 카본 복합재 (2×2 능직 카본 직조 패턴 + 클리어코트 광택) */
+function buildCarbonBundle(): PbrTextureBundle {
+  const size = 128;
+  const [cCol, ctxCol] = makeCanvas(size);
+  const [cBump, ctxBump] = makeCanvas(size);
+  const [cRough, ctxRough] = makeCanvas(size);
+
+  const cell = 8;
+  for (let y = 0; y < size; y += cell) {
+    for (let x = 0; x < size; x += cell) {
+      const parity = (x / cell + y / cell) % 2 === 0;
+      ctxCol.fillStyle = parity ? '#3b4252' : '#525b6e';
+      ctxCol.fillRect(x, y, cell, cell);
+      ctxCol.fillStyle = parity ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.16)';
+      ctxCol.fillRect(x, y, cell, 2);
+
+      ctxBump.fillStyle = parity ? '#a8a8a8' : '#5c5c5c';
+      ctxBump.fillRect(x, y, cell, cell);
+      ctxRough.fillStyle = parity ? '#666666' : '#999999';
+      ctxRough.fillRect(x, y, cell, cell);
+    }
+  }
+
+  return {
+    map: finalizeTex(cCol, 4, 4, true),
+    bumpMap: finalizeTex(cBump, 4, 4, false),
+    roughnessMap: finalizeTex(cRough, 4, 4, false),
+    baseTintHex: '#ffffff',
+    metalness: 0.35,
+    roughness: 0.38,
+    bumpScale: 0.012,
+    clearcoat: 0.72,
+    clearcoatRoughness: 0.14,
+    reflectivity: 0.8,
+    ior: 1.5,
+    envMapIntensity: 1.5,
+    transparent: false,
+    opacity: 1,
+    castShadow: true,
+    labelKo: '세라믹·탄소복합재(CFRP) 패널',
+    unitCostPerM2Krw: 257000,
+  };
+}
+
+/** 4. 노출 콘크리트 (차분한 미네랄 톤 + 거푸집 줄눈 + P-Cone 홀) */
 function buildConcreteBundle(): PbrTextureBundle {
   const size = 256;
   const [cCol, ctxCol] = makeCanvas(size);
   const [cBump, ctxBump] = makeCanvas(size);
   const [cRough, ctxRough] = makeCanvas(size);
 
-  ctxCol.fillStyle = '#cbd2d9';
+  ctxCol.fillStyle = '#bcc3cc';
   ctxCol.fillRect(0, 0, size, size);
   ctxBump.fillStyle = '#808080';
   ctxBump.fillRect(0, 0, size, size);
-  ctxRough.fillStyle = '#c8c8c8';
+  ctxRough.fillStyle = '#d0d0d0';
   ctxRough.fillRect(0, 0, size, size);
 
-  // 미네랄 골재 노이즈
   for (let i = 0; i < 2400; i++) {
     const x = (i * 73) % size;
     const y = (i * 137) % size;
     const dark = i % 3 === 0;
-    ctxCol.fillStyle = dark ? 'rgba(71, 85, 105, 0.14)' : 'rgba(248, 250, 252, 0.14)';
+    ctxCol.fillStyle = dark ? 'rgba(60, 72, 90, 0.16)' : 'rgba(240, 244, 248, 0.12)';
     ctxCol.fillRect(x, y, 2, 2);
 
     ctxBump.fillStyle = dark ? 'rgba(45,45,45,0.28)' : 'rgba(205,205,205,0.22)';
     ctxBump.fillRect(x, y, 2, 2);
   }
 
-  // 노출 콘크리트 거푸집 줄눈 & 타이 홀(P-Cone)
-  ctxCol.strokeStyle = 'rgba(71, 85, 105, 0.32)';
+  ctxCol.strokeStyle = 'rgba(58, 70, 88, 0.34)';
   ctxCol.lineWidth = 1.2;
   [0, size / 2].forEach((pos) => {
     ctxCol.beginPath();
@@ -205,14 +303,14 @@ function buildConcreteBundle(): PbrTextureBundle {
     [224, 160],
   ];
   holes.forEach(([hx, hy]) => {
-    ctxCol.fillStyle = 'rgba(51, 65, 85, 0.45)';
+    ctxCol.fillStyle = 'rgba(45, 58, 76, 0.48)';
     ctxCol.beginPath();
-    ctxCol.arc(hx, hy, 2.4, 0, Math.PI * 2);
+    ctxCol.arc(hx, hy, 2.3, 0, Math.PI * 2);
     ctxCol.fill();
 
     ctxBump.fillStyle = '#1f1f1f';
     ctxBump.beginPath();
-    ctxBump.arc(hx, hy, 2.6, 0, Math.PI * 2);
+    ctxBump.arc(hx, hy, 2.5, 0, Math.PI * 2);
     ctxBump.fill();
   });
 
@@ -220,33 +318,44 @@ function buildConcreteBundle(): PbrTextureBundle {
     map: finalizeTex(cCol, 2, 2, true),
     bumpMap: finalizeTex(cBump, 2, 2, false),
     roughnessMap: finalizeTex(cRough, 2, 2, false),
-    metalness: 0.05,
-    roughness: 0.84,
+    baseTintHex: '#ffffff',
+    metalness: 0.03,
+    roughness: 0.88,
     bumpScale: 0.018,
+    clearcoat: 0.02,
+    clearcoatRoughness: 0.8,
+    reflectivity: 0.18,
+    ior: 1.5,
+    envMapIntensity: 0.38,
+    transparent: false,
+    opacity: 1,
+    castShadow: true,
+    labelKo: '노출 콘크리트 마감',
+    unitCostPerM2Krw: 163000,
   };
 }
 
-// 4. 웜 미네랄 스타코 / 라임 플라스터
+/** 5. 웜 미네랄 스타코 (화이트 클리핑 방지: 실물 라임 플라스터 반사율 #e0dbd0 + 무광 환경반사 억제) */
 function buildStuccoBundle(): PbrTextureBundle {
   const size = 256;
   const [cCol, ctxCol] = makeCanvas(size);
   const [cBump, ctxBump] = makeCanvas(size);
   const [cRough, ctxRough] = makeCanvas(size);
 
-  ctxCol.fillStyle = '#f5f2eb';
+  ctxCol.fillStyle = '#e0dbd0';
   ctxCol.fillRect(0, 0, size, size);
   ctxBump.fillStyle = '#808080';
   ctxBump.fillRect(0, 0, size, size);
-  ctxRough.fillStyle = '#d8d8d8';
+  ctxRough.fillStyle = '#e4e4e4';
   ctxRough.fillRect(0, 0, size, size);
 
   for (let i = 0; i < 3200; i++) {
     const x = (i * 97) % size;
     const y = (i * 53) % size;
     const light = i % 2 === 0;
-    ctxCol.fillStyle = light ? 'rgba(255,255,255,0.22)' : 'rgba(180,172,158,0.14)';
+    ctxCol.fillStyle = light ? 'rgba(255,253,248,0.16)' : 'rgba(138,130,118,0.18)';
     ctxCol.fillRect(x, y, 2, 2);
-    ctxBump.fillStyle = light ? 'rgba(215,215,215,0.28)' : 'rgba(65,65,65,0.25)';
+    ctxBump.fillStyle = light ? 'rgba(220,220,220,0.3)' : 'rgba(55,55,55,0.28)';
     ctxBump.fillRect(x, y, 2, 2);
   }
 
@@ -254,44 +363,43 @@ function buildStuccoBundle(): PbrTextureBundle {
     map: finalizeTex(cCol, 3, 3, true),
     bumpMap: finalizeTex(cBump, 3, 3, false),
     roughnessMap: finalizeTex(cRough, 3, 3, false),
-    metalness: 0.02,
-    roughness: 0.88,
-    bumpScale: 0.014,
+    baseTintHex: '#f0ece4',
+    metalness: 0.0,
+    roughness: 0.94,
+    bumpScale: 0.016,
+    clearcoat: 0,
+    clearcoatRoughness: 1.0,
+    reflectivity: 0.1,
+    ior: 1.45,
+    envMapIntensity: 0.26,
+    transparent: false,
+    opacity: 1,
+    castShadow: true,
+    labelKo: '스타코플렉스(외단열 마감)',
+    unitCostPerM2Krw: 136000,
   };
 }
 
-// 5. 건축용 로이 복층 유리
-function buildGlassBundle(): PbrTextureBundle {
-  const size = 128;
-  const [cCol, ctxCol] = makeCanvas(size);
-  const [cBump, ctxBump] = makeCanvas(size);
-  const [cRough, ctxRough] = makeCanvas(size);
-
-  const grad = ctxCol.createLinearGradient(0, 0, size, size);
-  grad.addColorStop(0, '#bae6fd');
-  grad.addColorStop(0.5, '#e0f2fe');
-  grad.addColorStop(1, '#7dd3fc');
-  ctxCol.fillStyle = grad;
-  ctxCol.fillRect(0, 0, size, size);
-
-  ctxCol.strokeStyle = 'rgba(30, 41, 59, 0.55)';
-  ctxCol.lineWidth = 3;
-  ctxCol.strokeRect(1.5, 1.5, size - 3, size - 3);
-
-  ctxBump.fillStyle = '#808080';
-  ctxBump.fillRect(0, 0, size, size);
-  ctxRough.fillStyle = '#181818';
-  ctxRough.fillRect(0, 0, size, size);
-
+/** 6. 실제 투명 건축 로이(Low-E) 복층 유리 */
+function buildGlassBundle(isFrosted: boolean): PbrTextureBundle {
   return {
-    map: finalizeTex(cCol, 1, 1, true),
-    bumpMap: finalizeTex(cBump, 1, 1, false),
-    roughnessMap: finalizeTex(cRough, 1, 1, false),
-    metalness: 0.18,
-    roughness: 0.08,
-    bumpScale: 0.004,
+    map: null,
+    bumpMap: null,
+    roughnessMap: null,
+    baseTintHex: isFrosted ? '#d8e7f3' : '#dfeef8',
+    metalness: 0.06,
+    roughness: isFrosted ? 0.18 : 0.05,
+    bumpScale: 0,
+    clearcoat: 1.0,
+    clearcoatRoughness: isFrosted ? 0.16 : 0.03,
+    reflectivity: 0.96,
+    ior: 1.52,
+    envMapIntensity: 2.15,
     transparent: true,
-    opacity: 0.44,
+    opacity: isFrosted ? 0.34 : 0.24,
+    castShadow: false,
+    labelKo: isFrosted ? '반투명 에칭 로이 유리' : '고단열 투명 로이(Low-E) 유리',
+    unitCostPerM2Krw: isFrosted ? 350000 : 380000,
   };
 }
 
@@ -305,23 +413,55 @@ export function getPbrMaterialBundle(mat: CadMaterial): PbrTextureBundle {
       bundle = buildWoodBundle();
       break;
     case 'steel':
-      bundle = buildSteelBundle([164, 174, 186], 0.88, 0.25);
+      bundle = buildBrushedMetalBundle({
+        baseRgb: [190, 200, 212],
+        highlightRgba: 'rgba(255,255,255,0.09)',
+        shadowRgba: 'rgba(30,41,59,0.07)',
+        metalness: 0.8,
+        roughness: 0.25,
+        clearcoat: 0.28,
+        envMapIntensity: 1.9,
+        labelKo: '브러시드 리얼징크·강재',
+        unitCostPerM2Krw: 186000,
+      });
       break;
     case 'titanium':
-      bundle = buildSteelBundle([196, 192, 188], 0.9, 0.24);
+      bundle = buildBrushedMetalBundle({
+        baseRgb: [208, 204, 196],
+        highlightRgba: 'rgba(255,252,245,0.1)',
+        shadowRgba: 'rgba(45,42,38,0.07)',
+        metalness: 0.82,
+        roughness: 0.23,
+        clearcoat: 0.34,
+        envMapIntensity: 2.0,
+        labelKo: '티타늄 아연판(VMZINC)',
+        unitCostPerM2Krw: 283000,
+      });
       break;
     case 'gold':
-      bundle = buildSteelBundle([218, 184, 112], 0.88, 0.22);
+      bundle = buildBrushedMetalBundle({
+        baseRgb: [238, 196, 98],
+        highlightRgba: 'rgba(255,246,204,0.14)',
+        shadowRgba: 'rgba(148,98,20,0.09)',
+        metalness: 0.78,
+        roughness: 0.21,
+        clearcoat: 0.48,
+        envMapIntensity: 2.2,
+        labelKo: '샴페인 골드 아노다이징 메탈',
+        unitCostPerM2Krw: 315000,
+      });
       break;
     case 'carbon':
-      bundle = buildSteelBundle([68, 76, 88], 0.35, 0.48);
+      bundle = buildCarbonBundle();
       break;
     case 'concrete':
       bundle = buildConcreteBundle();
       break;
     case 'glass':
+      bundle = buildGlassBundle(false);
+      break;
     case 'hologram':
-      bundle = buildGlassBundle();
+      bundle = buildGlassBundle(true);
       break;
     case 'stucco':
     default:

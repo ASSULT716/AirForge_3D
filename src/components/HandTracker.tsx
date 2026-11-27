@@ -14,6 +14,15 @@ export interface ObjectRotateEvent {
   deg: number;
 }
 
+/**
+ * 핀치 = 마우스 버튼. down = 핀치 확정(200ms), move = 핀치 유지한 채 손 이동, up = 놓음.
+ * screen = 화면 좌표 (0~1). down 지점은 모으기 직전 위치로 고정, move는 그 지점 + 손 이동량
+ */
+export interface PointerEvent2 {
+  phase: 'down' | 'move' | 'up';
+  screen: [number, number];
+}
+
 /** 음성 해석 결과 표시 (HandBridge가 채움). pending = "맞나요?" 확인 대기 */
 export interface VoiceFeedback {
   label: string;
@@ -39,6 +48,8 @@ interface Props {
    * 가리키는 대상 판정은 화면 투영이 필요해서 SceneCanvas가 함 (HandTracker는 커서만 보냄)
    */
   onSelect?: () => void;
+  /** 핀치 down/move/up (선택·드래그 편집). 없으면 핀치 = onSelect */
+  onPointer?: (e: PointerEvent2) => void;
   /**
    * 움켜쥐기 회전 (축 잠금). start = 잡음(원본 저장 시점), update = 축 잠긴 뒤 각도 변화, end = 놓음(15° 스냅된 최종값).
    * end에서 axis가 null이면 축 판정 전에 놓은 것 → 변화 없음
@@ -386,7 +397,7 @@ function stepPose(h: PoseHold, r: PoseResult, now: number) {
 }
 
 /** HUD에 보여줄 현재 모드 */
-type UiMode = 'idle' | 'draw' | 'depth' | 'select' | 'pan' | 'orbit' | 'rotate' | 'fist' | 'zoom';
+type UiMode = 'idle' | 'draw' | 'depth' | 'select' | 'pan' | 'orbit' | 'rotate' | 'fist' | 'zoom' | 'drag';
 const MODE_LABEL: Record<UiMode, string> = {
   idle: '—',
   draw: '그리기',
@@ -397,6 +408,7 @@ const MODE_LABEL: Record<UiMode, string> = {
   rotate: '물체 회전',
   fist: '주먹',
   zoom: '줌',
+  drag: '잡고 끌기',
 };
 const MODE_COLOR: Record<UiMode, string> = {
   idle: '#5f8f99',
@@ -408,6 +420,7 @@ const MODE_COLOR: Record<UiMode, string> = {
   rotate: '#ff9f43',
   fist: '#ff1e42',
   zoom: '#ffd54a',
+  drag: '#ff1e42',
 };
 /** 이 모드에선 핀치(노드 찍기) 안 함 */
 const NO_PINCH_POSES: ReadonlySet<HandPose> = new Set(['select', 'pan', 'grab']);
@@ -900,6 +913,11 @@ export default function HandTracker(props: Props) {
     prevPinchRatio: 1,
     /** 핀치 중 고정된 찍을 위치 */
     pinchPos: null as Vec2 | null,
+    /** 핀치 확정 후 놓기 전까지 (마우스 버튼 눌림) */
+    pointerDown: false,
+    /** 핀치 확정 순간의 실제 커서 (드래그 이동량 기준) */
+    pointerOrigin: null as Vec2 | null,
+    lastPointer: null as Vec2 | null,
     fistSince: 0,
     lastHandsAt: 0,
     chainLen: 0, // 현재 스트로크 노드 수 (0 = 다음 핀치가 새 스트로크)
@@ -1290,12 +1308,32 @@ export default function HandTracker(props: Props) {
           now - d.lastPinchAt > PINCH_COOLDOWN_MS &&
           !d.test.active // 테스트 중엔 노드 안 찍음
         ) {
-          // 그리기 기능 제거: 핀치 = 선택 확정 (가리킨 대상 판정은 SceneCanvas가 커서 위치로 함)
+          // 핀치 = 마우스 버튼 down. 선택/드래그 판정은 HandBridge (가리킨 대상은 SceneCanvas가 커서 위치로 판정)
           d.pinchCommitted = true;
           d.lastPinchAt = now;
           d.selectFires += 1;
-          propsRef.current.onSelect?.();
-          lastHint = '선택 확정';
+          const p = propsRef.current;
+          if (p.onPointer) {
+            d.pointerDown = true;
+            d.pointerOrigin = snapped;
+            d.lastPointer = d.pinchPos ?? snapped;
+            p.onPointer({ phase: 'down', screen: d.lastPointer });
+          } else {
+            p.onSelect?.();
+            lastHint = '선택 확정';
+          }
+        }
+        // 핀치 유지한 채 이동 = 드래그: 확정 지점 + 손 이동량 (커서도 같이 움직임)
+        if (d.pointerDown && d.pinching && d.pinchPos && d.pointerOrigin) {
+          const pos: Vec2 = [
+            clamp(d.pinchPos[0] + snapped[0] - d.pointerOrigin[0], 0, 1),
+            clamp(d.pinchPos[1] + snapped[1] - d.pointerOrigin[1], 0, 1),
+          ];
+          cursor = pos;
+          if (!d.lastPointer || pos[0] !== d.lastPointer[0] || pos[1] !== d.lastPointer[1]) {
+            d.lastPointer = pos;
+            propsRef.current.onPointer?.({ phase: 'move', screen: pos });
+          }
         }
 
         // 주먹 유지 → 체인 끊기
@@ -1315,6 +1353,13 @@ export default function HandTracker(props: Props) {
         d.fistSince = 0;
       }
 
+      // 핀치가 어떤 이유로든 풀리면 (손 펴기·주먹·줌·손 사라짐) 버튼 up
+      if (d.pointerDown && !d.pinching) {
+        d.pointerDown = false;
+        propsRef.current.onPointer?.({ phase: 'up', screen: d.lastPointer ?? [0.5, 0.5] });
+        d.pointerOrigin = null;
+      }
+
       // ── HUD 모드 ──
       // ── 모드 배타: 줌 > 물체 회전 > (팬 | 오빗, 먼저 시작한 쪽 유지) > 손 자세 ──
       // 카메라 이동·회전은 서로 거울 자세: 한 손 3손가락 + 반대 손 펼침 (한 손만 보이면 안 움직임 → 오작동 방지)
@@ -1329,6 +1374,7 @@ export default function HandTracker(props: Props) {
       if (zooming) mode = 'zoom';
       else if (d.rot.active) mode = 'rotate';
       else if (d.camMode) mode = d.camMode;
+      else if (d.pointerDown) mode = 'drag';
       else if (drawHand) {
         const byPose: Record<HandPose, UiMode> = {
           none: 'idle',

@@ -5,12 +5,14 @@ import {
   extractDistanceCandidates,
   extractScaleCandidates,
   parseLoadKg,
+  saysRadius,
   type AngleCandidate,
   type DistanceCandidate,
   type ScaleCandidate,
 } from './koreanNumber';
 import {
   AXIS_OPTION,
+  EDIT_MODE_OPTION,
   DIRECTION_SIGN,
   MOVE_DIRECTION_OPTION,
   IS_COMMAND_NO,
@@ -25,14 +27,17 @@ import {
   type Material,
   type MoveDirection,
   type Tool,
+  type VoiceEditMode,
 } from './jevQuestions';
 
-export type { Axis, Material, MoveDirection, Tool } from './jevQuestions';
+export type { Axis, Material, MoveDirection, Tool, VoiceEditMode } from './jevQuestions';
 
 export type VoiceCommand =
   | { type: 'rotate'; axis: Axis; deg: number }
   | { type: 'set_material'; material: Material }
   | { type: 'set_tool'; tool: Tool }
+  /** 손 편집 모드만 바꿈 ("면 크기 도구로") — 선택 없어도 됨 */
+  | { type: 'set_mode'; mode: VoiceEditMode }
   | { type: 'set_load'; kg: number }
   /** meters null = 거리 안 말함 → 늘리기 모드로 바꾸고 손으로 끌게 안내 */
   | { type: 'push_pull'; dir: MoveDirection | null; meters: number | null; shrink: boolean }
@@ -47,12 +52,41 @@ export type VoiceCommand =
   | { type: 'draw'; shape: 'rect' | 'circle' }
   /** 원기둥 한쪽 면 반지름 비율 (0 = 뾰족). null = 면 크기 모드 */
   | { type: 'taper'; end: 'top' | 'bottom'; ratio: number | null }
+  /** 둥근 물체 지름을 정확히 (meters = 지름, 반지름으로 말하면 x2). end = 그 끝면만 (원기둥) */
+  | { type: 'diameter'; meters: number; end: 'top' | 'bottom' | null }
   /** 안쪽 파기 (meters null = 절반 깊이, through = 관통) */
   | { type: 'dig'; meters: number | null; through: boolean }
   | { type: 'undo' };
 
 /** 선택된 구조물이 있어야 하는 명령 (없으면 AI 설계로 넘김) */
-export const NEEDS_SELECTION: ReadonlySet<VoiceCommand['type']> = new Set(['push_pull', 'move', 'copy', 'delete', 'offset', 'scale', 'taper', 'dig']);
+export const NEEDS_SELECTION: ReadonlySet<VoiceCommand['type']> = new Set(['push_pull', 'move', 'copy', 'delete', 'offset', 'scale', 'taper', 'diameter', 'dig']);
+
+/** 값 없이 모드만 바꾸는 명령 ("면 크기", "늘려") → 선택 없어도 모드 전환. copy는 값 없어도 바로 복사라 제외 */
+export function isModeOnly(c: VoiceCommand): boolean {
+  switch (c.type) {
+    case 'set_mode':
+      return true;
+    case 'taper':
+      return c.ratio === null;
+    case 'scale':
+      return c.factor === null;
+    case 'offset':
+    case 'push_pull':
+    case 'move':
+      return c.meters === null;
+    default:
+      return false;
+  }
+}
+
+export const EDIT_MODE_KO: Record<VoiceEditMode, string> = {
+  pushpull: '늘리기',
+  offset: '오프셋',
+  taper: '면 크기',
+  move: '이동',
+  copy: '복사',
+  scale: '크기',
+};
 
 export interface Interpretation {
   /**
@@ -106,6 +140,8 @@ export function describeCommand(c: VoiceCommand): string {
       return `재질 → ${MATERIAL_KO[c.material]}`;
     case 'set_tool':
       return `도구 → ${TOOL_KO[c.tool]}`;
+    case 'set_mode':
+      return `${EDIT_MODE_KO[c.mode]} 모드`;
     case 'set_load':
       return `하중 ${c.kg}kg`;
     case 'push_pull': {
@@ -126,6 +162,8 @@ export function describeCommand(c: VoiceCommand): string {
       return c.shape === 'rect' ? '사각형 그리기' : '원 그리기';
     case 'taper':
       return `${c.end === 'top' ? '윗면' : '아랫면'} ${c.ratio === null ? '크기' : c.ratio === 0 ? '뾰족하게' : `x${c.ratio}`}`;
+    case 'diameter':
+      return `${c.end === 'top' ? '윗면 ' : c.end === 'bottom' ? '아랫면 ' : ''}지름 ${meterKo(c.meters)}`;
     case 'dig':
       return c.through ? '관통' : c.meters !== null ? `${meterKo(c.meters)} 파기` : '파기';
     case 'undo':
@@ -224,6 +262,8 @@ function buildCommand(
   const dir = () => MOVE_DIRECTION_OPTION[choice(r, 'move_direction') ?? 'not_specified'] ?? null;
   // 후보가 하나뿐이면 Jev가 not_specified를 골라도 그 값 (숫자는 코드가 뽑은 것만 씀)
   const meters = () => distances.find((d) => d.key === choice(r, 'distance'))?.meters ?? (distances.length === 1 ? distances[0].meters : null);
+  // 지름·반지름을 말했는데 늘리기·크기·면 크기로 잡히면 지름으로 보정 (Jev intent가 늘려·줄여에 끌려가는 경우)
+  if ((intent === 'push_pull' || intent === 'scale_part' || intent === 'taper_face') && /지름|직경/.test(text)) intent = 'set_diameter';
   switch (intent) {
     case 'push_pull':
       return { type: 'push_pull', dir: dir(), meters: meters(), shrink: choice(r, 'resize') === 'shrink' };
@@ -236,6 +276,8 @@ function buildCommand(
     case 'offset_face':
       return { type: 'offset', meters: meters() };
     case 'scale_part': {
+      // 윗면·아랫면을 말했으면 전체 크기가 아니라 면 크기 (Jev intent가 배율 표현에 끌려가는 경우 보정)
+      if ((choice(r, 'face_end') ?? 'not_specified') !== 'not_specified') return buildCommand('taper_face', r, text, angles, ctx, distances, scales);
       const f = scales.find((c) => c.key === choice(r, 'scale_factor'))?.factor ?? (scales.length === 1 ? scales[0].factor : null);
       return { type: 'scale', factor: f };
     }
@@ -247,6 +289,12 @@ function buildCommand(
       const pointed = /뾰족|원뿔|꼭짓점/.test(text);
       const f = scales.find((c) => c.key === choice(r, 'scale_factor'))?.factor ?? (scales.length === 1 ? scales[0].factor : null);
       return { type: 'taper', end, ratio: pointed ? 0 : f };
+    }
+    case 'set_diameter': {
+      const m = meters();
+      if (m === null) return null;
+      const end = choice(r, 'face_end');
+      return { type: 'diameter', meters: saysRadius(text) ? m * 2 : m, end: end === 'top' || end === 'bottom' ? end : null };
     }
     case 'dig_hole':
       return { type: 'dig', meters: meters(), through: /뚫|관통|파이프/.test(text) };
@@ -262,6 +310,9 @@ function buildCommand(
       return m && m in MATERIAL_KO ? { type: 'set_material', material: m } : null;
     }
     case 'change_tool': {
+      // 편집 모드("면 크기 도구")가 잡히면 그림 도구보다 우선
+      const mode = EDIT_MODE_OPTION[choice(r, 'edit_mode') ?? 'none'] ?? null;
+      if (mode) return { type: 'set_mode', mode };
       const t = choice(r, 'tool') as Tool | null;
       return t && t in TOOL_KO ? { type: 'set_tool', tool: t } : null;
     }

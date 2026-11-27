@@ -17,7 +17,7 @@ export interface SceneHandCursor {
   /** 화면 좌표 (0~1, 좌상단 원점). 깊이 없음 → 마우스처럼 카메라 → 이 점으로 레이를 쏴서 선택 */
   screen: [number, number];
   pinching: boolean;
-  /** 선택 커서(✌️) 모드: 초록 링 + 가리킨 구조물 하이라이트 */
+  /** 선택 커서 모드 (항상 true): 초록 링 + 가리킨 구조물 하이라이트 */
   selecting: boolean;
 }
 

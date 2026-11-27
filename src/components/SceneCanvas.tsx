@@ -11,8 +11,8 @@ import {
   CadMaterial,
   CameraControlState,
   SolidPrimitive,
+  ExteriorWindow3D,
 } from '../types/cad';
-import { MATERIAL_CATALOG } from '../utils/buildingEstimator';
 import {
   computePolygonAreaSqm,
   getFloorColor,
@@ -32,20 +32,43 @@ interface Props {
 interface HoveredTooltipState {
   x: number;
   y: number;
+  solidId: string;
   floorIndex: number;
   title: string;
-  areaText: string;
+  materialLine: string;
+  costLine: string;
+  totalBudgetLine?: string;
   physicsLine1: string;
   physicsLine2: string;
   dcrBadge?: { text: string; tone: 'safe' | 'caution' | 'unsafe' };
 }
 
+const SCALE_DIV = 3.2;
 const WHITE_SAFE = new THREE.Color('#ffffff');
 const PALE_WARM = new THREE.Color('#fef3c7');
 const WARN_AMBER = new THREE.Color('#f97316');
 const DANGER_RED = new THREE.Color('#dc2626');
 const FIXED_SLATE = new THREE.Color('#475569');
 const UP_VEC = new THREE.Vector3(0, 1, 0);
+
+function formatKrwCompact(krw: number): string {
+  const man = Math.round(krw / 10000);
+  if (man >= 10000) {
+    const eok = Math.floor(man / 10000);
+    const rem = man % 10000;
+    return rem > 0 ? `${eok}억 ${rem.toLocaleString()}만 원` : `${eok}억 원`;
+  }
+  return `${Math.max(1, man).toLocaleString()}만 원`;
+}
+
+function estimateSolidFaceAreaM2(solid: SolidPrimitive): number {
+  const dims = [
+    solid.scale[0] * SCALE_DIV,
+    solid.scale[1] * SCALE_DIV,
+    solid.scale[2] * SCALE_DIV,
+  ].sort((a, b) => b - a);
+  return Math.max(0.5, Number((dims[0] * dims[1]).toFixed(1)));
+}
 
 // ---------- 지붕-벽체 밀봉용 정규화 삼각 지오메트리 ----------
 let cachedGableGeo: THREE.ExtrudeGeometry | null = null;
@@ -81,65 +104,150 @@ function getWedgeWallGeometry(): THREE.ExtrudeGeometry {
   return geo;
 }
 
+/** 균형 잡힌 고대비 HDR 스튜디오 환경맵 */
 function StudioEnvironment() {
   const { gl, scene } = useThree();
 
   useEffect(() => {
-    const width = 128;
-    const height = 64;
-    const data = new Uint8Array(width * height * 4);
+    const envScene = new THREE.Scene();
+    envScene.background = new THREE.Color('#9db0c5');
 
-    for (let y = 0; y < height; y++) {
-      const v = y / (height - 1);
-      let r = 240;
-      let g = 244;
-      let b = 248;
-      if (v > 0.52) {
-        const t = (v - 0.52) / 0.48;
-        r = Math.round(238 - t * 28);
-        g = Math.round(244 - t * 14);
-        b = Math.round(252 - t * 2);
-      } else if (v > 0.46) {
-        r = 255;
-        g = 252;
-        b = 246;
-      } else {
-        const t = (0.46 - v) / 0.46;
-        r = Math.round(232 - t * 55);
-        g = Math.round(226 - t * 52);
-        b = Math.round(218 - t * 50);
-      }
+    const disposables: { dispose: () => void }[] = [];
 
-      for (let x = 0; x < width; x++) {
-        const idx = (y * width + x) * 4;
-        data[idx] = r;
-        data[idx + 1] = g;
-        data[idx + 2] = b;
-        data[idx + 3] = 255;
-      }
-    }
+    const addLightPanel = (
+      pos: [number, number, number],
+      rot: [number, number, number],
+      size: [number, number],
+      rgb: [number, number, number]
+    ) => {
+      const geo = new THREE.PlaneGeometry(size[0], size[1]);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(rgb[0], rgb[1], rgb[2]),
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(pos[0], pos[1], pos[2]);
+      mesh.rotation.set(rot[0], rot[1], rot[2]);
+      envScene.add(mesh);
+      disposables.push(geo, mat);
+    };
 
-    const eqTex = new THREE.DataTexture(data, width, height, THREE.RGBAFormat);
-    eqTex.mapping = THREE.EquirectangularReflectionMapping;
-    eqTex.colorSpace = THREE.SRGBColorSpace;
-    eqTex.needsUpdate = true;
+    addLightPanel([0, 12, 0], [Math.PI / 2, 0, 0], [16, 16], [2.4, 2.35, 2.25]);
+    addLightPanel([-12, 7, 8], [0.25, Math.PI / 3, 0], [13, 9], [2.85, 2.45, 1.9]);
+    addLightPanel([13, 6, 6], [0.2, -Math.PI / 2.5, 0], [13, 9], [1.85, 2.2, 2.75]);
+    addLightPanel([0, 7, -14], [0.2, 0, 0], [18, 8], [2.05, 2.1, 2.25]);
+    addLightPanel([0, -7, 0], [-Math.PI / 2, 0, 0], [32, 32], [0.78, 0.75, 0.7]);
 
     const pmrem = new THREE.PMREMGenerator(gl);
-    const envTarget = pmrem.fromEquirectangular(eqTex);
+    pmrem.compileEquirectangularShader();
+    const envTarget = pmrem.fromScene(envScene, 0.035);
     scene.environment = envTarget.texture;
 
     return () => {
       scene.environment = null;
       envTarget.dispose();
-      eqTex.dispose();
       pmrem.dispose();
+      disposables.forEach((d) => d.dispose());
     };
   }, [gl, scene]);
 
   return null;
 }
 
-/** 실제 KDS 응력비(DCR = Demand / φCapacity)를 화이트 → 아이보리 → 오렌지 → 레드로 매핑 */
+/** 입체 알루미늄 창틀 프레임 + 중앙 멀리언 + 투명 반사 로이 유리 창호 */
+function ArchitecturalWindowUnit({
+  win,
+  isPipeXray,
+  isUnitXray,
+}: {
+  win: ExteriorWindow3D;
+  isPipeXray: boolean;
+  isUnitXray: boolean;
+}) {
+  const [w, h, d] = win.scale;
+  const frameT = Math.min(0.032, Math.max(0.018, Math.min(w, h) * 0.065));
+  const frameD = Math.max(d * 1.45, 0.065);
+  const glassD = Math.max(0.014, d * 0.35);
+  const frameOpacity = isPipeXray ? 0.25 : isUnitXray ? 0.45 : 1.0;
+  const glassOpacity = isPipeXray ? 0.1 : isUnitXray ? 0.18 : 0.38;
+
+  return (
+    <group position={win.position} rotation={[0, win.rotationY, 0]}>
+      {/* 상·하·좌·우 다크 알루미늄 시스템 창틀 + 중앙 수직 멀리언 */}
+      <mesh position={[0, h * 0.5 - frameT * 0.5, 0]}>
+        <boxGeometry args={[w, frameT, frameD]} />
+        <meshStandardMaterial
+          color="#27303f"
+          metalness={0.65}
+          roughness={0.32}
+          transparent={frameOpacity < 1}
+          opacity={frameOpacity}
+        />
+      </mesh>
+      <mesh position={[0, -h * 0.5 + frameT * 0.5, 0]}>
+        <boxGeometry args={[w, frameT, frameD]} />
+        <meshStandardMaterial
+          color="#27303f"
+          metalness={0.65}
+          roughness={0.32}
+          transparent={frameOpacity < 1}
+          opacity={frameOpacity}
+        />
+      </mesh>
+      <mesh position={[-w * 0.5 + frameT * 0.5, 0, 0]}>
+        <boxGeometry args={[frameT, h, frameD]} />
+        <meshStandardMaterial
+          color="#27303f"
+          metalness={0.65}
+          roughness={0.32}
+          transparent={frameOpacity < 1}
+          opacity={frameOpacity}
+        />
+      </mesh>
+      <mesh position={[w * 0.5 - frameT * 0.5, 0, 0]}>
+        <boxGeometry args={[frameT, h, frameD]} />
+        <meshStandardMaterial
+          color="#27303f"
+          metalness={0.65}
+          roughness={0.32}
+          transparent={frameOpacity < 1}
+          opacity={frameOpacity}
+        />
+      </mesh>
+      {w > 0.42 && (
+        <mesh position={[0, 0, 0]}>
+          <boxGeometry args={[frameT * 0.75, h - frameT * 1.5, frameD * 0.9]} />
+          <meshStandardMaterial
+            color="#334155"
+            metalness={0.65}
+            roughness={0.35}
+            transparent={frameOpacity < 1}
+            opacity={frameOpacity}
+          />
+        </mesh>
+      )}
+
+      {/* 내부가 비치면서 하늘·빛이 반사되는 로이(Low-E) 복층 유리 */}
+      <mesh>
+        <boxGeometry args={[Math.max(0.04, w - frameT * 1.8), Math.max(0.04, h - frameT * 1.8), glassD]} />
+        <meshPhysicalMaterial
+          color="#7ec4e8"
+          metalness={0.14}
+          roughness={0.05}
+          clearcoat={1.0}
+          clearcoatRoughness={0.03}
+          reflectivity={0.96}
+          ior={1.52}
+          envMapIntensity={2.3}
+          transparent
+          opacity={glassOpacity}
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
+  );
+}
+
 function computeDcrHeatmapColor(dcr: number): THREE.Color {
   const clamped = THREE.MathUtils.clamp(dcr, 0, 1.25);
   if (clamped <= 0.55) {
@@ -190,6 +298,47 @@ function SolidShapeGeometry({ shape, lathe }: { shape: SolidPrimitive['shape']; 
   return <boxGeometry args={[1, 1, 1]} />;
 }
 
+function resolvePbrTintHex(
+  solid: SolidPrimitive,
+  matKey: CadMaterial,
+  defaultColor: string
+): string {
+  const pbr = getPbrMaterialBundle(matKey);
+
+  if (
+    matKey === 'gold' ||
+    matKey === 'steel' ||
+    matKey === 'titanium' ||
+    matKey === 'carbon' ||
+    matKey === 'glass' ||
+    matKey === 'hologram' ||
+    matKey === 'wood' ||
+    matKey === 'concrete'
+  ) {
+    if (
+      solid.partRole === 'structural_column' ||
+      solid.partRole === 'structural_beam' ||
+      solid.partRole === 'structural_footing'
+    ) {
+      return solid.color || pbr.baseTintHex;
+    }
+    return pbr.baseTintHex;
+  }
+
+  if (solid.color && solid.color !== '#00f3ff') {
+    const lower = solid.color.toLowerCase();
+    if (lower === '#ffffff' || lower === '#f8fafc' || lower === '#f5f2eb') {
+      return pbr.baseTintHex;
+    }
+    return solid.color;
+  }
+  if (typeof solid.floorIndex === 'number' && solid.partRole !== 'garden') {
+    const fc = getFloorColor(solid.floorIndex).toLowerCase();
+    return fc === '#f5f2eb' || fc === '#f8fafc' ? pbr.baseTintHex : fc;
+  }
+  return defaultColor || pbr.baseTintHex;
+}
+
 function SolidMeshView({
   solid,
   defaultMaterial,
@@ -201,7 +350,7 @@ function SolidMeshView({
   isHeatmapActive,
   isSelected,
   isFloorSelected,
-  isFloorHovered,
+  isHovered,
   isParamHighlighted,
   onSelect,
   onHoverSolid,
@@ -217,7 +366,7 @@ function SolidMeshView({
   isHeatmapActive: boolean;
   isSelected: boolean;
   isFloorSelected: boolean;
-  isFloorHovered: boolean;
+  isHovered: boolean;
   isParamHighlighted: boolean;
   onSelect?: () => void;
   onHoverSolid?: (solid: SolidPrimitive, clientX: number, clientY: number) => void;
@@ -227,32 +376,9 @@ function SolidMeshView({
   const pbr = getPbrMaterialBundle(matKey);
   const primaryStructural = isPrimaryLoadBearing(solid.partRole);
   const nonStructural = isNonStructuralDecor(solid.partRole);
+  const effectiveColor = resolvePbrTintHex(solid, matKey, defaultColor);
 
-  const floorTint =
-    typeof solid.floorIndex === 'number' &&
-    !primaryStructural &&
-    solid.partRole !== 'interior_wall' &&
-    solid.partRole !== 'interior_floor' &&
-    solid.partRole !== 'furniture' &&
-    solid.partRole !== 'garden'
-      ? getFloorColor(solid.floorIndex)
-      : null;
-
-  const rawTint =
-    solid.color && solid.color !== '#00f3ff'
-      ? solid.color
-      : floorTint ?? MATERIAL_CATALOG[matKey]?.hex ?? defaultColor ?? '#ffffff';
-
-  const effectiveColor =
-    matKey === 'wood' || matKey === 'steel' || matKey === 'concrete'
-      ? solid.partRole === 'structural_column' ||
-        solid.partRole === 'structural_beam' ||
-        solid.partRole === 'structural_footing'
-        ? rawTint
-        : '#ffffff'
-      : rawTint;
-
-  // 0. 실내 투시 뷰 (지붕·마감벽 + 남/동측 외벽 오픈)
+  // 0. 실내 투시 뷰
   if (interiorCutawayMode) {
     if (
       solid.partRole === 'roof' ||
@@ -269,7 +395,7 @@ function SolidMeshView({
     }
   }
 
-  // 1. 구조 골조 전용 투시 뷰 (RC/철골/중목 기둥·보·기초·슬래브만 실체로 강조, 비구조 외피는 고스트화)
+  // 1. 구조 골조 전용 투시 뷰
   if (structuralFrameMode) {
     if (solid.partRole === 'furniture' || solid.partRole === 'interior_floor') {
       return null;
@@ -280,7 +406,7 @@ function SolidMeshView({
           <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
             <mesh>
               <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-              <meshStandardMaterial color="#86efac" transparent opacity={0.22} depthWrite={false} />
+              <meshStandardMaterial color="#65a30d" transparent opacity={0.25} depthWrite={false} />
             </mesh>
           </group>
         );
@@ -290,7 +416,7 @@ function SolidMeshView({
           <mesh>
             <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
             <meshStandardMaterial
-              color="#cbd5e1"
+              color="#94a3b8"
               roughness={0.35}
               transparent
               opacity={0.07}
@@ -299,13 +425,12 @@ function SolidMeshView({
           </mesh>
           <mesh scale={[1.001, 1.001, 1.001]}>
             <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-            <meshBasicMaterial color="#94a3b8" wireframe transparent opacity={0.14} />
+            <meshBasicMaterial color="#64748b" wireframe transparent opacity={0.16} />
           </mesh>
         </group>
       );
     }
 
-    // 실제 주구조 골조 부재(기초·기둥·보·코어·슬래브) 선명 렌더링
     return (
       <group
         position={solid.position}
@@ -327,13 +452,15 @@ function SolidMeshView({
       >
         <mesh castShadow receiveShadow>
           <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-          <meshStandardMaterial
+          <meshPhysicalMaterial
             map={pbr.map}
             bumpMap={pbr.bumpMap}
             bumpScale={pbr.bumpScale}
             color={effectiveColor}
             metalness={pbr.metalness}
             roughness={pbr.roughness}
+            clearcoat={pbr.clearcoat}
+            envMapIntensity={pbr.envMapIntensity}
             transparent={solid.partRole === 'slab'}
             opacity={solid.partRole === 'slab' ? 0.42 : 0.98}
           />
@@ -364,32 +491,31 @@ function SolidMeshView({
         <mesh>
           <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
           <meshStandardMaterial
-            color="#e2e8f0"
+            color="#cbd5e1"
             roughness={0.3}
             transparent
-            opacity={0.13}
+            opacity={0.14}
             depthWrite={false}
           />
         </mesh>
         <mesh scale={[1.002, 1.002, 1.002]}>
           <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-          <meshBasicMaterial color="#94a3b8" wireframe transparent opacity={0.18} />
+          <meshBasicMaterial color="#64748b" wireframe transparent opacity={0.2} />
         </mesh>
       </group>
     );
   }
 
-  // 3. 실제 KDS 물리 DCR 기반 하중 경로 히트맵 (정원·가구·조형물 제외, 골조 강조)
+  // 3. KDS 물리 DCR 기반 하중 경로 히트맵
   if (isHeatmapActive) {
     if (nonStructural) {
-      // 정원·가구 등은 하중을 받지 않으므로 붉게 물들이지 않고 배경 톤으로만 유지
       if (solid.partRole === 'furniture') return null;
       return (
         <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
           <mesh>
             <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
             <meshStandardMaterial
-              color={rawTint}
+              color={effectiveColor}
               roughness={0.8}
               transparent
               opacity={0.35}
@@ -403,7 +529,6 @@ function SolidMeshView({
     const actualDcr = typeof solid.dcr === 'number' ? solid.dcr : 0.15;
     const heatColor = computeDcrHeatmapColor(actualDcr);
 
-    // 비내력 외벽/내벽/지붕은 반투명화해 내부 기둥·보·기초의 실제 하중 전달 경로가 한눈에 보이게 처리
     if (!primaryStructural) {
       return (
         <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
@@ -419,13 +544,12 @@ function SolidMeshView({
           </mesh>
           <mesh scale={[1.002, 1.002, 1.002]}>
             <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-            <meshBasicMaterial color="#94a3b8" wireframe transparent opacity={0.14} />
+            <meshBasicMaterial color="#64748b" wireframe transparent opacity={0.16} />
           </mesh>
         </group>
       );
     }
 
-    // 실제 하중을 지지하는 주구조 골조 (기초·기둥·보·코어·슬래브)
     const isFrameBar =
       solid.partRole === 'structural_column' ||
       solid.partRole === 'structural_beam' ||
@@ -456,8 +580,8 @@ function SolidMeshView({
           <meshStandardMaterial
             color={heatColor}
             emissive={heatColor}
-            emissiveIntensity={actualDcr > 0.8 ? 0.38 : actualDcr > 0.55 ? 0.16 : 0.04}
-            roughness={0.35}
+            emissiveIntensity={actualDcr > 0.8 ? 0.35 : actualDcr > 0.55 ? 0.14 : 0.03}
+            roughness={0.38}
             transparent={!isFrameBar}
             opacity={isFrameBar ? 0.96 : 0.45}
             depthWrite={isFrameBar}
@@ -476,7 +600,7 @@ function SolidMeshView({
     );
   }
 
-  // 4. 방 평면도(TYPE-A 등) 선택 시 전체 건물 내 방 구역 투시
+  // 4. 방 평면도 선택 시 투시
   if (xrayUnitMode) {
     const isRoofOrSculpture =
       solid.partRole === 'roof' ||
@@ -509,7 +633,7 @@ function SolidMeshView({
         <mesh>
           <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
           <meshStandardMaterial
-            color={rawTint}
+            color={effectiveColor}
             roughness={0.45}
             transparent
             opacity={isRoofOrSculpture ? 0.08 : isWall ? 0.2 : 0.28}
@@ -529,9 +653,22 @@ function SolidMeshView({
     );
   }
 
+  // 5. 일반 외관 / 실내 투시 실사 PBR 렌더링
   const highlighted = isSelected || isFloorSelected;
   const isBackExteriorInCutaway =
     interiorCutawayMode && solid.partRole === 'exterior_wall';
+  const isTransparent = Boolean(
+    pbr.transparent ||
+      solid.partRole === 'basement' ||
+      solid.partRole === 'structural_footing' ||
+      isBackExteriorInCutaway
+  );
+  const finalOpacity =
+    solid.partRole === 'basement' || solid.partRole === 'structural_footing'
+      ? 0.52
+      : isBackExteriorInCutaway
+      ? 0.42
+      : pbr.opacity;
 
   return (
     <group
@@ -552,53 +689,45 @@ function SolidMeshView({
       }}
       onPointerOut={() => onLeaveSolid?.()}
     >
-      <mesh castShadow receiveShadow>
+      <mesh castShadow={pbr.castShadow && !isTransparent} receiveShadow={!pbr.transparent}>
         <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-        <meshStandardMaterial
+        <meshPhysicalMaterial
           map={pbr.map}
           bumpMap={pbr.bumpMap}
           bumpScale={pbr.bumpScale}
           roughnessMap={pbr.roughnessMap}
-          color={
-            isParamHighlighted
-              ? '#38bdf8'
-              : isFloorSelected
-              ? '#bae6fd'
-              : isFloorHovered
-              ? '#e0f2fe'
-              : effectiveColor
-          }
+          color={isParamHighlighted ? '#38bdf8' : effectiveColor}
           emissive={
             isParamHighlighted || isFloorSelected
               ? '#0284c7'
-              : isFloorHovered
-              ? '#38bdf8'
+              : isHovered
+              ? '#cbd5e1'
               : '#000000'
           }
           emissiveIntensity={
-            isParamHighlighted ? 0.22 : isFloorSelected ? 0.15 : isFloorHovered ? 0.1 : 0
+            isParamHighlighted ? 0.2 : isFloorSelected ? 0.12 : isHovered ? 0.04 : 0
           }
           metalness={pbr.metalness}
           roughness={pbr.roughness}
-          transparent={Boolean(
-            pbr.transparent ||
-              solid.partRole === 'basement' ||
-              solid.partRole === 'structural_footing' ||
-              isBackExteriorInCutaway
-          )}
-          opacity={
-            solid.partRole === 'basement' || solid.partRole === 'structural_footing'
-              ? 0.55
-              : isBackExteriorInCutaway
-              ? 0.45
-              : pbr.opacity ?? 1
-          }
+          clearcoat={pbr.clearcoat}
+          clearcoatRoughness={pbr.clearcoatRoughness}
+          reflectivity={pbr.reflectivity}
+          ior={pbr.ior}
+          envMapIntensity={pbr.envMapIntensity}
+          transparent={isTransparent}
+          opacity={finalOpacity}
+          depthWrite={!pbr.transparent && !isBackExteriorInCutaway}
         />
       </mesh>
-      {highlighted && (
+      {(highlighted || isHovered) && (
         <mesh scale={[1.004, 1.004, 1.004]}>
           <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
-          <meshBasicMaterial color="#0284c7" wireframe transparent opacity={0.85} />
+          <meshBasicMaterial
+            color={highlighted ? '#0284c7' : '#38bdf8'}
+            wireframe
+            transparent
+            opacity={highlighted ? 0.85 : 0.45}
+          />
         </mesh>
       )}
     </group>
@@ -853,7 +982,7 @@ function CameraController({
 
 function StaticStructure({
   structure,
-  hoveredFloorIndex,
+  hoveredSolidId,
   onSelectPart,
   onHoverSolid,
   onLeaveSolid,
@@ -861,7 +990,7 @@ function StaticStructure({
   onDraggingSiteChange,
 }: {
   structure: StructureState;
-  hoveredFloorIndex: number | null;
+  hoveredSolidId: string | null;
   onSelectPart: (partId: string | null) => void;
   onHoverSolid: (solid: SolidPrimitive, clientX: number, clientY: number) => void;
   onLeaveSolid: () => void;
@@ -886,12 +1015,10 @@ function StaticStructure({
   const isStructuralFrame = structure.viewMode === 'structural_frame';
   const isSiteEditMode = Boolean(structure.isSiteEditMode && spec);
   const vizKey = structure.activeSpecViz?.paramKey;
-  const glassPbr = getPbrMaterialBundle('glass');
   const steelPbr = getPbrMaterialBundle('steel');
 
   const dimGuides = useMemo(() => {
     if (!spec) return null;
-    const SCALE_DIV = 3.2;
     const { points, polygon2D, minX, maxZ } = getSiteBoundaryPoints(
       spec.siteAreaSqm,
       spec.siteShape ?? 'rectangle',
@@ -940,19 +1067,13 @@ function StaticStructure({
               typeof structure.selectedFloorIndex === 'number' &&
               solid.floorIndex === structure.selectedFloorIndex
             }
-            isFloorHovered={
-              !isHeatmap &&
-              !isStructuralFrame &&
-              typeof solid.floorIndex === 'number' &&
-              solid.floorIndex !== 0 &&
-              hoveredFloorIndex === solid.floorIndex
-            }
+            isHovered={!isHeatmap && !isStructuralFrame && hoveredSolidId === solid.id}
             isParamHighlighted={isParamHighlighted}
             onSelect={() => {
               if (!isSiteEditMode) onSelectPart(solid.id);
             }}
             onHoverSolid={(s, cx, cy) => {
-              if (typeof s.floorIndex === 'number' && s.floorIndex !== 0) {
+              if (s.partRole !== 'site_boundary') {
                 onHoverSolid(s, cx, cy);
               }
             }}
@@ -961,31 +1082,18 @@ function StaticStructure({
         );
       })}
 
-      {/* 외벽 로이 복층 유리 창호 (히트맵 및 구조 골조 전용 뷰에서는 반투명/숨김) */}
+      {/* 외벽 입체 창틀 + 로이 복층 유리 창호 */}
       {!isHeatmap &&
         !isStructuralFrame &&
         (spec?.exteriorWindows ?? [])
           .filter((win) => !(isInteriorCutaway && (win.wall === 'S' || win.wall === 'E')))
           .map((win) => (
-            <group
+            <ArchitecturalWindowUnit
               key={win.id}
-              position={win.position}
-              rotation={[0, win.rotationY, 0]}
-              scale={win.scale}
-            >
-              <mesh>
-                <boxGeometry args={[1, 1, 1]} />
-                <meshStandardMaterial
-                  map={glassPbr.map}
-                  color="#bae6fd"
-                  metalness={0.22}
-                  roughness={0.08}
-                  transparent
-                  opacity={isPipeXray ? 0.12 : selectedUnitType ? 0.25 : 0.45}
-                  depthWrite={false}
-                />
-              </mesh>
-            </group>
+              win={win}
+              isPipeXray={isPipeXray}
+              isUnitXray={Boolean(selectedUnitType)}
+            />
           ))}
 
       {/* 수도·전기 배관 3D 라인 */}
@@ -1036,8 +1144,8 @@ function StaticStructure({
         <group>
           <Line
             points={dimGuides.siteBoundary}
-            color={isSiteEditMode || vizKey === 'siteAreaSqm' ? '#0284c7' : '#64748b'}
-            lineWidth={isSiteEditMode || vizKey === 'siteAreaSqm' ? 3.2 : 1.6}
+            color={isSiteEditMode || vizKey === 'siteAreaSqm' ? '#0369a1' : '#475569'}
+            lineWidth={isSiteEditMode || vizKey === 'siteAreaSqm' ? 3.2 : 1.7}
             dashed={!isSiteEditMode}
             dashSize={0.25}
             gapSize={0.14}
@@ -1050,7 +1158,7 @@ function StaticStructure({
           />
           <Line
             points={dimGuides.heightPole}
-            color={vizKey === 'heightMeters' || vizKey === 'floors' ? '#0284c7' : '#64748b'}
+            color={vizKey === 'heightMeters' || vizKey === 'floors' ? '#0369a1' : '#475569'}
             lineWidth={vizKey === 'heightMeters' || vizKey === 'floors' ? 3 : 1.5}
           />
           {structure.activeSpecViz && spec && (
@@ -1075,7 +1183,7 @@ function StaticStructure({
         </group>
       )}
 
-      {/* 구조 절점 노드 & 기둥 부재 (실제 beam.dcr 반영) */}
+      {/* 구조 절점 노드 & 기둥 부재 */}
       {structure.nodes.map((node) => {
         const isGrounded = node.isFixed;
         const baseDcr = spec?.structuralReport?.foundationDcr ?? 0.25;
@@ -1092,7 +1200,7 @@ function StaticStructure({
             ) : (
               <sphereGeometry args={[0.045, 10, 10]} />
             )}
-            <meshStandardMaterial color={nodeColor} metalness={0.75} roughness={0.3} />
+            <meshStandardMaterial color={nodeColor} metalness={0.7} roughness={0.28} />
           </mesh>
         );
       })}
@@ -1111,13 +1219,13 @@ function StaticStructure({
         const beamPbr = matKey === 'steel' ? steelPbr : getPbrMaterialBundle(matKey);
         const finalColor = isHeatmap
           ? computeDcrHeatmapColor(actualDcr)
-          : new THREE.Color('#ffffff');
+          : new THREE.Color(beamPbr.baseTintHex);
         const radius = isHeatmap ? (beam.radius ?? 0.032) * 1.45 : beam.radius ?? 0.03;
 
         return (
           <mesh key={beam.id} position={mid} quaternion={quat} scale={[1, length, 1]} castShadow>
             <cylinderGeometry args={[radius, radius, 1, 12]} />
-            <meshStandardMaterial
+            <meshPhysicalMaterial
               map={isHeatmap ? null : beamPbr.map}
               bumpMap={isHeatmap ? null : beamPbr.bumpMap}
               bumpScale={beamPbr.bumpScale}
@@ -1126,6 +1234,8 @@ function StaticStructure({
               emissiveIntensity={isHeatmap && actualDcr > 0.78 ? 0.35 : 0}
               metalness={isHeatmap ? 0.2 : beamPbr.metalness}
               roughness={isHeatmap ? 0.35 : beamPbr.roughness}
+              clearcoat={isHeatmap ? 0 : beamPbr.clearcoat}
+              envMapIntensity={beamPbr.envMapIntensity}
             />
           </mesh>
         );
@@ -1235,7 +1345,7 @@ function DynamicPhysicsStructure({
             isHeatmapActive={false}
             isSelected={false}
             isFloorSelected={false}
-            isFloorHovered={false}
+            isHovered={false}
             isParamHighlighted={false}
           />
         </RigidBody>
@@ -1297,64 +1407,43 @@ export default function SceneCanvas({
 
   const handleHoverSolid = (solid: SolidPrimitive, clientX: number, clientY: number) => {
     const spec = structure.buildingSpec;
-    if (!spec) return;
-
     const floorIndex = solid.floorIndex ?? 1;
-    const report = spec.structuralReport;
-    const avgFloorArea = Number(
-      (spec.totalFloorAreaSqm / Math.max(1, spec.floors)).toFixed(1)
-    );
+    const matKey = solid.material ?? structure.activeMaterial ?? 'stucco';
+    const pbr = getPbrMaterialBundle(matKey);
 
+    const faceAreaM2 = estimateSolidFaceAreaM2(solid);
+    const partCostKrw = Math.round(faceAreaM2 * pbr.unitCostPerM2Krw);
+    const unitMan = (pbr.unitCostPerM2Krw / 10000).toFixed(1);
+
+    const materialLine = `적용 재질: ${pbr.labelKo} (${unitMan}만 원/㎡)`;
+    const costLine = `이 부위 약 ${faceAreaM2}㎡ · 예상 ${formatKrwCompact(partCostKrw)}`;
+    const totalBudgetLine = spec?.budgetReport
+      ? `건물 총 예상 공사비: ${formatKrwCompact(spec.budgetReport.grandTotalKrw)}`
+      : undefined;
+
+    const report = spec?.structuralReport;
     const makeBadge = (dcr?: number): HoveredTooltipState['dcrBadge'] => {
       if (typeof dcr !== 'number') return undefined;
       const pct = Math.round(dcr * 100);
-      if (dcr > 1.0) return { text: `위험 · 응력비 ${pct}% (초과)`, tone: 'unsafe' };
+      if (dcr > 1.0) return { text: `위험 · 응력비 ${pct}%`, tone: 'unsafe' };
       if (dcr > 0.78) return { text: `주의 · 응력비 ${pct}%`, tone: 'caution' };
       return { text: `안전 · 응력비 ${pct}%`, tone: 'safe' };
     };
 
-    // 기둥·보·기초·코어처럼 개별 공학 데이터가 붙은 구조 부재 호버 시 상세 역학 정보 우선 표시
     if (solid.stressLabel) {
       setHoveredTooltip({
         x: clientX,
         y: clientY,
+        solidId: solid.id,
         floorIndex,
         title: solid.groupName || `${floorIndex}층 구조 부재`,
-        areaText: report ? `${report.system.nameKo} · ${report.system.codeRef}` : 'KDS 구조 골조',
+        materialLine,
+        costLine,
+        totalBudgetLine,
         physicsLine1: solid.stressLabel,
         physicsLine2: report
-          ? `건물 총 중량 ${report.totalGravityMassTon.toLocaleString()}톤 · 기초 지반압 ${report.soilBearingPressureKpa}kPa`
+          ? `${report.system.nameKo} · 총 중량 ${report.totalGravityMassTon.toLocaleString()}톤`
           : '',
-        dcrBadge: makeBadge(solid.dcr),
-      });
-      return;
-    }
-
-    if (floorIndex < 0) {
-      setHoveredTooltip({
-        x: clientX,
-        y: clientY,
-        floorIndex,
-        title: `지하·기초부 (B1~B${Math.max(1, spec.undergroundFloors)})`,
-        areaText: `지하 연면적 ${spec.undergroundAreaSqm.toLocaleString()} ㎡`,
-        physicsLine1: report
-          ? `기초 지반접지압 ${report.soilBearingPressureKpa}kPa / 허용 ${report.allowableSoilKpa}kPa`
-          : '철근콘크리트 기초 구조',
-        physicsLine2: '지하 주차·기계실 및 RC 내진 기초',
-        dcrBadge: makeBadge(report?.foundationDcr),
-      });
-      return;
-    }
-
-    if (floorIndex === 99) {
-      setHoveredTooltip({
-        x: clientX,
-        y: clientY,
-        floorIndex,
-        title: `지붕·옥상층 (RF · ${spec.roofStyle ?? 'flat'})`,
-        areaText: `건축면적 약 ${spec.buildingAreaSqm.toLocaleString()} ㎡ · 최고 높이 ${spec.heightMeters}m`,
-        physicsLine1: '지붕-벽체 밀봉 마감 및 방수·단열 구조',
-        physicsLine2: `지붕 마감재: ${(spec.roofMaterial ?? 'steel').toUpperCase()}`,
         dcrBadge: makeBadge(solid.dcr),
       });
       return;
@@ -1364,23 +1453,39 @@ export default function SceneCanvas({
     setHoveredTooltip({
       x: clientX,
       y: clientY,
+      solidId: solid.id,
       floorIndex,
-      title: `지상 ${floorIndex}층 (${floorIndex}F)`,
-      areaText: `층 바닥면적 약 ${avgFloorArea.toLocaleString()} ㎡`,
+      title:
+        solid.groupName ||
+        (floorIndex === 99
+          ? '지붕·옥상 마감부'
+          : floorIndex < 0
+          ? '지하·기초부'
+          : floorIndex === 0
+          ? '외부 정원 조경'
+          : `지상 ${floorIndex}층 요소`),
+      materialLine,
+      costLine,
+      totalBudgetLine,
       physicsLine1: fp
-        ? `자중 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2} → 계수하중 ${fp.factoredLoadKnM2} kN/㎡`
-        : `활하중 ${(spec.floorLoadsKn?.[floorIndex] ?? 2.0).toFixed(1)} kN/㎡`,
+        ? `계수하중 U=${fp.factoredLoadKnM2}kN/㎡ (자중 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2})`
+        : solid.partRole === 'garden'
+        ? '외부 조경 구간 (건물 구조 하중 미적용)'
+        : 'KDS 41 12 00 구조 검토 완료',
       physicsLine2: fp
         ? `기둥 축하중 ${fp.columnAxialDemandKn}kN · 보 처짐 ${fp.beamDeflectionMm}/${fp.allowableDeflectionMm}mm`
-        : 'KDS 41 12 00 구조 검토 완료',
-      dcrBadge: fp
-        ? makeBadge(Math.max(fp.columnDcr, fp.beamFlexureDcr, fp.beamDeflectionDcr))
-        : undefined,
+        : '',
+      dcrBadge:
+        typeof solid.dcr === 'number'
+          ? makeBadge(solid.dcr)
+          : fp
+          ? makeBadge(Math.max(fp.columnDcr, fp.beamFlexureDcr, fp.beamDeflectionDcr))
+          : undefined,
     });
   };
 
   return (
-    <div className="relative w-full h-full bg-[#eef2f6]">
+    <div className="relative w-full h-full bg-[#c7d2df]">
       <Canvas
         shadows
         dpr={[1, 2]}
@@ -1389,23 +1494,23 @@ export default function SceneCanvas({
         gl={{
           antialias: true,
           toneMapping: THREE.ACESFilmicToneMapping,
-          toneMappingExposure: 1.05,
+          toneMappingExposure: 0.92,
           powerPreference: 'high-performance',
           preserveDrawingBuffer: true,
         }}
         onPointerMissed={() => onSelectPart(null)}
       >
-        <color attach="background" args={['#eef2f6']} />
-        <fog attach="fog" args={['#eef2f6', 20, 44]} />
+        <color attach="background" args={['#c7d2df']} />
+        <fog attach="fog" args={['#c7d2df', 20, 44]} />
 
         <StudioEnvironment />
 
-        <hemisphereLight args={['#ffffff', '#cbd5e1', 0.85]} />
+        <hemisphereLight args={['#eef2f6', '#7b8794', 0.55]} />
         <directionalLight
           castShadow
           position={[7, 13, 6]}
-          intensity={1.55}
-          color="#fffaf0"
+          intensity={1.18}
+          color="#fff7eb"
           shadow-mapSize={[2048, 2048]}
           shadow-camera-near={1}
           shadow-camera-far={30}
@@ -1415,13 +1520,13 @@ export default function SceneCanvas({
           shadow-camera-bottom={-8}
           shadow-bias={-0.0004}
         />
-        <directionalLight position={[-6, 5, -5]} intensity={0.55} color="#e0f2fe" />
+        <directionalLight position={[-6, 6, -5]} intensity={0.38} color="#d0e4f5" />
 
         <ContactShadows
           position={[0, 0.002, 0]}
-          opacity={0.38}
+          opacity={0.44}
           scale={18}
-          blur={2.1}
+          blur={2.0}
           far={6}
           color="#1e293b"
         />
@@ -1431,10 +1536,10 @@ export default function SceneCanvas({
           args={[24, 24]}
           cellSize={0.25}
           cellThickness={0.5}
-          cellColor="#dce3ec"
+          cellColor="#b4c2d1"
           sectionSize={1}
-          sectionThickness={0.9}
-          sectionColor="#cbd5e1"
+          sectionThickness={0.95}
+          sectionColor="#8fa3b8"
           fadeDistance={22}
           fadeStrength={1}
           infiniteGrid
@@ -1447,7 +1552,7 @@ export default function SceneCanvas({
         ) : (
           <StaticStructure
             structure={structure}
-            hoveredFloorIndex={hoveredTooltip?.floorIndex ?? null}
+            hoveredSolidId={hoveredTooltip?.solidId ?? null}
             onSelectPart={onSelectPart}
             onHoverSolid={handleHoverSolid}
             onLeaveSolid={() => setHoveredTooltip(null)}
@@ -1461,7 +1566,7 @@ export default function SceneCanvas({
         <HandSceneLayer structure={structure} />
       </Canvas>
 
-      {/* 상태 안내 배너 (대지 편집 / 구조 골조 투시 / 물리 하중 히트맵) */}
+      {/* 상태 안내 배너 */}
       {structure.isSiteEditMode && (
         <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-sky-700/95 text-white text-xs sm:text-sm font-bold shadow-lg border border-sky-300">
           대지 경계 편집 중 · 파란 핀 드래그(모양 변경) · 초록점 클릭(꼭짓점 추가) · 핀 더블클릭(삭제)
@@ -1489,25 +1594,19 @@ export default function SceneCanvas({
         </div>
       )}
 
-      {/* 물리 하중·처짐·DCR 툴팁 (시니어 모드일 때 큰 글씨·고대비) */}
+      {/* 실시간 재질·부위 금액·총 예산·물리 응력 호버 툴팁 */}
       {hoveredTooltip && !structure.isSiteEditMode && (
         <div
           className={`pointer-events-none fixed z-50 bg-white/98 backdrop-blur-md border-2 border-slate-800 rounded-xl px-3.5 py-2.5 shadow-2xl text-slate-900 space-y-1 ${
-            isSenior ? 'max-w-[360px] text-sm' : 'max-w-[300px] text-xs'
+            isSenior ? 'max-w-[380px] text-sm' : 'max-w-[320px] text-xs'
           }`}
           style={{
-            left: Math.min(window.innerWidth - (isSenior ? 375 : 315), hoveredTooltip.x + 16),
+            left: Math.min(window.innerWidth - (isSenior ? 395 : 335), hoveredTooltip.x + 16),
             top: Math.max(12, hoveredTooltip.y - 12),
           }}
         >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span
-                className="w-3 h-3 rounded-sm border border-slate-500 shrink-0"
-                style={{ backgroundColor: getFloorColor(hoveredTooltip.floorIndex) }}
-              />
-              <span className="font-extrabold truncate">{hoveredTooltip.title}</span>
-            </div>
+            <span className="font-extrabold truncate">{hoveredTooltip.title}</span>
             {hoveredTooltip.dcrBadge && (
               <span
                 className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-extrabold shrink-0 ${
@@ -1522,10 +1621,23 @@ export default function SceneCanvas({
               </span>
             )}
           </div>
-          <div className="font-mono font-bold text-sky-800">{hoveredTooltip.areaText}</div>
-          <div className="text-slate-700 leading-snug">{hoveredTooltip.physicsLine1}</div>
+
+          <div className="font-bold text-sky-900 bg-sky-50 border border-sky-200 rounded-md px-2 py-1">
+            {hoveredTooltip.materialLine}
+          </div>
+
+          <div className="font-mono font-bold text-emerald-800">{hoveredTooltip.costLine}</div>
+          {hoveredTooltip.totalBudgetLine && (
+            <div className="font-mono text-[11px] font-bold text-slate-700">
+              {hoveredTooltip.totalBudgetLine}
+            </div>
+          )}
+
+          <div className="border-t border-slate-200 pt-1 text-slate-700 leading-snug text-[11px]">
+            {hoveredTooltip.physicsLine1}
+          </div>
           {hoveredTooltip.physicsLine2 && (
-            <div className="text-slate-500 text-[11px] leading-snug">
+            <div className="text-slate-500 text-[10.5px] leading-snug">
               {hoveredTooltip.physicsLine2}
             </div>
           )}

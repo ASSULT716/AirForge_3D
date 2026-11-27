@@ -44,7 +44,9 @@ export type EditOp =
   /** 원기둥 끝면 오프셋 = 안쪽 원 (dist = 테두리 두께 m) */
   | { kind: 'bore_offset'; solidId: string; end: 'top' | 'bottom' }
   /** 안쪽 원을 밀어 파기 (dist = 더 깊게 m, 끝까지 = 관통) */
-  | { kind: 'bore'; solidId: string };
+  | { kind: 'bore'; solidId: string }
+  /** 둥근 솔리드 지름을 정확한 값으로 (dist = 목표 지름 m). 가로·깊이만 바뀌고 높이·중심·바닥은 그대로 */
+  | { kind: 'diameter'; solidId: string };
 
 export type EditMode = 'pushpull' | 'offset' | 'move' | 'copy' | 'scale' | 'taper' | 'rect' | 'circle';
 /** 면 스케일 비율 스냅 */
@@ -75,6 +77,7 @@ export const OP_LABEL: Record<EditOp['kind'], string> = {
   bore: '파기',
   rect: '사각형',
   circle: '원',
+  diameter: '지름',
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -355,7 +358,43 @@ export function applyOp(base: StructureState, op: EditOp, dist: number, sid: str
     case 'bore_offset':
     case 'bore':
       return editLathe(base, op, dist);
+    case 'diameter':
+      return setDiameter(base, op, dist);
   }
+}
+
+/** 지름을 바꿀 수 있는 둥근 솔리드 */
+export const ROUND_SHAPES: ReadonlySet<SolidPrimitive['shape']> = new Set(['cylinder', 'cone', 'sphere']);
+/** 지름 (m). 원기둥은 넓은 쪽 끝면 기준 (원뿔대·접시도 바깥 지름) */
+export function roundDiameter(so: SolidPrimitive): number {
+  if (so.shape === 'cylinder') {
+    const l = latheOf(so);
+    return 2 * LATHE_R * so.scale[0] * Math.max(l.top, l.bottom);
+  }
+  return solidExtent(so)[0];
+}
+
+/** 최소 지름 (m) */
+const MIN_DIAMETER = 0.1;
+
+function setDiameter(s: StructureState, op: Extract<EditOp, { kind: 'diameter' }>, target: number): OpResult {
+  const so = (s.solids ?? []).find((x) => x.id === op.solidId);
+  if (!so || !ROUND_SHAPES.has(so.shape)) return { next: s, dist: 0 };
+  const cur = roundDiameter(so);
+  const d = round4(Math.min(100, Math.max(MIN_DIAMETER, target)));
+  if (cur <= 0 || Math.abs(d - cur) < 1e-4) return { next: s, dist: 0 };
+  const f = d / cur;
+  // 구는 찌그러지지 않게 전체 배율, 바닥에 붙은 채로 (중심 y를 올림)
+  const uniform = so.shape === 'sphere';
+  const scale = r3([so.scale[0] * f, so.scale[1] * (uniform ? f : 1), so.scale[2] * f]);
+  const oldH = solidExtent(so)[1];
+  const newH = solidExtent({ ...so, scale })[1];
+  const position = r3([so.position[0], so.position[1] + (newH - oldH) / 2, so.position[2]]);
+  return {
+    next: { ...s, solids: (s.solids ?? []).map((x) => (x.id === so.id ? { ...so, scale, position } : x)) },
+    dist: d,
+    focus: { kind: 'solid', id: so.id },
+  };
 }
 
 /** 원기둥 단면 편집 (면 스케일 · 안쪽 원 · 파기) */
@@ -807,6 +846,7 @@ export function describeOp(op: EditOp, dist: number, through = false) {
     return `사각형 ${w.toFixed(2)} x ${d.toFixed(2)} m`;
   }
   if (op.kind === 'circle') return `원 반지름 ${op.radius.toFixed(2)} m`;
+  if (op.kind === 'diameter') return `지름 ${dist.toFixed(2)} m`;
   if (op.kind === 'taper') {
     const r = Math.max(0, op.base + dist);
     return `${op.end === 'top' ? '윗면' : '아랫면'} x${r.toFixed(1)}${r === 0 ? ' (뾰족)' : ''}`;

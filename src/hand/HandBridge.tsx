@@ -6,9 +6,9 @@ import HandTracker, { type HandCursorState, type ObjectRotateEvent, type Pointer
 import { cameraGesture, pushCameraZoom } from '../services/cameraGesture';
 import { describeSelection, expandSelection, pruneSelection, type PickHit, type Selection } from '../services/selection';
 import { applySession, startSession, type Axis, type RotateSession } from '../services/handRotate';
-import { NEEDS_SELECTION, describeCommand, interpretVoice, parseConfirmReply, type VoiceCommand } from '../services/voice/voiceCommand';
+import { NEEDS_SELECTION, describeCommand, isModeOnly, interpretVoice, parseConfirmReply, type VoiceCommand } from '../services/voice/voiceCommand';
 import { applyVoiceCommand } from '../services/voice/applyVoice';
-import { voiceEditOp, voiceLatheOp, voiceOffsetOp } from '../services/voice/applyEditVoice';
+import { voiceDiameterOp, voiceEditOp, voiceLatheOp, voiceOffsetOp } from '../services/voice/applyEditVoice';
 import { parseBareDistance } from '../services/voice/koreanNumber';
 import { DRAW_MODES, applyOp, deleteSelection, describeOp, scaleOp, type EditMode, type EditOp } from '../services/sketchOps';
 import { handStore, hoveredForSelect, useHandState } from './handStore';
@@ -137,7 +137,7 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
     }));
   };
 
-  // ✌️ 조준 → 주먹 확정. 이미 선택된 구조물을 다시 고르면 해제 (토글)
+  // 핀치 선택. 이미 선택된 구조물을 다시 고르면 해제 (토글)
   const handleSelect = () => {
     const hovered = hoveredForSelect();
     const sel = hovered && hovered.key === handStore.get().selected?.key ? null : hovered;
@@ -332,7 +332,8 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
       setVoiceFb({ label: '되돌릴 손 편집 없음 → AI 설계로 전달', tone: 'info' });
       return onVoiceCommand(text);
     }
-    if (NEEDS_SELECTION.has(cmd.type) && !selected) {
+    if (cmd.type === 'set_mode') return setMode(cmd.mode);
+    if (NEEDS_SELECTION.has(cmd.type) && !selected && !isModeOnly(cmd)) {
       // 선택 없이 "건물 높이 늘려" 등 → 설계 요청으로 보고 AI에 넘김
       setVoiceFb({ label: `${describeCommand(cmd)}: 선택 없음 → AI 설계로 전달`, tone: 'info' });
       return onVoiceCommand(text);
@@ -360,6 +361,16 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
       const label = `${selected!.label} ${describeOp(r.op, res.dist, res.through)}`;
       setStructure((p) => ({ ...res.next, isSimulating: p.isSimulating, statusMessage: `음성: ${label}` }));
       return setVoiceFb({ label, tone: 'ok' });
+    }
+    if (cmd.type === 'diameter') {
+      if (s.isSimulating) return setVoiceFb({ label: '시뮬레이션 중엔 편집할 수 없어요', tone: 'warn' });
+      const r = voiceDiameterOp(s, selected!, cmd);
+      if ('error' in r) return setVoiceFb({ label: r.error, tone: 'warn' });
+      const res = commitEdit(s, r.op, r.dist, newSid(), '음성');
+      // 면 크기로 환산한 경우 dist가 비율이라 "2미터"로 고치기 대상에서 뺌
+      if (r.op.kind === 'taper') lastEdit.current = null;
+      if (res.dist === 0) return setVoiceFb({ label: `${describeCommand(cmd)}: 이미 그 크기예요`, tone: 'warn' });
+      return setVoiceFb({ label: `${selected!.label} ${describeCommand(cmd)}`, tone: 'ok' });
     }
     if (cmd.type === 'scale') {
       if (s.isSimulating) return setVoiceFb({ label: '시뮬레이션 중엔 편집할 수 없어요', tone: 'warn' });

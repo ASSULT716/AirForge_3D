@@ -44,7 +44,7 @@ interface Props {
   /** 양손 펴고 벌리기/모으기 → 카메라 줌. factor > 1 확대, < 1 축소 (프레임 간 상대 배율) */
   onCameraZoom?: (factor: number) => void;
   /**
-   * ✌️(선택 커서) → 주먹: 선택 확정. App이 지금 가리키는 구조물을 선택 (가리킨 게 없으면 선택 해제).
+   * 핀치 선택 (onPointer 없을 때). App이 지금 가리키는 구조물을 선택 (가리킨 게 없으면 선택 해제).
    * 가리키는 대상 판정은 화면 투영이 필요해서 SceneCanvas가 함 (HandTracker는 커서만 보냄)
    */
   onSelect?: () => void;
@@ -63,7 +63,7 @@ export interface HandCursorState {
   pinching: boolean;
   /** true면 다음 핀치가 직전 노드와 빔으로 이어짐 */
   chainActive: boolean;
-  /** 선택 커서(✌️) 모드 */
+  /** 선택 커서 모드 (항상 true) */
   selecting: boolean;
 }
 
@@ -81,20 +81,20 @@ const ACTIVE_Y: [number, number] = [0.1, 0.9];
  * 손이 HANDS_LOST_RESET_MS 이상 사라졌다 나타나면 손 위치로 다시 맞춤
  */
 const CURSOR_SENSITIVITY = 0.5;
+/** 가리키기(검지) 커서 배율: 카메라 화면에서 손이 움직인 거리(비율)의 1.5배만큼 화면에서 커서 이동. 핀치 중(드래그 편집)엔 CURSOR_SENSITIVITY */
+const POINT_CAMERA_TO_SCREEN = 1.5;
 /**
  * 커서 One Euro 필터 (정규화 화면 좌표 기준).
  * 멈춰 있으면 컷오프 ≈ MIN_CUTOFF → 떨림 강하게 제거, 빠르게 움직이면 컷오프↑ → 지연 적음
  */
 const CURSOR_MIN_CUTOFF = 1.2; // Hz. 작을수록 정지 시 더 안정
-const CURSOR_BETA = 8; // 속도 반응. 클수록 빠른 움직임에 덜 끌림
+const CURSOR_BETA = 30; // 속도 반응. 클수록 빠른 움직임에 덜 끌림 (8 → 30: 움직일 때 지연 감소)
 const CURSOR_D_CUTOFF = 1; // Hz. 속도 추정 스무딩
 /** 커서 기준 랜드마크: 5 = 검지 뿌리 관절 (핀치 동작에 영향 거의 없음) */
 const CURSOR_LM = 5;
 const PINCH_ON = 0.15; // (엄지-검지 거리) / (손목-중지MCP 거리). 손끝이 실제로 닿아야 ~0.15 이하
 const PINCH_OFF = 0.3;
 const PINCH_COOLDOWN_MS = 250;
-/** ✌️가 이 시간 안에 주먹으로 바뀌면 선택 확정 (그 외 주먹은 체인 끊기만) */
-const SELECT_FIST_WINDOW_MS = 600;
 
 // ── 움켜쥐기 회전 (축 잠금) ──
 /** 손 방향 쿼터니언 EMA (slerp 비율) */
@@ -156,7 +156,7 @@ function stepDrag(t: DragTrack, lm: NormalizedLandmark[]): [number, number] | nu
   return move;
 }
 /** 핀치가 이 시간 이상 유지돼야 노드 확정 (주먹 쥐는 도중 엄지·검지가 스치는 오인식 방지) */
-const PINCH_CONFIRM_MS = 200;
+const PINCH_CONFIRM_MS = 150;
 /**
  * 핀치 손떨림 보정: 엄지·검지를 모으는 동작 자체가 커서를 흔듦 → 모으기 시작하기 직전 위치를 찍음.
  * 모으기 시작 = 핀치 비율이 PINCH_OFF 아래로 내려간 순간. 그보다 LEAD_MS 앞의 커서를 사용
@@ -165,6 +165,8 @@ const PINCH_CONFIRM_MS = 200;
 const PINCH_LOCK_LEAD_MS = 60;
 const PINCH_LOCK_MAX_BACK_MS = 350;
 const FIST_HOLD_MS = 350;
+/** 주먹을 편 뒤에도 이 시간 동안 커서 고정 (손가락 펴는 동안 검지 뿌리가 움직여서 커서가 튐) */
+const FIST_RELEASE_GRACE_MS = 150;
 const HANDS_LOST_RESET_MS = 1000;
 /**
  * 기하 주먹 보조 판정: 손끝 4개가 모두 손바닥 중심에서 (손 크기 × 이 값) 이내.
@@ -196,7 +198,7 @@ const THUMB_IN = 0.74;
  * 움켜쥐기 = 공을 가볍게 감싸 쥔 손 (완전히 오므린 손 아님).
  * 실측(TEST): 살짝 굽힌 손가락 곧음 s ≈ 0.94 vs 편 손 0.95 → 곧음만으론 구분 불가.
  *             대신 엄지가 손바닥 쪽으로 들어옴: 엄지 비율 t ≈ 1.12~1.15 vs 편 손 1.32~1.37
- * - 4손가락 모두 안 접힘 → 주먹·✌️·3손가락 배제
+ * - 4손가락 모두 안 접힘 → 주먹·V자·3손가락 배제
  * - 곧음 하한 → 갈고리처럼 깊게 오므린 손 배제
  * - 엄지 비율 상한 → 엄지를 벌린 편 손 배제 (핵심 구분)
  * 진입은 좁게, 해제는 넓게 (히스테리시스)
@@ -238,12 +240,172 @@ function oneEuroStep(f: OneEuro2 | null, raw: Vec2, now: number): OneEuro2 {
 const dist = (a: NormalizedLandmark, b: NormalizedLandmark) => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** 엄지·검지 거리를 손 크기로 정규화 → 카메라 거리와 무관한 핀치 비율 */
+// ── 손 커서로 화면 UI 클릭 ──
+const UI_CLICKABLE =
+  'button, a[href], input, select, textarea, label, summary, [role="button"], [role="tab"], [role="checkbox"], [role="menuitem"], [onclick]';
+const UI_HOVER_CLASS = 'hand-ui-hover';
+let uiStyleInjected = false;
+function ensureUiHoverStyle() {
+  if (uiStyleInjected || typeof document === 'undefined') return;
+  uiStyleInjected = true;
+  const st = document.createElement('style');
+  st.textContent = `.${UI_HOVER_CLASS}{outline:2px solid #00f3ff !important;outline-offset:2px;box-shadow:0 0 12px #00f3ff88 !important;}`;
+  document.head.appendChild(st);
+}
+/** 커서(씬 캔버스 기준 0~1) → 화면 픽셀 */
+function cursorToClient(pos: Vec2): [number, number] {
+  const c = document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null;
+  const r = c?.getBoundingClientRect() ?? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  return [r.left + pos[0] * r.width, r.top + pos[1] * r.height];
+}
+/** 커서 아래 클릭 가능한 UI 요소 (3D 캔버스·빈 영역이면 null) */
+function uiTargetAt(pos: Vec2): HTMLElement | null {
+  const [x, y] = cursorToClient(pos);
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!el || el.tagName === 'CANVAS') return null;
+  const t = el.closest(UI_CLICKABLE) as HTMLElement | null;
+  if (!t || (t as HTMLButtonElement).disabled) return null;
+  return t;
+}
+/** 화면 최상단 커서 (UI 위에서도 안 가려짐). 3D 링은 캔버스 안이라 DOM UI에 가려짐 */
+let topCursorEl: HTMLDivElement | null = null;
+function updateTopCursor(pos: Vec2 | null, pinching: boolean, overUi: boolean) {
+  if (!pos || !overUi) {
+    if (topCursorEl) topCursorEl.style.display = 'none';
+    return;
+  }
+  if (!topCursorEl) {
+    topCursorEl = document.createElement('div');
+    Object.assign(topCursorEl.style, {
+      position: 'fixed', left: '0', top: '0', zIndex: '2147483647', pointerEvents: 'none',
+      borderRadius: '50%', boxSizing: 'border-box', transform: 'translate(-50%,-50%)',
+    });
+    document.body.appendChild(topCursorEl);
+  }
+  const [x, y] = cursorToClient(pos);
+  const r = pinching ? 20 : 32;
+  Object.assign(topCursorEl.style, {
+    display: 'block', left: `${x}px`, top: `${y}px`, width: `${r}px`, height: `${r}px`,
+    border: `3px solid ${pinching ? '#ff1e42' : '#000000'}`,
+    background: pinching ? 'rgba(255,30,66,0.35)' : 'rgba(0,0,0,0.12)',
+    boxShadow: `0 0 10px ${pinching ? '#ff1e42' : 'rgba(0,0,0,0.5)'}`,
+  });
+}
+function isOverUi(pos: Vec2): boolean {
+  const [x, y] = cursorToClient(pos);
+  const el = document.elementFromPoint(x, y);
+  return !!el && !(el.tagName === 'CANVAS' && el.hasAttribute('data-engine'));
+}
+/** 왼손 위아래 이동 = 스크롤 배율 (손 이동량 대비 화면 높이 배수). 음수로 바꾸면 방향 반대 */
+const LEFT_SCROLL_GAIN = 2.5;
+/** 커서 아래 스크롤 가능한 UI 컨테이너 (3D 캔버스면 null) */
+function scrollableAt(pos: Vec2): HTMLElement | null {
+  const [x, y] = cursorToClient(pos);
+  let el = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!el || el.tagName === 'CANVAS') return null;
+  for (; el && el !== document.body; el = el.parentElement) {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1) return el;
+  }
+  return document.scrollingElement && document.scrollingElement.scrollHeight > window.innerHeight
+    ? (document.scrollingElement as HTMLElement)
+    : null;
+}
+
+/** 네이티브 <select>는 합성 클릭으로 안 열림 → 손으로 고를 수 있는 옵션 목록을 대신 띄움 */
+let handSelectEl: HTMLDivElement | null = null;
+function closeHandSelect() {
+  handSelectEl?.remove();
+  handSelectEl = null;
+  window.removeEventListener('pointerdown', onHandSelectOutside, true);
+}
+function onHandSelectOutside(e: PointerEvent) {
+  if (handSelectEl && !handSelectEl.contains(e.target as Node)) closeHandSelect();
+}
+function setSelectValue(sel: HTMLSelectElement, value: string) {
+  // React 제어 컴포넌트도 onChange가 불리도록 네이티브 setter 사용
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(sel, value);
+  sel.dispatchEvent(new Event('input', { bubbles: true }));
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function openHandSelect(sel: HTMLSelectElement) {
+  closeHandSelect();
+  const r = sel.getBoundingClientRect();
+  const box = document.createElement('div');
+  const below = window.innerHeight - r.bottom;
+  Object.assign(box.style, {
+    position: 'fixed', left: `${r.left}px`, minWidth: `${Math.max(r.width, 160)}px`,
+    maxHeight: `${Math.max(below, r.top) - 12}px`, overflowY: 'auto', zIndex: '2147483646',
+    background: 'rgba(6,14,24,0.97)', border: '1px solid #00f3ff', borderRadius: '6px',
+    boxShadow: '0 0 16px #00f3ff55', padding: '4px', display: 'flex', flexDirection: 'column', gap: '2px',
+  });
+  if (below >= r.top) box.style.top = `${r.bottom + 4}px`;
+  else box.style.bottom = `${window.innerHeight - r.top + 4}px`;
+  for (const opt of Array.from(sel.options)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = opt.text;
+    b.disabled = opt.disabled;
+    const on = opt.value === sel.value;
+    Object.assign(b.style, {
+      textAlign: 'left', padding: '10px 12px', fontSize: '15px', cursor: 'pointer', border: 'none', borderRadius: '4px',
+      color: on ? '#00131a' : '#cfefff', background: on ? '#00f3ff' : 'transparent',
+    });
+    b.addEventListener('click', () => {
+      setSelectValue(sel, opt.value);
+      closeHandSelect();
+    });
+    box.appendChild(b);
+  }
+  document.body.appendChild(box);
+  handSelectEl = box;
+  // 이번 클릭 이벤트가 끝난 뒤부터 바깥 클릭 감지
+  setTimeout(() => window.addEventListener('pointerdown', onHandSelectOutside, true), 0);
+}
+
+/** 슬라이더(input[type=range])를 커서 x 위치 값으로 설정. React onChange도 불리게 네이티브 setter 사용 */
+function setRangeFromCursor(el: HTMLInputElement, pos: Vec2) {
+  const [x] = cursorToClient(pos);
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0) return;
+  const min = Number(el.min || 0);
+  const max = Number(el.max || 100);
+  const step = el.step && el.step !== 'any' ? Number(el.step) : 0;
+  let v = min + clamp((x - r.left) / r.width, 0, 1) * (max - min);
+  if (step > 0) v = clamp(min + Math.round((v - min) / step) * step, min, max);
+  // 부동소수점 꼬리 제거 (0.30000000000000004 → 0.3)
+  const next = String(Number(v.toFixed(10)));
+  if (next === el.value) return;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(el, next);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+const isRange = (el: HTMLElement | null): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === 'range';
+function fireUi(el: HTMLElement, type: string, pos: Vec2) {
+  const [clientX, clientY] = cursorToClient(pos);
+  const init = { bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0, buttons: type.endsWith('down') ? 1 : 0 };
+  el.dispatchEvent(
+    type.startsWith('pointer') ? new PointerEvent(type, { ...init, pointerId: 99, pointerType: 'mouse', isPrimary: true }) : new MouseEvent(type, init),
+  );
+}
+
 function pinchRatio(lm: NormalizedLandmark[]) {
   const size = dist(lm[0], lm[9]) || 1e-6;
   return dist(lm[4], lm[8]) / size;
 }
 
 const dist3 = (a: Landmark, b: Landmark) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+/** 엄지·검지 손끝이 "닿았다"고 보는 실제 거리 (미터). 손끝 랜드마크 사이 ~2.5cm = 맞닿음 */
+const PINCH_TOUCH_M = 0.03;
+/**
+ * 핀치 비율 (3D 월드 좌표 기준): 손끝 실제 거리를 PINCH_ON 척도로 환산.
+ * 2D 비율은 손이 비스듬하면 손바닥 길이가 줄어 보여서 판정이 틀림 → 각도와 무관한 미터 거리 사용.
+ * 3cm 이하 = 닿음(PINCH_ON), 6cm 이상 = 뗌(PINCH_OFF)
+ */
+function pinchRatioWorld(w: Landmark[]) {
+  return (dist3(w[4], w[8]) / PINCH_TOUCH_M) * PINCH_ON;
+}
 
 /**
  * 손가락이 접혔는지 (3D 월드 좌표, 미터): 끝마디가 PIP 관절보다 손목에 가까우면 접힘.
@@ -292,12 +454,11 @@ function isGeometricFist(w: Landmark[]) {
 // ── 자세 분류 ──
 /**
  * draw    = 중·약·새끼 접힘 (엄지·검지 자유 → 핀치 + 왼손 깊이)
- * select  = 검지·중지 펴짐, 약·새끼 접힘, 엄지 접힘 (✌️)
  * pan     = 엄지·검지·중지 펴짐, 약·새끼 접힘
  * grab    = 4손가락 모두 반쯤 굽힘 + 엄지·검지 끝 떨어짐 (공 움켜쥐기)
  * open    = 4손가락 펴짐 (손바닥이 카메라 쪽)
  */
-export type HandPose = 'none' | 'draw' | 'select' | 'pan' | 'fist' | 'open' | 'grab';
+export type HandPose = 'none' | 'draw' | 'pan' | 'fist' | 'open' | 'grab';
 
 interface PoseFlags {
   thumbOut: boolean;
@@ -356,7 +517,7 @@ function classifyPose(w: Landmark[], prev: PoseFlags): PoseResult {
   if (grab) pose = 'grab';
   else if (isGeometricFist(w)) pose = 'fist';
   else if (mid && ring && pinky) pose = 'draw';
-  else if (ring && pinky && !idx && !mid) pose = thumbOut ? 'pan' : 'select';
+  else if (ring && pinky && !idx && !mid && thumbOut) pose = 'pan';
   else if (openCount === 4) pose = 'open';
   else pose = 'none';
   const fingers: FingerState = [thumbOut, !idx, !mid, !ring, !pinky];
@@ -423,7 +584,7 @@ const MODE_COLOR: Record<UiMode, string> = {
   drag: '#ff1e42',
 };
 /** 이 모드에선 핀치(노드 찍기) 안 함 */
-const NO_PINCH_POSES: ReadonlySet<HandPose> = new Set(['select', 'pan', 'grab']);
+const NO_PINCH_POSES: ReadonlySet<HandPose> = new Set(['pan', 'grab']);
 /** 이 모드에선 그리기 커서 숨김 */
 const NO_CURSOR_POSES: ReadonlySet<HandPose> = new Set(['pan', 'grab']);
 
@@ -433,7 +594,6 @@ const NO_CURSOR_POSES: ReadonlySet<HandPose> = new Set(['pan', 'grab']);
 const POSE_LABEL: Record<HandPose, string> = {
   none: '미분류',
   draw: '핀치 선택',
-  select: '선택(V)',
   pan: '3손가락',
   fist: '주먹',
   open: '펼침',
@@ -517,16 +677,6 @@ const rotObserve = (s: PoseSnapshot) =>
     : `${AXIS_LABEL[s.rotView]}축 ${Math.round(s.rotViewDeg)}°`;
 const GESTURE_TEST_STEPS: GestureTestStep[] = [
   { id: 'draw', title: '핀치 선택', how: '오른손 엄지·검지만 펴고 중·약·새끼 접기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, X, X, X] }] }, check: (s) => s.right === 'draw' },
-  { id: 'select', title: '선택 커서', how: '오른손 V자 (검지·중지만, 엄지는 접기)', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }] }, check: (s) => s.right === 'select' },
-  {
-    id: 'select_fist',
-    title: '선택 확정 (동작)',
-    how: 'V자 유지하다가 그대로 주먹 쥐기',
-    hand: 'right',
-    glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }, { side: 'right', fingers: [X, X, X, X, X] }] },
-    instant: true,
-    check: (s, b) => s.selectFires > b.selectFires,
-  },
   {
     id: 'pan',
     title: '카메라 이동',
@@ -915,6 +1065,13 @@ export default function HandTracker(props: Props) {
     pinchPos: null as Vec2 | null,
     /** 핀치 확정 후 놓기 전까지 (마우스 버튼 눌림) */
     pointerDown: false,
+    /** 핀치로 누르고 있는 화면 UI 요소 (있으면 씬 대신 UI 클릭) */
+    uiPress: null as HTMLElement | null,
+    /** 슬라이더를 잡은 순간의 커서 (드래그 = 잡은 지점 + 손 이동량) */
+    uiOrigin: null as Vec2 | null,
+    uiHover: null as HTMLElement | null,
+    /** 왼손 스크롤 드래그 추적 */
+    scrollDrag: newDrag(),
     /** 핀치 확정 순간의 실제 커서 (드래그 이동량 기준) */
     pointerOrigin: null as Vec2 | null,
     lastPointer: null as Vec2 | null,
@@ -925,11 +1082,9 @@ export default function HandTracker(props: Props) {
     leftPose: newPoseHold(),
     /** 제스처 테스트 진행 상태. active 동안 노드 찍기·줌 적용 안 함 */
     test: newGestureTest(0, false),
-    /** 마지막으로 stable 자세가 ✌️였던 시각 */
-    lastSelectAt: 0,
     prevRightStable: 'none' as HandPose,
-    /** ✌️ 유지 중 마지막 커서. 주먹 쥐는 동안 손끝이 움직여도 조준점 고정 */
-    selectCursor: null as Vec2 | null,
+    /** 주먹(또는 주먹으로 접는 중) 커서 고정 유지 시각 */
+    fistFreezeUntil: 0,
     /** 움켜쥐기 회전 세션 */
     rot: {
       active: false,
@@ -984,6 +1139,8 @@ export default function HandTracker(props: Props) {
     return () => {
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('keydown', onKey);
+      updateTopCursor(null, false, false);
+      closeHandSelect();
     };
   }, [breakChain]);
 
@@ -1102,17 +1259,6 @@ export default function HandTracker(props: Props) {
       else d.leftPose = newPoseHold();
       const rightPose = d.rightPose.stable;
 
-      // ── ✌️ → 주먹 = 선택 확정 ──
-      // 회전 중 옆으로 세운 손이 ✌️로 오인되면 확정 주먹이 선택으로 번짐 → 회전 중엔 기록 안 함
-      if (rightPose === 'select' && !d.rot.active) d.lastSelectAt = now;
-      if (rightPose === 'fist' && d.prevRightStable !== 'fist' && now - d.lastSelectAt < SELECT_FIST_WINDOW_MS) {
-        d.selectFires += 1;
-        if (!d.test.active) {
-          propsRef.current.onSelect?.();
-          breakChain(); // 선택하면 그리던 스트로크도 끝
-          lastHint = '선택 확정';
-        }
-      }
       d.prevRightStable = rightPose;
 
       // ── 움켜쥐기 → 회전 (축 잠금, 1:1, 주먹 쥐면 15° 스냅 확정) ──
@@ -1166,8 +1312,6 @@ export default function HandTracker(props: Props) {
         r.active = false;
         const final = r.world ? snapDeg(r.out, ROT_SNAP_DEG) : 0;
         emitRot({ phase: 'end', axis: r.world?.axis ?? null, deg: final });
-        // 확정한 주먹이 ✌️→주먹 선택으로 이어지지 않게
-        d.lastSelectAt = 0;
         lastHint = r.world
           ? `회전 확정: ${r.world.axis.toUpperCase()}축 ${final >= 0 ? '+' : ''}${final}°`
           : '회전 취소 (축 판정 전에 놓음)';
@@ -1181,7 +1325,7 @@ export default function HandTracker(props: Props) {
         return !!w && isGeometricOpen(w);
       };
       // 오른손이 조준(draw·select) 자세면 줌·카메라 회전 진입 금지 (조준 중 화면이 움직이면 안 됨)
-      const depthPriority = rightPose === 'draw' || rightPose === 'select';
+      const depthPriority = rightPose === 'draw';
       const bothOpen =
         !d.rot.active &&
         !depthPriority && !!drawHand && !!depthHand && isOpen(drawIdx) && isOpen(depthIdx);
@@ -1247,14 +1391,25 @@ export default function HandTracker(props: Props) {
           (d.smoothCursor.x[1] - ACTIVE_Y[0]) / (ACTIVE_Y[1] - ACTIVE_Y[0]),
         ];
         let screenPos: Vec2 = [clamp(handScreen[0], 0, 1), clamp(handScreen[1], 0, 1)];
+        // 주먹 = 커서 고정: 원시 기하 주먹·자세 후보·확정 자세 중 하나라도 주먹이면 (+ 편 뒤 잠깐) 이동 누적 안 함
+        // 핀치 중엔 검지가 구부러져 주먹으로 오인될 수 있음 → 고정 안 함 (드래그가 멈추지 않게)
+        const fistNow =
+          !d.pinching &&
+          ((!!drawWorld && isGeometricFist(drawWorld)) || rightPose === 'fist' || d.rightPose.candidate === 'fist');
+        if (fistNow) d.fistFreezeUntil = now + FIST_RELEASE_GRACE_MS;
+        const cursorFrozen = now < d.fistFreezeUntil;
         if (CURSOR_SENSITIVITY < 1) {
           // 손 사라졌다 다시 나타남(오래) → 손 위치로 다시 맞춤
           if (!d.relCursor) d.relCursor = screenPos;
           // 커서가 숨는 자세(카메라 이동·움켜쥐기) 동안엔 멈춰 둠 → 다시 나타날 때 그 자리
-          else if (d.prevHandScreen && !NO_CURSOR_POSES.has(rightPose)) {
+          else if (d.prevHandScreen && !NO_CURSOR_POSES.has(rightPose) && !cursorFrozen) {
+            // handScreen은 ACTIVE 영역으로 이미 확대됨 → 그만큼 되돌려 카메라 기준 정확히 POINT_CAMERA_TO_SCREEN배
+            const point = rightPose === 'draw' && !d.pinching;
+            const sx = point ? POINT_CAMERA_TO_SCREEN * (ACTIVE_X[1] - ACTIVE_X[0]) : CURSOR_SENSITIVITY;
+            const sy = point ? POINT_CAMERA_TO_SCREEN * (ACTIVE_Y[1] - ACTIVE_Y[0]) : CURSOR_SENSITIVITY;
             d.relCursor = [
-              clamp(d.relCursor[0] + (handScreen[0] - d.prevHandScreen[0]) * CURSOR_SENSITIVITY, 0, 1),
-              clamp(d.relCursor[1] + (handScreen[1] - d.prevHandScreen[1]) * CURSOR_SENSITIVITY, 0, 1),
+              clamp(d.relCursor[0] + (handScreen[0] - d.prevHandScreen[0]) * sx, 0, 1),
+              clamp(d.relCursor[1] + (handScreen[1] - d.prevHandScreen[1]) * sy, 0, 1),
             ];
           }
           d.prevHandScreen = handScreen;
@@ -1262,14 +1417,7 @@ export default function HandTracker(props: Props) {
         }
         const snapped: Vec2 = [quantize(screenPos[0]), quantize(screenPos[1])];
         // 카메라 이동·움켜쥐기 중엔 커서 숨김 (EMA는 계속 → 모드 복귀 시 커서 안 튐)
-        if (rightPose === 'select') {
-          // 원시 자세가 아직 ✌️일 때만 조준점 갱신. 주먹으로 접는 중(200ms 확인 대기)엔 마지막 조준점 유지
-          if (d.rightPose.candidate === 'select' || !d.selectCursor) d.selectCursor = snapped;
-          cursor = d.selectCursor;
-        } else {
-          d.selectCursor = null;
-          if (!NO_CURSOR_POSES.has(rightPose)) cursor = snapped;
-        }
+        if (!NO_CURSOR_POSES.has(rightPose)) cursor = snapped;
 
         // 주먹 판정을 먼저 (기하 판정): 주먹 쥐는 동안 엄지·검지가 가까워져도 핀치로 안 봄
         // 기하 주먹 판정 (접힘 3/4 또는 손끝이 손바닥 중심 가까이). 즉시 판정, 유지시간은 FIST_HOLD_MS
@@ -1278,14 +1426,18 @@ export default function HandTracker(props: Props) {
         const indexCurled = !!drawWorld && isCurled(drawWorld, 8, 6);
 
         // 핀치 (히스테리시스 + 유지시간 확인). 선택·카메라 이동·움켜쥐기 모드에선 핀치 안 함
-        const ratio = pinchRatio(drawHand);
+        const ratio = drawWorld ? pinchRatioWorld(drawWorld) : pinchRatio(drawHand);
         if (d.prevPinchRatio >= PINCH_OFF && ratio < PINCH_OFF) d.closeStart = now;
         d.prevPinchRatio = ratio;
         if (!d.pinching) {
           d.cursorHist.push({ t: now, p: snapped });
           while (d.cursorHist.length && now - d.cursorHist[0].t > 500) d.cursorHist.shift();
         }
-        if (fist || indexCurled || NO_PINCH_POSES.has(rightPose)) {
+        // 엄지·검지 끝이 모여 있고 검지 끝이 검지 뿌리보다 앞(손목에서 멀리)에 있으면 = 핀치 모양.
+        // 핀치하면 검지가 구부러져 '검지 접힘'·'주먹'으로 오인됨 → 그때는 무시 (진짜 주먹은 검지 끝이 손바닥 안쪽)
+        const pinchShape =
+          !!drawWorld && ratio < PINCH_OFF && dist3(drawWorld[8], drawWorld[0]) > dist3(drawWorld[5], drawWorld[0]);
+        if (((fist || indexCurled) && !pinchShape) || NO_PINCH_POSES.has(rightPose)) {
           d.pinching = false;
         } else if (!d.pinching && ratio < PINCH_ON) {
           d.pinching = true;
@@ -1313,7 +1465,23 @@ export default function HandTracker(props: Props) {
           d.lastPinchAt = now;
           d.selectFires += 1;
           const p = propsRef.current;
-          if (p.onPointer) {
+          const uiPos = d.pinchPos ?? snapped;
+          const ui = uiTargetAt(uiPos);
+          if (ui) {
+            // 화면 UI 위에서 핀치 = 그 UI 클릭 (씬엔 전달 안 함)
+            d.uiPress = ui;
+            if (isRange(ui)) {
+              // 슬라이더 = 잡고 좌우로 끌기 (합성 pointer 이벤트로는 네이티브 슬라이더가 안 움직임 → 값을 직접 설정)
+              d.uiOrigin = snapped;
+              d.lastPointer = uiPos;
+              setRangeFromCursor(ui, uiPos);
+              lastHint = '슬라이더 잡음';
+            } else {
+              fireUi(ui, 'pointerdown', uiPos);
+              fireUi(ui, 'mousedown', uiPos);
+              lastHint = 'UI 누름';
+            }
+          } else if (p.onPointer) {
             d.pointerDown = true;
             d.pointerOrigin = snapped;
             d.lastPointer = d.pinchPos ?? snapped;
@@ -1322,6 +1490,16 @@ export default function HandTracker(props: Props) {
             p.onSelect?.();
             lastHint = '선택 확정';
           }
+        }
+        // 슬라이더 잡은 채 좌우 이동 → 값 변경
+        if (d.pinching && isRange(d.uiPress) && d.pinchPos && d.uiOrigin) {
+          const pos: Vec2 = [
+            clamp(d.pinchPos[0] + snapped[0] - d.uiOrigin[0], 0, 1),
+            clamp(d.pinchPos[1] + snapped[1] - d.uiOrigin[1], 0, 1),
+          ];
+          cursor = pos;
+          d.lastPointer = pos;
+          if (d.uiPress.isConnected) setRangeFromCursor(d.uiPress, pos);
         }
         // 핀치 유지한 채 이동 = 드래그: 확정 지점 + 손 이동량 (커서도 같이 움직임)
         if (d.pointerDown && d.pinching && d.pinchPos && d.pointerOrigin) {
@@ -1353,6 +1531,40 @@ export default function HandTracker(props: Props) {
         d.fistSince = 0;
       }
 
+      // 화면 UI hover 표시 (핀치 중엔 누른 요소 유지)
+      {
+        const hov = d.uiPress ?? (cursor && !zooming ? uiTargetAt(cursor) : null);
+        if (hov !== d.uiHover) {
+          d.uiHover?.classList.remove(UI_HOVER_CLASS);
+          if (hov) {
+            ensureUiHoverStyle();
+            hov.classList.add(UI_HOVER_CLASS);
+          }
+          d.uiHover = hov;
+        }
+        // 커서가 DOM UI 위면 최상단 커서로 그림 (누가 덮든 커서가 위)
+        const tp = !zooming ? cursor : null;
+        updateTopCursor(tp, d.pinching, !!tp && (!!d.uiPress || isOverUi(tp)));
+      }
+      // UI 누른 핀치가 풀리면 → up + click
+      if (d.uiPress && !d.pinching) {
+        const el = d.uiPress;
+        d.uiPress = null;
+        d.uiOrigin = null;
+        const pos = d.lastPointer ?? cursor ?? [0.5, 0.5];
+        if (isRange(el)) {
+          lastHint = `슬라이더 ${el.value}`;
+        } else {
+          fireUi(el, 'pointerup', pos);
+          fireUi(el, 'mouseup', pos);
+          if (el.isConnected) {
+            if (el.matches('input:not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]), textarea, select')) el.focus();
+            if (el instanceof HTMLSelectElement) openHandSelect(el);
+            else el.click();
+          }
+          lastHint = 'UI 클릭';
+        }
+      }
       // 핀치가 어떤 이유로든 풀리면 (손 펴기·주먹·줌·손 사라짐) 버튼 up
       if (d.pointerDown && !d.pinching) {
         d.pointerDown = false;
@@ -1380,7 +1592,6 @@ export default function HandTracker(props: Props) {
           none: 'idle',
           open: 'idle',
           draw: 'select',
-          select: 'select',
           pan: 'pan',
           grab: 'rotate',
           fist: 'fist',
@@ -1400,6 +1611,17 @@ export default function HandTracker(props: Props) {
         if (m) d.orbitTravel += Math.hypot(m[0], m[1]);
         if (m && !d.test.active) pushCameraOrbit(m[0] * ORBIT_YAW_PER_UNIT, m[1] * ORBIT_PITCH_PER_UNIT);
       } else d.orbitDrag = newDrag();
+
+      // ── 왼손 펼치고 위아래 = UI 스크롤 (주먹 등 다른 자세 = 스크롤 종료): 오른손 커서가 스크롤 가능한 UI 위일 때만 (줌·카메라·회전 중엔 안 함) ──
+      const scrollTarget =
+        !zooming && !d.camMode && !d.rot.active && !!depthHand && !!cursor && d.leftPose.stable === 'open'
+          ? scrollableAt(cursor)
+          : null;
+      if (scrollTarget && depthHand) {
+        const m = stepDrag(d.scrollDrag, depthHand);
+        // 손 올리면 내용도 위로 (잡고 끄는 방향)
+        if (m) scrollTarget.scrollBy({ top: -m[1] * window.innerHeight * LEFT_SCROLL_GAIN });
+      } else d.scrollDrag = newDrag();
 
       // ── 제스처 테스트 채점 ──
       if (d.test.active || testWasActive) {
@@ -1445,7 +1667,7 @@ export default function HandTracker(props: Props) {
           const role = orbit ? 'ORBIT' : 'LEFT';
           return `${role} ${curl} ${tu}`;
         }
-        return `${curl} p${pinchRatio(hands[i]).toFixed(2)} ${tu}`;
+        return `${curl} ${drawWorld ? `${Math.round(dist3(drawWorld[4], drawWorld[8]) * 1000)}mm` : `p${pinchRatio(hands[i]).toFixed(2)}`} ${tu}`;
       });
       pushInfo({
         cursor,

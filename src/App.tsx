@@ -33,10 +33,11 @@ import {
   getDefaultSpecForCategory,
   rescalePolygonToArea,
 } from './utils/architectureGenerator';
+import { syncPhysicsAndBudgetForSolids } from './utils/structuralPhysics';
 
 const snap = (v: number) => Math.round(v * 4) / 4;
 
-/** 자유형 대지 폴리곤 변경 시 면적 유지 옵션 적용 + 건물 구조 안전 재구성 공통 함수 */
+/** 자유형 대지 폴리곤 변경 시 면적 유지 옵션 적용 + 건물 구조 안전 재구성 */
 function applySitePolygonToState(
   prev: StructureState,
   rawPolygon: [number, number][]
@@ -56,13 +57,61 @@ function applySitePolygonToState(
     sitePolygon: finalPolygon,
     siteAreaSqm: nextSiteAreaSqm,
   };
-  const built = generateWatertightArchitecture(nextSpec, prev.activeMaterial);
+  const built = generateWatertightArchitecture(
+    nextSpec,
+    nextSpec.elementMaterials?.exteriorCladding ?? prev.activeMaterial
+  );
   return {
     ...prev,
     buildingSpec: built.spec,
     solids: built.solids,
     nodes: built.nodes,
     beams: built.beams,
+  };
+}
+
+/** 개별 부위·층 재질 변경 또는 층별 활하중 변경 시 KDS 물리 응력(DCR)과 QTO 총 예상 공사비 실시간 동기화 */
+function applySolidsWithLivePhysicsAndBudget(
+  prev: StructureState,
+  nextSolids: SolidPrimitive[],
+  overrideSpec?: BuildingSpec
+): StructureState {
+  const targetSpec = overrideSpec ?? prev.buildingSpec;
+  if (!targetSpec) {
+    return { ...prev, solids: nextSolids };
+  }
+
+  const syncedSpecBase =
+    nextSolids.length > 0 ? syncBuildingWithSolids(targetSpec, nextSolids) : targetSpec;
+
+  const { nextSpec, nextSolids: updatedSolids } = syncPhysicsAndBudgetForSolids(
+    syncedSpecBase,
+    nextSolids
+  );
+
+  const report = nextSpec.structuralReport;
+  const updatedBeams = report
+    ? prev.beams.map((b) => {
+        const match = b.id.match(/^col_(\d+)_/);
+        const fNum = match ? Number(match[1]) : 1;
+        const fp = report.floors.find((r) => r.floor === fNum) ?? report.floors[0];
+        if (!fp) return b;
+        return {
+          ...b,
+          stress: Number(Math.min(1, fp.columnDcr).toFixed(3)),
+          dcr: fp.columnDcr,
+          axialLoadKn: fp.columnAxialDemandKn,
+          capacityKn: fp.columnCapacityKn,
+          deflectionMm: fp.beamDeflectionMm,
+        };
+      })
+    : prev.beams;
+
+  return {
+    ...prev,
+    solids: updatedSolids,
+    beams: updatedBeams,
+    buildingSpec: nextSpec,
   };
 }
 
@@ -79,21 +128,23 @@ export default function App() {
     nodes: initialArch.nodes,
     beams: initialArch.beams,
     activeMaterial: 'stucco',
-    activeColor: '#f5f2eb',
+    activeColor: '#f0ece4',
     selectedFloorIndex: null,
     isSiteEditMode: false,
     showMepPipes: false,
     viewMode: 'exterior',
+    isSeniorMode: false,
     activeSpecViz: null,
     chatHistory: [
       {
         id: 'welcome',
         role: 'assistant',
-        text: '단독주택 10종 디자인 템플릿과 자유형 대지 경계 편집이 준비되었습니다. 사진을 올리면 Vision AI가 지붕·창호·외장재 DNA를 추출하며, "경계 드래그 편집"을 켜고 핀을 끌면 대지 모양에 맞춰 건물이 깨지지 않고 자동 재구성됩니다.',
+        text: '단독주택 10종 디자인 템플릿과 KDS 물리 구조 해석·현실 예산 산출이 준비되었습니다. 3D 부위를 클릭해 재질을 바꾸거나 하단 "구조 골조 보기"로 실제 기둥·보·기초 골조를 확인해 보세요.',
         timestamp: Date.now(),
       },
     ],
   });
+
   const [isReinforcing, setIsReinforcing] = useState(false);
   const [testVoiceInput, setTestVoiceInput] = useState('');
   const [isSpecBuilderOpen, setIsSpecBuilderOpen] = useState(true);
@@ -124,8 +175,9 @@ export default function App() {
       selectedFloorIndex: next ? null : p.selectedFloorIndex,
       selectedUnitTypeId: next ? null : p.selectedUnitTypeId,
       isLoadHeatmapActive: next ? false : p.isLoadHeatmapActive,
+      viewMode: next ? 'exterior' : p.viewMode,
       statusMessage: next
-        ? '대지 경계 자유 편집 활성화 · 파란 핀을 마우스/제스처로 드래그하세요'
+        ? '대지 경계 자유 편집 ON · 파란 핀을 마우스/제스처로 드래그하세요'
         : '대지 경계 편집 종료',
     }));
   }, []);
@@ -138,16 +190,20 @@ export default function App() {
     if (isReinforcing) return;
     setIsFree3DMode(false);
     setIsReinforcing(true);
-    const matToUse = overrideMaterial ?? structure.activeMaterial;
+    const matToUse =
+      overrideMaterial ?? spec.elementMaterials?.exteriorCladding ?? structure.activeMaterial;
     setStructure((p) => ({
       ...p,
       activeMaterial: matToUse,
       isSiteEditMode: false,
-      statusMessage: `'${spec.projectName}' 건축 매스·지붕·실내 인테리어 동기화 중...`,
+      statusMessage: `'${spec.projectName}' 건축 골조·자재·예산 동기화 중...`,
     }));
     try {
       const nextState = await buildFromSpecUI(spec, { ...structure, activeMaterial: matToUse });
-      setStructure(nextState);
+      const ensured = nextState.buildingSpec
+        ? applySolidsWithLivePhysicsAndBudget(nextState, nextState.solids ?? [])
+        : nextState;
+      setStructure(ensured);
       setIsSpecBuilderOpen(false);
     } finally {
       setIsReinforcing(false);
@@ -162,6 +218,7 @@ export default function App() {
       ...p,
       buildingSpec: undefined,
       selectedUnitTypeId: null,
+      selectedPartId: null,
       selectedFloorIndex: null,
       isSiteEditMode: false,
       isLoadHeatmapActive: false,
@@ -184,28 +241,34 @@ export default function App() {
       const nextSolids = (prev.solids ?? []).map((s) =>
         s.id === updatedPart.id ? updatedPart : s
       );
-      const nextBuildingSpec = prev.buildingSpec
-        ? syncBuildingWithSolids(prev.buildingSpec, nextSolids)
-        : undefined;
-      return {
-        ...prev,
-        solids: nextSolids,
-        buildingSpec: nextBuildingSpec,
-      };
+      return applySolidsWithLivePhysicsAndBudget(prev, nextSolids);
+    });
+  };
+
+  const handleUpdateWholeFloor = (
+    floorIdx: number,
+    patch: { material?: CadMaterial; color?: string }
+  ) => {
+    setStructure((prev) => {
+      const nextSolids = (prev.solids ?? []).map((s) =>
+        s.floorIndex === floorIdx && s.partRole !== 'garden' && s.partRole !== 'furniture'
+          ? {
+              ...s,
+              material: patch.material ?? s.material,
+              color: patch.color ?? s.color,
+            }
+          : s
+      );
+      return applySolidsWithLivePhysicsAndBudget(prev, nextSolids);
     });
   };
 
   const handleDeletePart = (partId: string) => {
     setStructure((prev) => {
       const nextSolids = (prev.solids ?? []).filter((s) => s.id !== partId);
-      const nextBuildingSpec =
-        prev.buildingSpec && nextSolids.length > 0
-          ? syncBuildingWithSolids(prev.buildingSpec, nextSolids)
-          : prev.buildingSpec;
+      const synced = applySolidsWithLivePhysicsAndBudget(prev, nextSolids);
       return {
-        ...prev,
-        solids: nextSolids,
-        buildingSpec: nextBuildingSpec,
+        ...synced,
         selectedPartId: null,
       };
     });
@@ -224,11 +287,14 @@ export default function App() {
     setIsReinforcing(true);
     setStructure((p) => ({
       ...p,
-      statusMessage: '동일 제원 기반 새로운 예술 건축 디자인 생성 중...',
+      statusMessage: '동일 제원 기반 새로운 건축 디자인 생성 중...',
     }));
     try {
       const nextState = await regenerateDesignVariation(structure);
-      setStructure(nextState);
+      const ensured = nextState.buildingSpec
+        ? applySolidsWithLivePhysicsAndBudget(nextState, nextState.solids ?? [])
+        : nextState;
+      setStructure(ensured);
     } finally {
       setIsReinforcing(false);
     }
@@ -250,8 +316,11 @@ export default function App() {
     const beamId = `beam_${uid()}`;
 
     setStructure((prev) => {
-      // 자유형 대지 경계 편집 모드가 켜져 있으면 손 제스처 핀치로 가장 가까운 대지 꼭짓점을 실시간 드래그 변형
-      if (prev.isSiteEditMode && prev.buildingSpec?.sitePolygon && prev.buildingSpec.sitePolygon.length >= 3) {
+      if (
+        prev.isSiteEditMode &&
+        prev.buildingSpec?.sitePolygon &&
+        prev.buildingSpec.sitePolygon.length >= 3
+      ) {
         const poly = prev.buildingSpec.sitePolygon;
         let nearestIdx = -1;
         let minDist = 1.4;
@@ -421,31 +490,39 @@ export default function App() {
     setStructure((p) => ({ ...p, statusMessage: `AI 설계 반영 중: "${text}"...` }));
     try {
       const nextState = await executeNaturalCommand(text, structure);
-      setStructure(nextState);
+      const ensured = nextState.buildingSpec
+        ? applySolidsWithLivePhysicsAndBudget(nextState, nextState.solids ?? [])
+        : nextState;
+      setStructure(ensured);
     } finally {
       setIsReinforcing(false);
     }
   };
 
   const handleApplyCandidate = (cand: DesignCandidate) => {
-    setStructure((prev) => ({
-      ...prev,
-      isSimulating: false,
-      solids: cand.solids,
-      nodes: cand.nodes,
-      beams: cand.beams,
-      activeCandidates: undefined,
-      statusMessage: `[${cand.title}] 적용 완료`,
-      chatHistory: [
-        ...(prev.chatHistory ?? []),
-        {
-          id: `msg_sel_${Date.now()}`,
-          role: 'assistant',
-          text: `'${cand.title}' 구성을 3D 작업실에 반영했습니다.`,
-          timestamp: Date.now(),
-        },
-      ],
-    }));
+    setStructure((prev) => {
+      const baseNext: StructureState = {
+        ...prev,
+        isSimulating: false,
+        solids: cand.solids,
+        nodes: cand.nodes,
+        beams: cand.beams,
+        activeCandidates: undefined,
+        statusMessage: `[${cand.title}] 적용 완료`,
+        chatHistory: [
+          ...(prev.chatHistory ?? []),
+          {
+            id: `msg_sel_${Date.now()}`,
+            role: 'assistant',
+            text: `'${cand.title}' 구성을 3D 작업실에 반영했습니다.`,
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      return baseNext.buildingSpec
+        ? applySolidsWithLivePhysicsAndBudget(baseNext, cand.solids)
+        : baseNext;
+    });
   };
 
   const handleReinforce = async () => {
@@ -459,7 +536,7 @@ export default function App() {
   };
 
   return (
-    <main className="relative w-screen h-screen overflow-hidden bg-[#eef2f6]">
+    <main className="relative w-screen h-screen overflow-hidden bg-[#c7d2df]">
       <SceneCanvas
         structure={structure}
         onUpdateStress={(beams) => setStructure((prev) => ({ ...prev, beams }))}
@@ -489,16 +566,21 @@ export default function App() {
         onChangeLoad={(targetLoadKg) => setStructure((p) => ({ ...p, targetLoadKg }))}
         onSelectTool={(activeTool: CadTool) => setStructure((p) => ({ ...p, activeTool }))}
         onChangeMaterial={(activeMaterial: CadMaterial) =>
-          setStructure((p) => ({
-            ...p,
-            activeMaterial,
-            solids: (p.solids ?? []).map((s) =>
+          setStructure((p) => {
+            const nextSolids = (p.solids ?? []).map((s) =>
               s.partRole === 'garden' || s.partRole === 'interior_wall' || s.partRole === 'furniture'
                 ? s
                 : { ...s, material: activeMaterial }
-            ),
-            beams: p.beams.map((b) => ({ ...b, material: activeMaterial })),
-          }))
+            );
+            return applySolidsWithLivePhysicsAndBudget(
+              {
+                ...p,
+                activeMaterial,
+                beams: p.beams.map((b) => ({ ...b, material: activeMaterial })),
+              },
+              nextSolids
+            );
+          })
         }
         onChangeColor={(activeColor: string) =>
           setStructure((p) => ({
@@ -517,12 +599,29 @@ export default function App() {
         }
         onLoadPreset={(preset) => setStructure((p) => ({ ...preset, chatHistory: p.chatHistory }))}
         onReset={() => {
+          if (isFree3DMode) {
+            setStructure((p) => ({
+              ...p,
+              solids: [],
+              nodes: [],
+              beams: [],
+              selectedPartId: null,
+              selectedFloorIndex: null,
+              activeCandidates: undefined,
+              statusMessage: '3D 캔버스 초기화 완료',
+            }));
+            return;
+          }
+          const freshSpec = getDefaultSpecForCategory('단독주택', 'L-courtyard');
+          const freshArch = generateWatertightArchitecture(freshSpec, 'stucco');
           setStructure((p) => ({
             ...p,
-            solids: [],
-            nodes: [],
-            beams: [],
-            buildingSpec: undefined,
+            buildingSpec: freshArch.spec,
+            solids: freshArch.solids,
+            nodes: freshArch.nodes,
+            beams: freshArch.beams,
+            activeMaterial: 'stucco',
+            activeColor: '#f0ece4',
             selectedUnitTypeId: null,
             selectedPartId: null,
             selectedFloorIndex: null,
@@ -533,14 +632,13 @@ export default function App() {
             isSimulating: false,
             activeCandidates: undefined,
             cameraControl: { mode: 'free' },
-            statusMessage: '캔버스 초기화 완료',
+            statusMessage: '기본 단독주택으로 초기화 완료',
           }));
-          if (!isFree3DMode) {
-            setIsSpecBuilderOpen(true);
-          }
+          setIsSpecBuilderOpen(true);
         }}
       />
 
+      {/* 좌측 상단: 방 유형 2D 평면도 */}
       {selectedUnitType && (
         <FloorPlanViewer
           unitType={selectedUnitType}
@@ -548,6 +646,7 @@ export default function App() {
         />
       )}
 
+      {/* 우측 상단: 개별 부위 및 층 전체 재질·치수 인스펙터 */}
       {selectedPart && (
         <PartInspector
           part={selectedPart}
@@ -557,20 +656,7 @@ export default function App() {
           onSelectWholeFloor={(floorIdx) =>
             setStructure((p) => ({ ...p, selectedFloorIndex: floorIdx }))
           }
-          onUpdateWholeFloor={(floorIdx, patch) =>
-            setStructure((p) => ({
-              ...p,
-              solids: (p.solids ?? []).map((s) =>
-                s.floorIndex === floorIdx
-                  ? {
-                      ...s,
-                      material: patch.material ?? s.material,
-                      color: patch.color ?? s.color,
-                    }
-                  : s
-              ),
-            }))
-          }
+          onUpdateWholeFloor={handleUpdateWholeFloor}
           onUpdatePart={handleUpdatePart}
           onDeletePart={handleDeletePart}
           onClose={() =>
@@ -583,6 +669,7 @@ export default function App() {
         />
       )}
 
+      {/* 우측 상단: 부위 선택이 없을 때 KDS 41 12 00 물리 하중 시뮬레이터 표시 (실시간 DCR 재계산 연동) */}
       {!selectedPart && structure.buildingSpec && (
         <FloorLoadPanel
           spec={structure.buildingSpec}
@@ -591,6 +678,8 @@ export default function App() {
             setStructure((p) => ({
               ...p,
               isLoadHeatmapActive: active,
+              viewMode: active ? 'exterior' : p.viewMode,
+              showMepPipes: active ? false : p.showMepPipes,
               isSiteEditMode: active ? false : p.isSiteEditMode,
               selectedUnitTypeId: active ? null : p.selectedUnitTypeId,
             }))
@@ -602,31 +691,30 @@ export default function App() {
               for (let f = 1; f <= p.buildingSpec.floors; f++) {
                 nextMap[f] = loadKn;
               }
-              return {
-                ...p,
-                buildingSpec: { ...p.buildingSpec, floorLoadsKn: nextMap },
+              const nextSpec: BuildingSpec = {
+                ...p.buildingSpec,
+                floorLoadsKn: nextMap,
               };
+              return applySolidsWithLivePhysicsAndBudget(p, p.solids ?? [], nextSpec);
             })
           }
           onChangeFloorLoad={(floor, loadKn) =>
             setStructure((p) => {
               if (!p.buildingSpec) return p;
-              return {
-                ...p,
-                buildingSpec: {
-                  ...p.buildingSpec,
-                  floorLoadsKn: {
-                    ...(p.buildingSpec.floorLoadsKn ?? {}),
-                    [floor]: loadKn,
-                  },
+              const nextSpec: BuildingSpec = {
+                ...p.buildingSpec,
+                floorLoadsKn: {
+                  ...(p.buildingSpec.floorLoadsKn ?? {}),
+                  [floor]: loadKn,
                 },
               };
+              return applySolidsWithLivePhysicsAndBudget(p, p.solids ?? [], nextSpec);
             })
           }
         />
       )}
 
-      {/* 우측 하단 액션 바 */}
+      {/* 우측 하단 액션 바 (이전 익숙한 구성 + 구조 골조 보기 포함) */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-wrap gap-2 bg-white/95 backdrop-blur-md border border-slate-300 p-2.5 rounded-xl shadow-lg">
         {structure.buildingSpec && (
           <>
@@ -642,11 +730,37 @@ export default function App() {
             </button>
             <button
               onClick={() =>
+                setStructure((p) => {
+                  const nextStructural = p.viewMode !== 'structural_frame';
+                  return {
+                    ...p,
+                    viewMode: nextStructural ? 'structural_frame' : 'exterior',
+                    isLoadHeatmapActive: false,
+                    showMepPipes: false,
+                    isSiteEditMode: false,
+                    selectedUnitTypeId: nextStructural ? null : p.selectedUnitTypeId,
+                    statusMessage: nextStructural
+                      ? '구조 골조 투시 ON (RC·철골·중목 기둥·보·기초)'
+                      : '일반 외관 보기',
+                  };
+                })
+              }
+              className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
+                structure.viewMode === 'structural_frame'
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                  : 'bg-slate-100 text-slate-800 border-slate-300 hover:bg-slate-200'
+              }`}
+            >
+              {structure.viewMode === 'structural_frame' ? '구조 골조 ON' : '구조 골조 보기'}
+            </button>
+            <button
+              onClick={() =>
                 setStructure((p) => ({
                   ...p,
                   viewMode: p.viewMode === 'interior_cutaway' ? 'exterior' : 'interior_cutaway',
                   selectedUnitTypeId: null,
                   isLoadHeatmapActive: false,
+                  showMepPipes: false,
                 }))
               }
               className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
@@ -656,18 +770,25 @@ export default function App() {
               }`}
             >
               {structure.viewMode === 'interior_cutaway'
-                ? '실내 투시 ON (지붕·전면벽 오픈)'
+                ? '실내 투시 ON'
                 : '실내 투시 보기'}
             </button>
             <button
-              onClick={() => setStructure((p) => ({ ...p, showMepPipes: !p.showMepPipes }))}
+              onClick={() =>
+                setStructure((p) => ({
+                  ...p,
+                  showMepPipes: !p.showMepPipes,
+                  isLoadHeatmapActive: false,
+                  viewMode: 'exterior',
+                }))
+              }
               className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
                 structure.showMepPipes
                   ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
                   : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
               }`}
             >
-              {structure.showMepPipes ? '수도·전기 배관 투시 ON' : '수도·전기 배관 투시 OFF'}
+              {structure.showMepPipes ? '수도·전기 배관 ON' : '수도·전기 배관 OFF'}
             </button>
           </>
         )}
@@ -694,7 +815,7 @@ export default function App() {
         </button>
       </div>
 
-      {/* 좌측 하단 스튜디오 패널 */}
+      {/* 좌측 하단 스튜디오 패널 (이전 한 화면 UI 복원) */}
       <FloatingPanel
         title={isFree3DMode ? '3D DESIGN & PRINTING STUDIO' : 'AIRFORGE ARCHITECT STUDIO'}
         subtitle="DRAG BAR TO MOVE · RESIZE"
@@ -709,6 +830,17 @@ export default function App() {
               onClick={() => {
                 setIsFree3DMode(false);
                 setIsSpecBuilderOpen(true);
+                if (!structure.buildingSpec) {
+                  const defSpec = getDefaultSpecForCategory('단독주택', 'L-courtyard');
+                  const built = generateWatertightArchitecture(defSpec, 'stucco');
+                  setStructure((p) => ({
+                    ...p,
+                    buildingSpec: built.spec,
+                    solids: built.solids,
+                    nodes: built.nodes,
+                    beams: built.beams,
+                  }));
+                }
               }}
               className="px-2 py-0.5 text-[10.5px] font-bold bg-sky-50 border border-sky-300 rounded hover:bg-sky-100 text-sky-800 cursor-pointer"
             >
@@ -725,7 +857,10 @@ export default function App() {
               isSiteEditMode={Boolean(structure.isSiteEditMode)}
               onToggleSiteEditMode={handleToggleSiteEditMode}
               onLivePreviewSpec={(nextSpec, activeViz, overrideMaterial) => {
-                const matToUse = overrideMaterial ?? structure.activeMaterial;
+                const matToUse =
+                  overrideMaterial ??
+                  nextSpec.elementMaterials?.exteriorCladding ??
+                  structure.activeMaterial;
                 const built = generateWatertightArchitecture(nextSpec, matToUse);
                 setStructure((p) => ({
                   ...p,
@@ -743,6 +878,7 @@ export default function App() {
             />
           )}
 
+          {/* 방 디자인 유형 선택 바 */}
           {structure.buildingSpec?.unitTypes && structure.buildingSpec.unitTypes.length > 0 && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1.5">
               <div className="flex items-center justify-between text-[11px]">
@@ -796,6 +932,7 @@ export default function App() {
             </div>
           )}
 
+          {/* AI 대화창 접기/펼치기 */}
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <span className="font-mono text-[11px] font-bold text-sky-700">AI DESIGN CHAT</span>
             <button

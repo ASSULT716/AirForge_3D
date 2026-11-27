@@ -5,7 +5,10 @@ import {
   BuildingTemplateOption,
   CadMaterial,
   DesignCategory,
+  ElementMaterialSpec,
+  GlazingSpec,
   SiteShape,
+  StructuralSystemId,
 } from '../types/cad';
 import { calculateKoreanBuildingLimits } from '../utils/buildingEstimator';
 import {
@@ -14,6 +17,10 @@ import {
   getDefaultSpecForCategory,
   rescalePolygonToArea,
 } from '../utils/architectureGenerator';
+import {
+  resolveSafeStructuralSystem,
+  STRUCTURAL_SYSTEM_DB,
+} from '../utils/structuralPhysics';
 import {
   analyzeMultipleHousePhotosAndAdaptSpec,
   ExtractedHouseStyle,
@@ -48,6 +55,39 @@ type SpecFieldKey =
   | 'elevators'
   | 'stairs'
   | 'rooftops';
+
+const STRUCTURAL_BUTTONS: { id: StructuralSystemId; shortLabel: string }[] = [
+  { id: 'rc_frame', shortLabel: 'RC 라멘조' },
+  { id: 'steel_frame', shortLabel: 'H-Beam 철골' },
+  { id: 'heavy_timber', shortLabel: '중목 집성재' },
+  { id: 'hybrid_rc_steel', shortLabel: 'RC+철골 복합' },
+];
+
+const CLADDING_SELECT_OPTIONS: { id: CadMaterial; label: string }[] = [
+  { id: 'stucco', label: '스타코(외단열)' },
+  { id: 'wood', label: '적삼목·우드' },
+  { id: 'concrete', label: '노출콘크리트' },
+  { id: 'steel', label: '리얼징크·스틸' },
+  { id: 'titanium', label: '티타늄 아연판' },
+  { id: 'gold', label: '샴페인 골드' },
+  { id: 'carbon', label: '세라믹·카본' },
+];
+
+const GLAZING_SELECT_OPTIONS: { id: GlazingSpec; label: string }[] = [
+  { id: 'double_lowe', label: '이중 로이창' },
+  { id: 'triple_lowe', label: '삼중 로이창' },
+  { id: 'curtain_wall', label: '로이 커튼월' },
+];
+
+function formatKrwReadable(krw: number): string {
+  const man = Math.round(krw / 10000);
+  if (man >= 10000) {
+    const eok = Math.floor(man / 10000);
+    const remMan = man % 10000;
+    return remMan > 0 ? `${eok}억 ${remMan.toLocaleString()}만 원` : `${eok}억 원`;
+  }
+  return `${Math.max(1, man).toLocaleString()}만 원`;
+}
 
 interface AccordionSpecItemProps {
   fieldKey: SpecFieldKey;
@@ -206,47 +246,67 @@ export default function BuildingSpecBuilder({
   const [lockedKeys, setLockedKeys] = useState<Partial<Record<SpecFieldKey, boolean>>>({});
   const [expandedKey, setExpandedKey] = useState<SpecFieldKey | null>(null);
   const [baselineSpec, setBaselineSpec] = useState<BuildingSpec>(defaultInit);
-  const [activePrimaryMaterial, setActivePrimaryMaterial] = useState<CadMaterial>('stucco');
+  const [activePrimaryMaterial, setActivePrimaryMaterial] = useState<CadMaterial>(
+    defaultInit.elementMaterials?.exteriorCladding ?? 'stucco'
+  );
+  const [isMaterialBoxOpen, setIsMaterialBoxOpen] = useState(false);
 
-  // 여러 장 사진 무드보드 상태
   const [refPhotos, setRefPhotos] = useState<string[]>([]);
   const [extractedStyle, setExtractedStyle] = useState<ExtractedHouseStyle | null>(null);
   const [isAnalyzingPhoto, setIsAnalyzingPhoto] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // 3D 캔버스에서 대지 꼭짓점을 드래그했을 때 바뀐 대지 폴리곤·대지면적·건축면적을 패널 상태에 즉시 동기화
+  // 외부(대지 드래그, 부위 재질 변경, 하중 슬라이더)에서 바뀐 최신 물리·예산·대지 상태를 즉시 동기화
   useEffect(() => {
     if (!initialSpec) return;
-    setSpecState((prev) => {
-      const samePoly =
-        prev.sitePolygon?.length === initialSpec.sitePolygon?.length &&
-        (prev.sitePolygon ?? []).every(
-          (pt, i) =>
-            pt[0] === initialSpec.sitePolygon?.[i]?.[0] &&
-            pt[1] === initialSpec.sitePolygon?.[i]?.[1]
-        );
-      if (
-        samePoly &&
-        prev.siteAreaSqm === initialSpec.siteAreaSqm &&
-        prev.buildingAreaSqm === initialSpec.buildingAreaSqm &&
-        prev.siteShape === initialSpec.siteShape
-      ) {
-        return prev;
-      }
-      return {
-        ...prev,
-        siteShape: initialSpec.siteShape,
-        sitePolygon: initialSpec.sitePolygon,
-        siteAreaSqm: initialSpec.siteAreaSqm,
-        buildingAreaSqm: initialSpec.buildingAreaSqm,
-      };
-    });
+    setSpecState((prev) => ({
+      ...prev,
+      siteShape: initialSpec.siteShape,
+      sitePolygon: initialSpec.sitePolygon,
+      siteAreaSqm: initialSpec.siteAreaSqm,
+      buildingAreaSqm: initialSpec.buildingAreaSqm,
+      structuralSystem: initialSpec.structuralSystem ?? prev.structuralSystem,
+      elementMaterials: initialSpec.elementMaterials ?? prev.elementMaterials,
+      structuralReport: initialSpec.structuralReport,
+      budgetReport: initialSpec.budgetReport,
+      floorLoadsKn: initialSpec.floorLoadsKn ?? prev.floorLoadsKn,
+    }));
   }, [
     initialSpec?.sitePolygon,
     initialSpec?.siteAreaSqm,
     initialSpec?.buildingAreaSqm,
     initialSpec?.siteShape,
+    initialSpec?.structuralReport,
+    initialSpec?.budgetReport,
+    initialSpec?.elementMaterials,
+    initialSpec?.floorLoadsKn,
   ]);
+
+  const curMaterials: ElementMaterialSpec = useMemo(() => {
+    const sys =
+      specState.elementMaterials?.structuralSystem ??
+      specState.structuralSystem ??
+      resolveSafeStructuralSystem({
+        usageType: specState.usageType,
+        floors: specState.floors,
+        windowWallRatio: specState.windowWallRatio,
+        primaryMaterial: activePrimaryMaterial,
+      });
+    return {
+      structuralSystem: sys,
+      foundationMaterial:
+        specState.elementMaterials?.foundationMaterial ??
+        (specState.floors >= 3 ? 'rc_mat' : 'rc_footing'),
+      exteriorCladding:
+        specState.elementMaterials?.exteriorCladding ?? activePrimaryMaterial,
+      upperCladding:
+        specState.elementMaterials?.upperCladding ?? specState.accentMaterial ?? 'wood',
+      roofMaterial:
+        specState.elementMaterials?.roofMaterial ?? specState.roofMaterial ?? 'steel',
+      glazingSpec: specState.elementMaterials?.glazingSpec ?? 'double_lowe',
+      insulationSpec: specState.elementMaterials?.insulationSpec ?? 'eps_150',
+    };
+  }, [specState, activePrimaryMaterial]);
 
   const limits = useMemo(
     () =>
@@ -264,7 +324,6 @@ export default function BuildingSpecBuilder({
     [specState]
   );
 
-  // 단독주택 기본 10종 / 사진 업로드 시 Vision AI 맞춤형 10종
   const templatesForCurrent: BuildingTemplateOption[] = useMemo(() => {
     if (specState.usageType === '3D 디자인') return [];
     if (specState.dynamicTemplates && specState.dynamicTemplates.length > 0) {
@@ -280,18 +339,38 @@ export default function BuildingSpecBuilder({
       const cat = specState.usageType === '3D 디자인' ? '단독주택' : specState.usageType;
       const defaultTemplates = BUILDING_TEMPLATES_BY_CATEGORY[cat];
       const firstDef = defaultTemplates[0];
+      const freshSys =
+        firstDef.structuralSystem ??
+        resolveSafeStructuralSystem({
+          usageType: cat,
+          floors: specState.floors,
+          windowWallRatio: firstDef.windowWallRatio,
+          primaryMaterial: firstDef.primaryMaterial,
+        });
+      const freshMats: ElementMaterialSpec = {
+        ...curMaterials,
+        structuralSystem: freshSys,
+        exteriorCladding:
+          firstDef.primaryMaterial === 'glass' ? 'concrete' : firstDef.primaryMaterial,
+        upperCladding:
+          firstDef.accentMaterial === 'glass' ? 'steel' : firstDef.accentMaterial,
+        roofMaterial: firstDef.roofMaterial ?? 'steel',
+        glazingSpec: firstDef.glazingSpec ?? 'double_lowe',
+      };
       const cleared: BuildingSpec = {
         ...specState,
         templateId: firstDef.id,
         selectedTemplateName: firstDef.name,
         dynamicTemplates: defaultTemplates,
         architecturalDna: undefined,
+        structuralSystem: freshSys,
+        elementMaterials: freshMats,
         roofStyle: firstDef.roofStyle,
         roofPitchDeg: firstDef.roofPitchDeg ?? 0,
         overhangScale: firstDef.overhangScale ?? 0.22,
         windowWallRatio: firstDef.windowWallRatio ?? 0.56,
-        accentMaterial: firstDef.accentMaterial,
-        roofMaterial: firstDef.roofMaterial ?? 'steel',
+        accentMaterial: freshMats.upperCladding,
+        roofMaterial: freshMats.roofMaterial,
         interiorTheme: firstDef.interiorTheme,
         interiorWallColor: firstDef.interiorWallColor,
         interiorFloorColor: firstDef.interiorFloorColor,
@@ -304,8 +383,8 @@ export default function BuildingSpecBuilder({
         photoCount: 0,
       };
       setSpecState(cleared);
-      setActivePrimaryMaterial(firstDef.primaryMaterial);
-      onLivePreviewSpec(cleared, null, firstDef.primaryMaterial);
+      setActivePrimaryMaterial(freshMats.exteriorCladding);
+      onLivePreviewSpec(cleared, null, freshMats.exteriorCladding);
       return;
     }
 
@@ -346,13 +425,45 @@ export default function BuildingSpecBuilder({
     await applyPhotoCollection(merged);
   };
 
+  const handleUpdateElementMaterials = (
+    patch: Partial<ElementMaterialSpec>,
+    nextWwr?: number
+  ) => {
+    const merged: ElementMaterialSpec = { ...curMaterials, ...patch };
+    const effectiveWwr = nextWwr ?? specState.windowWallRatio ?? 0.56;
+    const safeSys = resolveSafeStructuralSystem({
+      usageType: specState.usageType,
+      floors: specState.floors,
+      windowWallRatio:
+        merged.glazingSpec === 'curtain_wall'
+          ? Math.max(0.7, effectiveWwr)
+          : effectiveWwr,
+      primaryMaterial: merged.exteriorCladding,
+      requestedSystem: merged.structuralSystem,
+    });
+    merged.structuralSystem = safeSys;
+
+    const next: BuildingSpec = {
+      ...specState,
+      structuralSystem: safeSys,
+      elementMaterials: merged,
+      accentMaterial: merged.upperCladding,
+      roofMaterial: merged.roofMaterial,
+      windowWallRatio: effectiveWwr,
+      customWallColor: undefined,
+      customUpperWallColor: undefined,
+    };
+    setSpecState(next);
+    setActivePrimaryMaterial(merged.exteriorCladding);
+    onLivePreviewSpec(next, null, merged.exteriorCladding);
+  };
+
   const handlePriorityChange = (priorityKey: SpecFieldKey, rawVal: number) => {
     if (lockedKeys[priorityKey]) return;
 
     const next: BuildingSpec = { ...specState, [priorityKey]: rawVal };
 
     if (priorityKey === 'siteAreaSqm') {
-      // 자유형 폴리곤이면 형태를 유지한 채 면적만 비율 확대/축소
       if (next.sitePolygon && next.sitePolygon.length >= 3) {
         next.sitePolygon = rescalePolygonToArea(next.sitePolygon, rawVal);
       } else {
@@ -455,7 +566,7 @@ export default function BuildingSpecBuilder({
         deltaText:
           diff === 0 ? '기준값과 동일' : diff > 0 ? `+${diff}${unit} 증가` : `${diff}${unit} 감소`,
       },
-      activePrimaryMaterial
+      curMaterials.exteriorCladding
     );
   };
 
@@ -480,12 +591,12 @@ export default function BuildingSpecBuilder({
     } else {
       setSpecState(def);
       setBaselineSpec(def);
-      setActivePrimaryMaterial('stucco');
-      onLivePreviewSpec(def, null, 'stucco');
+      const mat = def.elementMaterials?.exteriorCladding ?? 'stucco';
+      setActivePrimaryMaterial(mat);
+      onLivePreviewSpec(def, null, mat);
     }
   };
 
-  // 10종 디자인 템플릿 중 선택 시 매스·지붕·경사각·처마·창호비율·층별재질·실내 테마 일괄 전환
   const handleTemplateCardSelect = (tpl: BuildingTemplateOption) => {
     const nextGarden = !lockedKeys.gardenAreaSqm
       ? Math.min(
@@ -494,17 +605,39 @@ export default function BuildingSpecBuilder({
         )
       : specState.gardenAreaSqm;
 
+    const nextSys =
+      tpl.structuralSystem ??
+      resolveSafeStructuralSystem({
+        usageType: specState.usageType,
+        floors: specState.floors,
+        windowWallRatio: tpl.windowWallRatio,
+        primaryMaterial: tpl.primaryMaterial,
+      });
+
+    const nextElemMats: ElementMaterialSpec = {
+      ...curMaterials,
+      structuralSystem: nextSys,
+      exteriorCladding: tpl.primaryMaterial === 'glass' ? 'concrete' : tpl.primaryMaterial,
+      upperCladding: tpl.accentMaterial === 'glass' ? 'steel' : tpl.accentMaterial,
+      roofMaterial: tpl.roofMaterial ?? 'steel',
+      glazingSpec:
+        tpl.glazingSpec ??
+        ((tpl.windowWallRatio ?? 0.56) >= 0.65 ? 'curtain_wall' : 'double_lowe'),
+    };
+
     const updatedSpec: BuildingSpec = {
       ...specState,
       projectName: `AirForge ${tpl.name.replace(/^\[사진 직결\]\s*/, '')}`,
       templateId: tpl.id,
       selectedTemplateName: tpl.name,
+      structuralSystem: nextSys,
+      elementMaterials: nextElemMats,
       roofStyle: tpl.roofStyle,
       roofPitchDeg: tpl.roofPitchDeg ?? (tpl.roofStyle === 'flat-overhang' ? 0 : 20),
       overhangScale: tpl.overhangScale ?? 0.22,
       windowWallRatio: tpl.windowWallRatio ?? 0.56,
-      accentMaterial: tpl.accentMaterial,
-      roofMaterial: tpl.roofMaterial ?? (tpl.accentMaterial === 'wood' ? 'wood' : 'steel'),
+      accentMaterial: nextElemMats.upperCladding,
+      roofMaterial: nextElemMats.roofMaterial,
       interiorTheme: tpl.interiorTheme,
       interiorWallColor: tpl.interiorWallColor,
       interiorFloorColor: tpl.interiorFloorColor,
@@ -517,8 +650,8 @@ export default function BuildingSpecBuilder({
     };
 
     setSpecState(updatedSpec);
-    setActivePrimaryMaterial(tpl.primaryMaterial);
-    onLivePreviewSpec(updatedSpec, null, tpl.primaryMaterial);
+    setActivePrimaryMaterial(nextElemMats.exteriorCladding);
+    onLivePreviewSpec(updatedSpec, null, nextElemMats.exteriorCladding);
   };
 
   const handleResetSiteShape = (shapeId: Exclude<SiteShape, 'custom'>) => {
@@ -529,7 +662,7 @@ export default function BuildingSpecBuilder({
       sitePolygon: freshPolygon,
     };
     setSpecState(next);
-    onLivePreviewSpec(next, null, activePrimaryMaterial);
+    onLivePreviewSpec(next, null, curMaterials.exteriorCladding);
   };
 
   const categories: {
@@ -555,7 +688,7 @@ export default function BuildingSpecBuilder({
           min: 100,
           max: 20000,
           step: 10,
-          lawNote: `대지 200㎡ 이상 시 조경 최소 ${limits.minGardenAreaSqm}㎡ · 자유형 경계 드래그 시 자동 연동`,
+          lawNote: `대지 200㎡ 이상 시 조경 최소 ${limits.minGardenAreaSqm}㎡ · 자유형 경계 드래그 연동`,
         },
         {
           key: 'buildingAreaSqm',
@@ -614,7 +747,7 @@ export default function BuildingSpecBuilder({
           min: 0,
           max: 6,
           step: 1,
-          lawNote: '지하층은 용적률에서 제외되며 0층 설정 시 지하 볼륨 제거',
+          lawNote: '지하층은 용적률에서 제외되며 0층 설정 시 토목비 절감',
         },
         {
           key: 'undergroundAreaSqm',
@@ -688,17 +821,58 @@ export default function BuildingSpecBuilder({
     },
   ];
 
+  const physics = specState.structuralReport;
+  const budget = specState.budgetReport;
+
   return (
     <div className="space-y-2.5 text-slate-800">
-      {/* 여러 장 사진 업로드 -> Vision AI 건축 DNA 정밀 추출 & 10종 템플릿 생성 */}
+      {/* 실시간 KDS 구조 안전 & 물량산출(QTO) 예상 공사비 요약 바 */}
+      {(physics || budget) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-slate-900 text-white">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {physics && (
+              <span
+                className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-extrabold shrink-0 ${
+                  physics.overallSafety === 'unsafe'
+                    ? 'bg-red-600 text-white'
+                    : physics.overallSafety === 'caution'
+                    ? 'bg-amber-500 text-slate-950'
+                    : 'bg-emerald-500 text-slate-950'
+                }`}
+              >
+                {physics.overallSafety === 'unsafe'
+                  ? `위험 DCR ${Math.round(physics.maxDcr * 100)}%`
+                  : physics.overallSafety === 'caution'
+                  ? `주의 DCR ${Math.round(physics.maxDcr * 100)}%`
+                  : `안전 DCR ${Math.round(physics.maxDcr * 100)}%`}
+              </span>
+            )}
+            <span className="text-[10.5px] font-bold text-slate-200 truncate">
+              {STRUCTURAL_SYSTEM_DB[curMaterials.structuralSystem].nameKo}
+            </span>
+          </div>
+          {budget && (
+            <div className="text-right shrink-0">
+              <span className="font-mono text-xs font-extrabold text-amber-300">
+                {formatKrwReadable(budget.grandTotalKrw)}
+              </span>
+              <span className="ml-1.5 font-mono text-[10px] text-slate-300">
+                (평당 {Math.round(budget.costPerPyeongKrw / 10000).toLocaleString()}만)
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 여러 장 사진 업로드 -> Vision AI 구조·자재 DNA 추출 & 10종 템플릿 생성 */}
       <div className="p-2 rounded-xl bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-200 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <span className="text-[10.5px] font-extrabold text-sky-900 block">
-              원하는 집 사진 넣기 (Vision AI 건축 DNA 정밀 분석)
+              원하는 집 사진 넣기 (Vision AI 골조·자재·지붕 분석)
             </span>
             <span className="text-[9.5px] text-slate-600 block truncate">
-              지붕 각도·처마·창호 비율·1F/상층 외장재·실내 분위기를 추출해 10종 템플릿을 생성합니다
+              색상뿐 아니라 실제 골조(RC/철골/중목)·외장재·창호·지붕을 추출합니다
             </span>
           </div>
           <input
@@ -720,7 +894,7 @@ export default function BuildingSpecBuilder({
               className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-[10.5px] cursor-pointer shadow-xs disabled:opacity-50"
             >
               {isAnalyzingPhoto
-                ? 'Vision AI 분석 중...'
+                ? '분석 중...'
                 : refPhotos.length > 0
                 ? `+ 사진 추가 (${refPhotos.length}/6)`
                 : '사진 선택'}
@@ -745,9 +919,9 @@ export default function BuildingSpecBuilder({
                   <img
                     src={url}
                     alt={`참조 사진 ${idx + 1}`}
-                    className="w-12 h-12 rounded-md object-cover border border-slate-300"
+                    className="w-11 h-11 rounded-md object-cover border border-slate-300"
                   />
-                  <span className="absolute bottom-0.5 left-0.5 px-1 rounded bg-slate-900/80 text-white font-mono text-[8.5px]">
+                  <span className="absolute bottom-0.5 left-0.5 px-1 rounded bg-slate-900/80 text-white font-mono text-[8px]">
                     {idx === 0 ? '외벽' : idx === 1 ? '지붕' : idx === 2 ? '실내' : `#${idx + 1}`}
                   </span>
                   <button
@@ -764,32 +938,27 @@ export default function BuildingSpecBuilder({
 
             {extractedStyle && (
               <div className="space-y-1">
-                <div className="flex items-center justify-between gap-1">
-                  <span
-                    className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
-                      extractedStyle.analysisSource === 'vision-ai'
-                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                        : 'bg-amber-100 text-amber-800 border border-amber-300'
-                    }`}
-                  >
-                    {extractedStyle.analysisSource === 'vision-ai'
-                      ? `✓ Vision AI 분석 완료 · ${extractedStyle.modelUsed}`
-                      : `⚠ ${extractedStyle.modelUsed}`}
-                  </span>
-                </div>
+                <span
+                  className={`inline-block px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
+                    extractedStyle.analysisSource === 'vision-ai'
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                      : 'bg-amber-100 text-amber-800 border border-amber-300'
+                  }`}
+                >
+                  {extractedStyle.analysisSource === 'vision-ai'
+                    ? `✓ Vision AI 분석 · ${extractedStyle.modelUsed}`
+                    : `⚠ ${extractedStyle.modelUsed}`}
+                </span>
                 <div className="text-[10px] font-bold text-slate-900 leading-snug">
                   {extractedStyle.styleSummary}
                 </div>
-                <div className="flex flex-wrap gap-1">
-                  {extractedStyle.tags.map((tag, idx) => (
-                    <span
-                      key={idx}
-                      className="px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 font-mono text-[9px] font-bold"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
+                {extractedStyle.materialBreakdown.length > 0 && (
+                  <div className="bg-slate-50 border border-slate-200 rounded p-1.5 text-[9.5px] text-slate-700 space-y-0.5">
+                    {extractedStyle.materialBreakdown.map((item, idx) => (
+                      <div key={idx}>• {item}</div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -822,6 +991,121 @@ export default function BuildingSpecBuilder({
         </div>
       </div>
 
+      {/* 주구조 골조 & 핵심 자재 바로 선택 (접이식 세부 자재 포함) */}
+      <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10.5px] font-extrabold text-slate-800">
+            주구조 골조 & 외장·창호 자재 (실시간 예산 연동)
+          </span>
+          <button
+            type="button"
+            onClick={() => setIsMaterialBoxOpen((v) => !v)}
+            className="text-[10px] font-bold text-sky-700 hover:underline cursor-pointer"
+          >
+            {isMaterialBoxOpen ? '자재 접기 ▲' : '외벽·창호·지붕 변경 ▼'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-4 gap-1">
+          {STRUCTURAL_BUTTONS.map((btn) => {
+            const active = curMaterials.structuralSystem === btn.id;
+            const disabledTimber = btn.id === 'heavy_timber' && specState.floors >= 4;
+            return (
+              <button
+                key={btn.id}
+                type="button"
+                disabled={disabledTimber}
+                onClick={() => handleUpdateElementMaterials({ structuralSystem: btn.id })}
+                className={`py-1 px-1 rounded text-[10px] font-bold border cursor-pointer transition disabled:opacity-40 ${
+                  active
+                    ? 'bg-sky-700 text-white border-sky-800 shadow-xs'
+                    : 'bg-white text-slate-700 border-slate-300 hover:border-sky-400'
+                }`}
+              >
+                {btn.shortLabel}
+              </button>
+            );
+          })}
+        </div>
+
+        {isMaterialBoxOpen && (
+          <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-200 text-[10.5px]">
+            <div>
+              <label className="text-[9.5px] font-bold text-slate-500 block mb-0.5">1층 외벽</label>
+              <select
+                value={curMaterials.exteriorCladding}
+                onChange={(e) =>
+                  handleUpdateElementMaterials({ exteriorCladding: e.target.value as CadMaterial })
+                }
+                className="w-full bg-white border border-slate-300 rounded px-1.5 py-1 font-bold"
+              >
+                {CLADDING_SELECT_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[9.5px] font-bold text-slate-500 block mb-0.5">상층 외벽</label>
+              <select
+                value={curMaterials.upperCladding}
+                onChange={(e) =>
+                  handleUpdateElementMaterials({ upperCladding: e.target.value as CadMaterial })
+                }
+                className="w-full bg-white border border-slate-300 rounded px-1.5 py-1 font-bold"
+              >
+                {CLADDING_SELECT_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[9.5px] font-bold text-slate-500 block mb-0.5">지붕 마감</label>
+              <select
+                value={curMaterials.roofMaterial}
+                onChange={(e) =>
+                  handleUpdateElementMaterials({ roofMaterial: e.target.value as CadMaterial })
+                }
+                className="w-full bg-white border border-slate-300 rounded px-1.5 py-1 font-bold"
+              >
+                {CLADDING_SELECT_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[9.5px] font-bold text-slate-500 block mb-0.5">
+                창호 등급 ({Math.round((specState.windowWallRatio ?? 0.56) * 100)}%)
+              </label>
+              <select
+                value={curMaterials.glazingSpec}
+                onChange={(e) => {
+                  const g = e.target.value as GlazingSpec;
+                  handleUpdateElementMaterials(
+                    { glazingSpec: g },
+                    g === 'curtain_wall'
+                      ? Math.max(0.72, specState.windowWallRatio ?? 0.72)
+                      : Math.min(0.6, specState.windowWallRatio ?? 0.52)
+                  );
+                }}
+                className="w-full bg-white border border-slate-300 rounded px-1.5 py-1 font-bold"
+              >
+                {GLAZING_SELECT_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* 자유형 대지 경계 편집 (마우스/제스처 드래그) + 기본형 빠른 초기화 */}
       <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
@@ -831,7 +1115,7 @@ export default function BuildingSpecBuilder({
               {specState.siteAreaSqm.toLocaleString()}㎡)
             </span>
             <span className="text-[9.5px] text-slate-500 block">
-              경계 핀을 마우스·제스처로 드래그하면 건물이 깨지지 않고 내부에 자동 재구성됩니다
+              파란 핀을 드래그하면 건물이 깨지지 않고 경계 내부에 자동 재구성됩니다
             </span>
           </div>
           <button
@@ -855,7 +1139,7 @@ export default function BuildingSpecBuilder({
               onChange={(e) => {
                 const next = { ...specState, lockSiteAreaOnDrag: e.target.checked };
                 setSpecState(next);
-                onLivePreviewSpec(next, null, activePrimaryMaterial);
+                onLivePreviewSpec(next, null, curMaterials.exteriorCladding);
               }}
               className="accent-sky-600 cursor-pointer"
             />
@@ -888,7 +1172,7 @@ export default function BuildingSpecBuilder({
         </div>
       </div>
 
-      {/* 단독주택 10종(또는 용도별) 디자인 템플릿 선택 그리드 */}
+      {/* 10종 디자인 템플릿 선택 그리드 */}
       {templatesForCurrent.length > 0 && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
@@ -902,7 +1186,7 @@ export default function BuildingSpecBuilder({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-1.5 max-h-[210px] overflow-y-auto pr-1">
+          <div className="grid grid-cols-2 gap-1.5 max-h-[185px] overflow-y-auto pr-1">
             {templatesForCurrent.map((tpl, idx) => {
               const isSelected =
                 (specState.selectedTemplateName && specState.selectedTemplateName === tpl.name) ||
@@ -950,13 +1234,6 @@ export default function BuildingSpecBuilder({
                     >
                       {tpl.structureBadge}
                     </span>
-                    <span
-                      className={`px-1 py-0.2 rounded font-mono text-[8.5px] ${
-                        isSelected ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-800'
-                      }`}
-                    >
-                      1F {tpl.primaryMaterial.toUpperCase()} · 상층 {tpl.accentMaterial.toUpperCase()}
-                    </span>
                   </div>
                 </button>
               );
@@ -966,7 +1243,7 @@ export default function BuildingSpecBuilder({
       )}
 
       {/* 카테고리별 구분선이 적용된 아코디언 제원 리스트 */}
-      <div className="max-h-[22vh] overflow-y-auto pr-1 space-y-3">
+      <div className="max-h-[21vh] overflow-y-auto pr-1 space-y-3">
         {categories.map((cat) => (
           <div key={cat.groupTitle} className="space-y-1">
             <div className="flex items-center gap-2 pt-1">
@@ -988,7 +1265,7 @@ export default function BuildingSpecBuilder({
                 onToggle={() => {
                   const nextKey = expandedKey === item.key ? null : item.key;
                   setExpandedKey(nextKey);
-                  if (!nextKey) onLivePreviewSpec(specState, null, activePrimaryMaterial);
+                  if (!nextKey) onLivePreviewSpec(specState, null, curMaterials.exteriorCladding);
                 }}
                 label={item.label}
                 unit={item.unit}
@@ -1010,8 +1287,8 @@ export default function BuildingSpecBuilder({
         <button
           onClick={() => {
             setBaselineSpec(specState);
-            onLivePreviewSpec(specState, null, activePrimaryMaterial);
-            onSubmitSpec(specState, activePrimaryMaterial);
+            onLivePreviewSpec(specState, null, curMaterials.exteriorCladding);
+            onSubmitSpec(specState, curMaterials.exteriorCladding);
           }}
           disabled={isGenerating}
           className="flex-1 py-2 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50 shadow-sm transition"

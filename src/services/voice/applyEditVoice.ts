@@ -15,10 +15,12 @@ import {
   solidFaceFacing,
   endRadius,
   latheOf,
+  ROUND_SHAPES,
   type EditOp,
   type FaceTarget,
   type Vec3,
 } from '../sketchOps';
+import { LATHE_R } from '../latheShape';
 import type { MoveDirection, VoiceCommand } from './voiceCommand';
 
 /** 화면 기준 방향 → 월드 축 (위·아래는 항상 Y, 좌우·앞뒤는 카메라 방향을 수평으로 눕혀서 가까운 축) */
@@ -119,4 +121,26 @@ export function voiceLatheOp(
     op: { kind: 'bore', solidId: cyl.id },
     dist,
   };
+}
+
+/**
+ * 음성 지름 (선택된 첫 둥근 물체).
+ *   end 없음: 전체 지름 (원기둥·원뿔·구)
+ *   end 있음: 원기둥 그 끝면만 = 면 크기 비율로 환산 (윗면 지름 1미터 → 원뿔대)
+ */
+export function voiceDiameterOp(
+  s: StructureState,
+  sel: Selection,
+  cmd: Extract<VoiceCommand, { type: 'diameter' }>,
+): { op: EditOp; dist: number } | { error: string } {
+  const round = (s.solids ?? []).filter((x) => sel.solidIds.includes(x.id) && ROUND_SHAPES.has(x.shape));
+  if (cmd.end) {
+    const cyl = round.find((x) => x.shape === 'cylinder');
+    if (!cyl) return { error: '윗면·아랫면 지름은 원기둥만 돼요' };
+    const base = latheOf(cyl)[cmd.end];
+    const ratio = cmd.meters / 2 / (LATHE_R * cyl.scale[0]);
+    return { op: { kind: 'taper', solidId: cyl.id, end: cmd.end, base }, dist: ratio - base };
+  }
+  if (!round[0]) return { error: '지름은 원기둥·원뿔·구만 돼요 (원 그리기로 원기둥을 만들 수 있어요)' };
+  return { op: { kind: 'diameter', solidId: round[0].id }, dist: cmd.meters };
 }

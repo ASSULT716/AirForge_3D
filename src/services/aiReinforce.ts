@@ -7,17 +7,19 @@ import {
   SolidShape,
   DesignCandidate,
   ChatMessage,
+  BuildingSpec,
 } from '../types/cad';
+import {
+  evaluateBuildingSpec,
+  MATERIAL_CATALOG,
+  syncBuildingWithSolids,
+} from '../utils/buildingEstimator';
+import {
+  generateWatertightArchitecture,
+  BUILDING_TEMPLATES_BY_CATEGORY,
+} from '../utils/architectureGenerator';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-
-const MATERIAL_DEFAULT_COLORS: Record<CadMaterial, string> = {
-  hologram: '#00f3ff',
-  steel: '#e2e8f0',
-  titanium: '#64748b',
-  carbon: '#1e293b',
-  gold: '#fbbf24',
-};
 
 function computeSceneBounds(current: StructureState) {
   let minX = Infinity, maxX = -Infinity;
@@ -35,16 +37,6 @@ function computeSceneBounds(current: StructureState) {
     maxZ = Math.max(maxZ, z + sz * 0.5);
   });
 
-  current.nodes.forEach((n) => {
-    const [x, y, z] = n.position;
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
-    minZ = Math.min(minZ, z);
-    maxZ = Math.max(maxZ, z);
-  });
-
   if (!Number.isFinite(minX)) {
     return { isEmpty: true, minX: 0, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0 };
   }
@@ -59,68 +51,141 @@ function computeSceneBounds(current: StructureState) {
   };
 }
 
-// 서브 기능: 요청받은 부위만 트러스 보강
-function applyTargetedReinforcement(current: StructureState, prompt: string, prefix: string): StructureState {
-  const primaryNodes: NodePoint[] = current.nodes
-    .filter((n) => n.role !== 'reinforcement')
-    .map((n) => ({ ...n, role: 'primary' }));
-  const primaryIds = new Set(primaryNodes.map((n) => n.id));
-  const primaryBeams: BeamMember[] = current.beams
-    .filter((b) => b.role !== 'reinforcement' && primaryIds.has(b.startNodeId) && primaryIds.has(b.endNodeId))
-    .map((b) => ({ ...b, role: 'primary', stress: 0.18 }));
-
-  let targetNodes = primaryNodes;
-  if (prompt.includes('오른쪽') || prompt.includes('우측')) {
-    targetNodes = primaryNodes.filter((n) => n.position[0] >= 0);
-  } else if (prompt.includes('왼쪽') || prompt.includes('좌측')) {
-    targetNodes = primaryNodes.filter((n) => n.position[0] <= 0);
-  }
-  if (targetNodes.length < 2) targetNodes = primaryNodes;
-
-  const newBeams = [...primaryBeams];
-  let added = 0;
-  for (let i = 0; i < targetNodes.length; i++) {
-    for (let j = i + 1; j < targetNodes.length; j++) {
-      const a = targetNodes[i];
-      const b = targetNodes[j];
-      const dist = Math.hypot(a.position[0] - b.position[0], a.position[1] - b.position[1], a.position[2] - b.position[2]);
-      const exists = newBeams.some(
-        (bm) => (bm.startNodeId === a.id && bm.endNodeId === b.id) || (bm.startNodeId === b.id && bm.endNodeId === a.id)
-      );
-      if (!exists && dist > 0.25 && dist <= 1.8) {
-        newBeams.push({
-          id: `reinf_${i}_${j}_${Date.now()}`,
-          groupName: a.groupName ?? '보강구조',
-          startNodeId: a.id,
-          endNodeId: b.id,
-          stress: 0.15,
-          material: current.activeMaterial,
-          color: current.activeColor,
-          role: 'reinforcement',
-        });
-        added += 1;
-      }
-    }
-  }
-
-  return {
-    ...current,
-    nodes: primaryNodes,
-    beams: newBeams,
-    statusMessage: `${prefix} 지정 부위 보강 완료 (${added}개 부재 추가)`,
-  };
-}
-
 export async function reinforceStructure(current: StructureState): Promise<StructureState> {
   return executeNaturalCommand(
-    `현재 모델의 취약 부위만 ${current.targetLoadKg}kg 하중을 견디도록 트러스 지지대로 보강해줘.`,
+    `현재 구조물의 취약 부위만 ${current.targetLoadKg}kg 하중을 견디도록 트러스 보강 부재를 추가해줘.`,
     current
   );
 }
 
+export async function buildFromSpecUI(
+  spec: BuildingSpec,
+  current: StructureState
+): Promise<StructureState> {
+  const { spec: fullSpec, solids, nodes, beams } = generateWatertightArchitecture(
+    spec,
+    current.activeMaterial
+  );
+  const report = evaluateBuildingSpec(fullSpec, current.activeMaterial);
+  const eok = (report.totalMaterialCost / 100000000).toFixed(1);
+
+  const summary = `'${fullSpec.projectName}' (${fullSpec.usageType}) 건축물을 생성했습니다.\n• 내벽·외벽·창호 ${fullSpec.exteriorWindows?.length ?? 0}개소·옥상 난간·수도/전기 배관 ${fullSpec.mepPipes?.length ?? 0}계통 빈틈없이 조립 완료\n• 총 예상 공사 자재비: 약 ${eok}억 원`;
+
+  return {
+    ...current,
+    buildingSpec: fullSpec,
+    solids,
+    nodes,
+    beams,
+    activeSpecViz: null,
+    statusMessage: `'${fullSpec.projectName}' 생성 완료`,
+    chatHistory: [
+      ...(current.chatHistory ?? []),
+      {
+        id: `msg_build_${Date.now()}`,
+        role: 'assistant' as const,
+        text: summary,
+        timestamp: Date.now(),
+      },
+    ].slice(-14),
+  };
+}
+
+export async function regenerateDesignVariation(current: StructureState): Promise<StructureState> {
+  const spec = current.buildingSpec;
+  if (!spec || spec.usageType === '3D 디자인') {
+    return executeNaturalCommand(
+      '기존 조건을 유지하면서 세계적인 건축가 작품처럼 조형미가 뛰어난 새로운 3D 디자인으로 다시 생성해줘.',
+      current
+    );
+  }
+  const list = BUILDING_TEMPLATES_BY_CATEGORY[spec.usageType];
+  const curIdx = list.findIndex((t) => t.id === spec.templateId);
+  const nextTpl = list[(curIdx + 1) % list.length];
+
+  return buildFromSpecUI(
+    {
+      ...spec,
+      templateId: nextTpl.id,
+      projectName: `AirForge ${nextTpl.name}`,
+      designConcept: nextTpl.concept,
+    },
+    current
+  );
+}
+
+const SYSTEM_PROMPT = `You are AirForge 3D's Lead Architectural Sculptor & 3D Printing CAD Copilot.
+
+Return ONLY valid JSON matching this exact schema:
+{
+  "intent": "build_architecture" | "modify_in_place" | "delete_part" | "clear" | "replace_scene" | "add_object" | "style_or_tool" | "camera_only",
+  "assistantReply": "Natural, professional Korean response",
+  "buildingSpec": {
+    "projectName": "string",
+    "usageType": "단독주택" | "공동주택" | "업무·상업시설" | "복합문화시설" | "3D 디자인",
+    "siteAreaSqm": number,
+    "buildingAreaSqm": number,
+    "totalFloorAreaSqm": number,
+    "undergroundAreaSqm": number,
+    "undergroundFloors": number,
+    "heightMeters": number,
+    "floors": number,
+    "households": number,
+    "unitTypeCount": number,
+    "elevators": number,
+    "stairs": number,
+    "rooftops": number,
+    "gardenAreaSqm": number,
+    "designConcept": "string"
+  } | null,
+  "partPatches": [
+    {
+      "id": "existing solid id or empty to match by groupName",
+      "groupName": "target groupName (e.g. 지붕, 메인동, 별채, 기둥)",
+      "position": [x, y, z] | null,
+      "scale": [sx, sy, sz] | null,
+      "rotation": [rx, ry, rz] | null,
+      "color": "#hex" | null,
+      "material": "stucco|wood|concrete|glass|steel|titanium|gold" | null
+    }
+  ],
+  "deleteFilter": {
+    "groupNames": [],
+    "solidIds": [],
+    "nodeIds": [],
+    "region": "all" | "left" | "right" | "top" | "bottom" | "reinforcement"
+  },
+  "solids": [],
+  "nodes": [],
+  "beams": [],
+  "activeTool": "draw" | "erase" | "move" | "deform" | "spray" | null,
+  "activeMaterial": "stucco" | "wood" | "concrete" | "glass" | "steel" | "titanium" | "gold" | null,
+  "activeColor": "#hex" | null,
+  "targetLoadKg": number | null,
+  "isSimulating": boolean | null,
+  "camera": { "changed": boolean, "mode": "free"|"auto_rotate"|"step_rotate"|"preset", "yawDeg": number, "pitchDeg": number, "speed": number, "zoomFactor": number, "preset": "front"|"top"|"iso" }
+}
+
+CRITICAL DESIGN & EDITING RULES:
+1. BRIGHT GALLERY-WORTHY ARCHITECTURE ("build_architecture"):
+   - NEVER make a plain single rectangle or ugly random stack! Compose an iconic, museum-grade modern architectural sculpture using 12-18 harmonious, interlocking volumes with bright daylight colors:
+     * Warm White Stucco ("#f8fafc", material: "stucco"), Natural Oak Wood louvers/soffits ("#e7d5be", material: "wood"), Light Architectural Concrete ("#e2e8f0", material: "concrete"), Sky-tinted Low-E Glass ("#bae6fd", material: "glass"), Soft Mint Garden Lawn ("#86efac", thin slab y=0.03).
+     * Compose an L-shaped or U-shaped courtyard ground floor, dramatic cantilevered 2nd/3rd floor volumes rotated or offset at clean architectural angles, floating roof canopies, sculptural cylindrical/conical atrium skylights, and slender perimeter columns (nodes & beams).
+     * Give descriptive Korean "groupName" to each part (e.g., "1층 메인동", "2층 캔틸레버동", "경사 지붕", "중정 정원", "수직 코어", "테라스 데크") so the user can later modify specific parts!
+   - If undergroundFloors > 0 and undergroundAreaSqm > 0: place a clean light-slate basement volume below y = 0 (center y = -0.3 * undergroundFloors, scaleY = 0.6 * undergroundFloors, color "#cbd5e1", material "concrete").
+   - All above-ground grounded elements must rest flush on y = 0 (center y = scaleY / 2).
+
+2. IN-PLACE PARTIAL MODIFICATION ("modify_in_place") — VERY IMPORTANT:
+   - When the user asks to modify an existing part (e.g. "지붕을 높여줘", "2층을 나무 재질로 바꿔줘", "왼쪽 날개를 넓혀줘", "특정 부위 색/크기 변경"), DO NOT return "clear" or "replace_scene" and DO NOT spawn duplicate solids!
+   - Instead, use intent: "modify_in_place" and populate "partPatches" matching the existing solid's "id" or "groupName" from currentState.solids, specifying ONLY the updated scale/position/rotation/material/color!
+
+3. 3D PRINTING / FREE 3D DESIGN MODE ("replace_scene" or "add_object"):
+   - When usageType is "3D 디자인" (e.g. mechanical bracket, vase, drone frame, figurine, custom 3D printable part), generate clean, manifold, watertight 3D printable geometry using smooth solids (cylinder, torus, cone, sphere, box) in bright studio colors ("#f8fafc", "#e2e8f0", "#bae6fd", "#fde68a").`;
+
 export async function executeNaturalCommand(
   userPrompt: string,
-  current: StructureState
+  current: StructureState,
+  lockedSpec?: BuildingSpec
 ): Promise<StructureState> {
   const userMsg: ChatMessage = {
     id: `msg_u_${Date.now()}`,
@@ -131,20 +196,15 @@ export async function executeNaturalCommand(
 
   const apiKey = import.meta.env.VITE_GROQ_API_KEY;
   if (!apiKey || apiKey === '여기에_API_키_입력') {
-    return applyTargetedReinforcement(current, userPrompt, '[.env 키 확인 필요]');
+    return {
+      ...current,
+      statusMessage: '[.env 키 확인 필요] VITE_GROQ_API_KEY를 설정해 주세요.',
+    };
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 12000);
+  const timeoutId = setTimeout(() => controller.abort(), 14000);
   const bounds = computeSceneBounds(current);
-
-  // 현재 씬에 존재하는 그룹명 목록 추출
-  const existingGroups = Array.from(
-    new Set([
-      ...(current.solids ?? []).map((s) => s.groupName).filter(Boolean),
-      ...current.nodes.map((n) => n.groupName).filter(Boolean),
-    ])
-  );
 
   const recentHistory = (current.chatHistory ?? []).slice(-4).map((m) => ({
     role: m.role,
@@ -163,72 +223,33 @@ export async function executeNaturalCommand(
         model: 'openai/gpt-oss-120b',
         reasoning_effort: 'medium',
         max_completion_tokens: 4096,
-        temperature: 0.25,
+        temperature: 0.3,
         response_format: { type: 'json_object' },
         messages: [
           {
             role: 'system',
-            content: `You are AirForge 3D's Conversational AI CAD Architect.
-You collaborate with the user in natural, friendly Korean—asking clarifying questions and offering 3 distinct 3D preview candidates whenever a request is ambiguous, while executing precise operations immediately when details are clear.
-
-Return ONLY valid JSON matching this schema:
-{
-  "intent": "clarify_and_preview" | "delete_part" | "clear" | "replace_scene" | "add_object" | "transform_existing" | "reinforce_part" | "style_or_tool" | "camera_only",
-  "assistantReply": "Conversational Korean response (spoken-friendly, concise, asks specific follow-up details if ambiguous)",
-  "candidates": [
-    {
-      "id": "cand_1",
-      "title": "시안 1: 짧은 제목",
-      "description": "형태, 층수/치수, 배치 위치 요약",
-      "solids": [{ "id": "s1", "groupName": "건물", "shape": "box|sphere|cylinder|cone|torus", "position": [x,y,z], "scale": [sx,sy,sz], "rotation": [rx,ry,rz], "color": "#hex or null", "material": "hologram|steel|titanium|carbon|gold or null", "isFixed": boolean }],
-      "nodes": [{ "id": "n1", "groupName": "건물", "position": [x,y,z], "isFixed": boolean, "role": "primary" }],
-      "beams": [{ "id": "b1", "groupName": "건물", "startNodeId": "n1", "endNodeId": "n2", "stress": 0.2, "role": "primary" }]
-    }
-  ],
-  "deleteFilter": {
-    "groupNames": ["다리"],
-    "solidIds": [],
-    "nodeIds": [],
-    "region": "all" | "left" | "right" | "top" | "bottom" | "reinforcement"
-  },
-  "solids": [],
-  "nodes": [],
-  "beams": [],
-  "activeTool": "draw" | "erase" | "move" | "deform" | "spray" | null,
-  "activeMaterial": "hologram" | "steel" | "titanium" | "carbon" | "gold" | null,
-  "activeColor": "#hex" | null,
-  "targetLoadKg": number | null,
-  "isSimulating": boolean | null,
-  "camera": { "changed": boolean, "mode": "free"|"auto_rotate"|"step_rotate"|"preset", "yawDeg": number, "pitchDeg": number, "speed": number, "zoomFactor": number, "preset": "front"|"top"|"iso" }
-}
-
-CRITICAL RULES:
-1. PARTIAL DELETION ("다리만 지워", "건물 지워", "보강재만 삭제해", "왼쪽 구조물 지워"):
-   - NEVER use "clear" unless the user says "다 지워" or "전체 초기화"!
-   - Use intent: "delete_part" and populate "deleteFilter.groupNames" (matching existingGroups such as ["다리"] or ["건물"]) and/or "deleteFilter.region".
-   - If the user says an ambiguous deletion like "저거 지워" or "하나 지워" when existingGroups has 2+ items (e.g., ["다리", "건물"]), use "clarify_and_preview" with empty candidates and ask: "현재 화면에 건물과 다리가 있습니다. 어떤 구조물을 지울까요? (예: '다리만 지워')"
-2. CONVERSATIONAL CLARIFICATION & 3 PREVIEW CANDIDATES ("clarify_and_preview"):
-   - Trigger this when the user gives an underspecified design prompt (e.g., "건물 세워줘", "다리 만들어줘", "의자 디자인해줘", "멋진 구조물 추가해줘") WITHOUT specifying exact dimensions, style, or sub-type!
-   - In "assistantReply", naturally ask for details (e.g., "어떤 스타일로 만들어 드릴까요? 층수나 재질, 원하는 위치를 말씀해 주시거나 아래 3가지 예상 시안 중 마음에 드는 것을 선택해 주세요.")
-   - Generate 3 genuinely distinct 3D candidates in "candidates" (e.g., for "건물 세워줘": 1. 3층 계단식 오피스 빌딩, 2. 원통형 스파이럴 타워, 3. 피라미드 첨탑 랜드마크).
-   - IMPORTANT: If existing objects are already in the scene (sceneBounds.isEmpty === false) and the user didn't say "다 지우고", each candidate MUST include the existing solids/nodes/beams PLUS the new object offset at x = sceneBounds.maxX + 1.5 so nothing gets accidentally wiped!
-3. DIRECT EXECUTION ("add_object", "replace_scene", "transform_existing", "reinforce_part"):
-   - Trigger when the user gives concrete details OR replies to your question (e.g. "2번 시안으로 해줘", "3층 스틸 건물로 오른쪽에 세워줘", "다 지우고 금색 구체 띄워").
-   - Always assign a clear Korean "groupName" (e.g. "건물", "다리", "구체") to every solid, node, and beam so future partial edits/deletions work accurately.
-   - Grounded objects must sit cleanly on y = 0 (center y = scaleY / 2).
-   - Leave activeMaterial, activeColor, activeTool, targetLoadKg, isSimulating as NULL unless explicitly requested.`,
+            content: SYSTEM_PROMPT,
           },
           ...recentHistory,
           {
             role: 'user',
             content: JSON.stringify({
               command: userPrompt,
-              existingGroups,
+              currentBuildingSpec: lockedSpec ?? current.buildingSpec ?? null,
               sceneBounds: bounds,
               currentState: {
                 activeMaterial: current.activeMaterial,
                 activeColor: current.activeColor,
-                solids: current.solids ?? [],
+                solids: (current.solids ?? []).map((s) => ({
+                  id: s.id,
+                  groupName: s.groupName,
+                  shape: s.shape,
+                  position: s.position,
+                  scale: s.scale,
+                  rotation: s.rotation,
+                  color: s.color,
+                  material: s.material,
+                })),
                 nodes: current.nodes,
                 beams: current.beams,
               },
@@ -255,26 +276,33 @@ CRITICAL RULES:
       res.activeColor && typeof res.activeColor === 'string' && res.activeColor.startsWith('#')
         ? res.activeColor
         : matChanged
-        ? MATERIAL_DEFAULT_COLORS[nextMaterial]
+        ? MATERIAL_CATALOG[nextMaterial]?.hex ?? current.activeColor
         : current.activeColor;
 
     const mapSolids = (arr: any[]): SolidPrimitive[] =>
-      (arr || []).map((s: any, idx: number) => ({
-        id: String(s.id || `solid_${Date.now()}_${idx}`),
-        groupName: s.groupName ? String(s.groupName) : '구조물',
-        shape: (['sphere', 'box', 'cylinder', 'cone', 'torus'].includes(s.shape) ? s.shape : 'box') as SolidShape,
-        position: [Number(s.position?.[0] ?? 0), Number(s.position?.[1] ?? 1), Number(s.position?.[2] ?? 0)],
-        scale: [Number(s.scale?.[0] ?? 1), Number(s.scale?.[1] ?? 1), Number(s.scale?.[2] ?? 1)],
-        rotation: s.rotation ? [Number(s.rotation[0] ?? 0), Number(s.rotation[1] ?? 0), Number(s.rotation[2] ?? 0)] : undefined,
-        color: s.color && String(s.color).startsWith('#') ? String(s.color) : nextColor,
-        material: s.material ?? nextMaterial,
-        isFixed: Boolean(s.isFixed),
-      }));
+      (arr || []).map((s: any, idx: number) => {
+        const mat: CadMaterial = s.material ?? nextMaterial ?? 'stucco';
+        const col =
+          s.color && String(s.color).startsWith('#')
+            ? String(s.color)
+            : MATERIAL_CATALOG[mat]?.hex ?? '#f8fafc';
+        return {
+          id: String(s.id || `solid_${Date.now()}_${idx}`),
+          groupName: s.groupName ? String(s.groupName) : '건축 매스',
+          shape: (['sphere', 'box', 'cylinder', 'cone', 'torus'].includes(s.shape) ? s.shape : 'box') as SolidShape,
+          position: [Number(s.position?.[0] ?? 0), Number(s.position?.[1] ?? 1), Number(s.position?.[2] ?? 0)],
+          scale: [Number(s.scale?.[0] ?? 1), Number(s.scale?.[1] ?? 1), Number(s.scale?.[2] ?? 1)],
+          rotation: s.rotation ? [Number(s.rotation[0] ?? 0), Number(s.rotation[1] ?? 0), Number(s.rotation[2] ?? 0)] : undefined,
+          color: col,
+          material: mat,
+          isFixed: Boolean(s.isFixed),
+        };
+      });
 
     const mapNodes = (arr: any[]): NodePoint[] =>
       (arr || []).map((n: any) => ({
         id: String(n.id),
-        groupName: n.groupName ? String(n.groupName) : '구조물',
+        groupName: n.groupName ? String(n.groupName) : '기둥 코어',
         position: [Number(n.position?.[0] ?? 0), Number(n.position?.[1] ?? 0), Number(n.position?.[2] ?? 0)],
         isFixed: Boolean(n.isFixed),
         role: n.role === 'reinforcement' ? 'reinforcement' : 'primary',
@@ -285,11 +313,11 @@ CRITICAL RULES:
         .filter((b: any) => validIds.has(b.startNodeId) && validIds.has(b.endNodeId))
         .map((b: any) => ({
           id: String(b.id),
-          groupName: b.groupName ? String(b.groupName) : '구조물',
+          groupName: b.groupName ? String(b.groupName) : '기둥 코어',
           startNodeId: String(b.startNodeId),
           endNodeId: String(b.endNodeId),
           stress: Math.max(0.05, Math.min(1, Number(b.stress ?? 0.2))),
-          color: nextColor,
+          color: '#cbd5e1',
           material: nextMaterial,
           role: b.role === 'reinforcement' ? 'reinforcement' : 'primary',
         }));
@@ -299,19 +327,96 @@ CRITICAL RULES:
     let nextBeams: BeamMember[] = current.beams;
     let nextCandidates: DesignCandidate[] | undefined = undefined;
 
-    if (res.intent === 'clarify_and_preview') {
-      nextCandidates = (res.candidates || []).slice(0, 3).map((c: any, idx: number) => {
-        const cNodes = mapNodes(c.nodes);
-        const validIds = new Set(cNodes.map((n) => n.id));
+    let nextBuildingSpec: BuildingSpec | undefined = lockedSpec
+      ? {
+          ...lockedSpec,
+          designConcept: res.buildingSpec?.designConcept
+            ? String(res.buildingSpec.designConcept)
+            : lockedSpec.designConcept,
+        }
+      : res.buildingSpec
+      ? {
+          projectName: String(res.buildingSpec.projectName || 'AirForge 모던 중정 단독주택'),
+          usageType: res.buildingSpec.usageType || '단독주택',
+          siteAreaSqm: Number(res.buildingSpec.siteAreaSqm || 450),
+          buildingAreaSqm: Number(res.buildingSpec.buildingAreaSqm || 210),
+          totalFloorAreaSqm: Number(res.buildingSpec.totalFloorAreaSqm || 420),
+          undergroundAreaSqm: Number(res.buildingSpec.undergroundAreaSqm ?? 180),
+          undergroundFloors: Number(res.buildingSpec.undergroundFloors ?? 1),
+          heightMeters: Number(res.buildingSpec.heightMeters || 10),
+          floors: Number(res.buildingSpec.floors || 2),
+          households: Number(res.buildingSpec.households || 1),
+          unitTypeCount: Number(res.buildingSpec.unitTypeCount || 2),
+          unitTypes: current.buildingSpec?.unitTypes,
+          exteriorWindows: current.buildingSpec?.exteriorWindows,
+          mepPipes: current.buildingSpec?.mepPipes,
+          floorLoadsKn: current.buildingSpec?.floorLoadsKn,
+          elevators: Number(res.buildingSpec.elevators ?? 0),
+          stairs: Number(res.buildingSpec.stairs || 1),
+          rooftops: Number(res.buildingSpec.rooftops || 1),
+          gardenAreaSqm: Number(res.buildingSpec.gardenAreaSqm || 80),
+          designConcept: res.buildingSpec.designConcept ? String(res.buildingSpec.designConcept) : undefined,
+        }
+      : current.buildingSpec;
+
+    let assistantText = String(res.assistantReply || '설계를 반영했습니다.');
+
+    if (res.intent === 'modify_in_place' && Array.isArray(res.partPatches) && res.partPatches.length > 0) {
+      // 기존 도형을 지우거나 중복 생성하지 않고 해당 부위만 제자리 수정
+      nextSolids = nextSolids.map((solid) => {
+        const patch = res.partPatches.find(
+          (p: any) =>
+            (p.id && p.id === solid.id) ||
+            (p.groupName &&
+              solid.groupName &&
+              solid.groupName.toLowerCase().includes(String(p.groupName).toLowerCase()))
+        );
+        if (!patch) return solid;
+        const patchedMat: CadMaterial = patch.material ?? solid.material ?? 'stucco';
+        const patchedColor =
+          patch.color && String(patch.color).startsWith('#')
+            ? String(patch.color)
+            : patch.material
+            ? MATERIAL_CATALOG[patchedMat]?.hex ?? solid.color
+            : solid.color;
         return {
-          id: String(c.id || `cand_${idx + 1}`),
-          title: String(c.title || `시안 ${idx + 1}`),
-          description: String(c.description || ''),
-          solids: mapSolids(c.solids),
-          nodes: cNodes,
-          beams: mapBeams(c.beams, validIds),
+          ...solid,
+          position: Array.isArray(patch.position)
+            ? [Number(patch.position[0]), Number(patch.position[1]), Number(patch.position[2])]
+            : solid.position,
+          scale: Array.isArray(patch.scale)
+            ? [Number(patch.scale[0]), Number(patch.scale[1]), Number(patch.scale[2])]
+            : solid.scale,
+          rotation: Array.isArray(patch.rotation)
+            ? [Number(patch.rotation[0]), Number(patch.rotation[1]), Number(patch.rotation[2])]
+            : solid.rotation,
+          material: patchedMat,
+          color: patchedColor,
         };
       });
+
+      if (nextBuildingSpec) {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
+      }
+    } else if (res.intent === 'build_architecture') {
+      if (nextBuildingSpec) {
+        // 건축 제원(BuildingSpec)이 있는 경우: 빈틈없는 내벽·외벽·창호·옥상 엔진으로 일체형 생성
+        const built = generateWatertightArchitecture(nextBuildingSpec, nextMaterial);
+        nextSolids = built.solids;
+        nextNodes = built.nodes;
+        nextBeams = built.beams;
+        nextBuildingSpec = built.spec;
+
+        const report = evaluateBuildingSpec(nextBuildingSpec, nextMaterial);
+        const eok = (report.totalMaterialCost / 100000000).toFixed(1);
+        assistantText += `\n\n[건축·설비·자재비 자동 연동 결과]\n• 내벽·외벽·창호 ${nextBuildingSpec.exteriorWindows?.length ?? 0}개소 및 수도·전기 배관 ${nextBuildingSpec.mepPipes?.length ?? 0}계통 빈틈없이 배치 완료\n• 총 예상 공사 자재비: 약 ${eok}억 원`;
+      } else {
+        // 건축 제원 없이 자유 조형(3D 디자인)만 요청한 경우: 기존 AI 솔리드 매핑 유지
+        nextSolids = mapSolids(res.solids);
+        nextNodes = mapNodes(res.nodes);
+        const validIds = new Set(nextNodes.map((n) => n.id));
+        nextBeams = mapBeams(res.beams, validIds);
+      }
     } else if (res.intent === 'delete_part') {
       const df = res.deleteFilter || {};
       const targetGroups: string[] = (df.groupNames || []).map((g: string) => g.toLowerCase());
@@ -353,15 +458,23 @@ CRITICAL RULES:
           !matchesGroup(b.groupName) &&
           !(region === 'reinforcement' && b.role === 'reinforcement')
       );
+
+      if (nextBuildingSpec && nextSolids.length > 0) {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
+      }
     } else if (res.intent === 'clear') {
       nextSolids = [];
       nextNodes = [];
       nextBeams = [];
-    } else if (res.intent === 'replace_scene' || res.intent === 'transform_existing') {
+      nextBuildingSpec = undefined;
+    } else if (res.intent === 'replace_scene') {
       nextSolids = mapSolids(res.solids);
       nextNodes = mapNodes(res.nodes);
       const validIds = new Set(nextNodes.map((n) => n.id));
       nextBeams = mapBeams(res.beams, validIds);
+      if (nextBuildingSpec && nextBuildingSpec.usageType !== '3D 디자인') {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
+      }
     } else if (res.intent === 'add_object') {
       const addedSolids = mapSolids(res.solids);
       const addedNodes = mapNodes(res.nodes);
@@ -371,21 +484,18 @@ CRITICAL RULES:
       nextSolids = [...nextSolids, ...addedSolids];
       nextNodes = allNodes;
       nextBeams = [...nextBeams, ...addedBeams];
-    } else if (res.intent === 'reinforce_part') {
-      if ((res.nodes || []).length > 0 || (res.beams || []).length > 0) {
-        const mergedNodes = (res.nodes || []).length > 0 ? mapNodes(res.nodes) : nextNodes;
-        const validIds = new Set(mergedNodes.map((n) => n.id));
-        nextNodes = mergedNodes;
-        nextBeams = mapBeams(res.beams, validIds);
-      } else {
-        return applyTargetedReinforcement(current, userPrompt, '[AI 보강]');
+      if (nextBuildingSpec && nextBuildingSpec.usageType !== '3D 디자인') {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
       }
     } else if (res.intent === 'style_or_tool' || matChanged || Boolean(res.activeColor)) {
-      nextSolids = nextSolids.map((s) => ({ ...s, material: nextMaterial, color: nextColor }));
+      nextSolids = nextSolids.map((s) =>
+        s.color === '#86efac' || s.color === '#10b981'
+          ? s
+          : { ...s, material: nextMaterial, color: nextColor }
+      );
       nextBeams = nextBeams.map((b) => ({ ...b, material: nextMaterial, color: nextColor }));
     }
 
-    const assistantText = String(res.assistantReply || '명령을 처리했습니다.');
     const assistantMsg: ChatMessage = {
       id: `msg_a_${Date.now()}`,
       role: 'assistant',
@@ -413,14 +523,21 @@ CRITICAL RULES:
       solids: nextSolids,
       nodes: nextNodes,
       beams: nextBeams,
+      buildingSpec: nextBuildingSpec,
+      selectedUnitTypeId: res.intent === 'clear' ? null : current.selectedUnitTypeId,
+      selectedPartId: res.intent === 'clear' ? null : current.selectedPartId,
       activeTool: res.activeTool ?? current.activeTool,
       activeMaterial: nextMaterial,
       activeColor: nextColor,
-      targetLoadKg: typeof res.targetLoadKg === 'number' && res.targetLoadKg > 0 ? res.targetLoadKg : current.targetLoadKg,
-      isSimulating: typeof res.isSimulating === 'boolean' ? res.isSimulating : current.isSimulating,
+      targetLoadKg:
+        typeof res.targetLoadKg === 'number' && res.targetLoadKg > 0
+          ? res.targetLoadKg
+          : current.targetLoadKg,
+      isSimulating:
+        typeof res.isSimulating === 'boolean' ? res.isSimulating : current.isSimulating,
       cameraControl: nextCamera,
-      statusMessage: assistantText,
-      chatHistory: [...(current.chatHistory ?? []), userMsg, assistantMsg].slice(-12),
+      statusMessage: assistantText.split('\n')[0],
+      chatHistory: [...(current.chatHistory ?? []), userMsg, assistantMsg].slice(-14),
       activeCandidates: nextCandidates,
     };
   } catch {

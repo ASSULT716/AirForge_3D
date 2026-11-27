@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Billboard, Grid, Line, OrbitControls } from '@react-three/drei';
+import { Grid, Html, Line, OrbitControls } from '@react-three/drei';
 import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import {
@@ -12,42 +12,57 @@ import {
   CameraControlState,
   SolidPrimitive,
 } from '../types/cad';
-import { cameraGesture, consumeCameraDrag, consumeCameraZoom } from '../services/cameraGesture';
-import { expandSelection, type PickHit, type Selection } from '../services/selection';
-
-export interface SceneHandCursor {
-  position: [number, number, number];
-  pinching: boolean;
-  /** 핀치하면 이 좌표에서 커서까지 빔이 생김 (없으면 새 스트로크) */
-  linkFrom: [number, number, number] | null;
-  /** 선택 커서(✌️) 모드: 초록 링 + 가리킨 구조물 하이라이트 */
-  selecting?: boolean;
-}
+import { getKdsLoadRange, MATERIAL_CATALOG } from '../utils/buildingEstimator';
+import { getFloorColor } from '../utils/architectureGenerator';
+import HandSceneLayer from '../hand/HandSceneLayer';
 
 interface Props {
   structure: StructureState;
   onUpdateStress: (updatedBeams: StructureState['beams']) => void;
-  handCursor?: SceneHandCursor | null;
-  /** hover = 선택 커서가 가리키는 구조물(노랑), selected = 확정된 선택(초록) */
-  selection?: { hover: Selection | null; selected: Selection | null };
-  /** 선택 커서가 가리키는 구조물이 바뀔 때만 호출 */
-  onHoverSelection?: (sel: Selection | null) => void;
+  onSelectPart: (partId: string | null) => void;
 }
 
-const DANGER_RED = new THREE.Color('#ff1e42');
-const FIXED_AMBER = new THREE.Color('#ff9900');
+interface HoveredFloorTooltip {
+  x: number;
+  y: number;
+  floorIndex: number;
+  title: string;
+  areaText: string;
+  heightText: string;
+  roomsText: string;
+}
+
+const WHITE_SAFE = new THREE.Color('#ffffff');
+const WARN_AMBER = new THREE.Color('#fb923c');
+const DANGER_RED = new THREE.Color('#ef4444');
+const FIXED_SLATE = new THREE.Color('#475569');
 const UP_VEC = new THREE.Vector3(0, 1, 0);
 
 const MATERIAL_SPECS: Record<
   CadMaterial,
-  { defaultHex: string; metalness: number; roughness: number; emissiveIntensity: number; transparent?: boolean; opacity?: number }
+  { defaultHex: string; metalness: number; roughness: number; transparent?: boolean; opacity?: number }
 > = {
-  hologram: { defaultHex: '#00f3ff', metalness: 0.1, roughness: 0.2, emissiveIntensity: 0.9, transparent: true, opacity: 0.55 },
-  steel: { defaultHex: '#e2e8f0', metalness: 0.92, roughness: 0.18, emissiveIntensity: 0.05 },
-  titanium: { defaultHex: '#64748b', metalness: 0.95, roughness: 0.25, emissiveIntensity: 0.06 },
-  carbon: { defaultHex: '#1e293b', metalness: 0.15, roughness: 0.78, emissiveIntensity: 0.02 },
-  gold: { defaultHex: '#fbbf24', metalness: 0.98, roughness: 0.12, emissiveIntensity: 0.14 },
+  stucco: { defaultHex: '#f8fafc', metalness: 0.04, roughness: 0.65 },
+  wood: { defaultHex: '#e7d5be', metalness: 0.08, roughness: 0.55 },
+  concrete: { defaultHex: '#e2e8f0', metalness: 0.1, roughness: 0.72 },
+  glass: { defaultHex: '#bae6fd', metalness: 0.35, roughness: 0.12, transparent: true, opacity: 0.58 },
+  hologram: { defaultHex: '#cfe8fc', metalness: 0.25, roughness: 0.18, transparent: true, opacity: 0.65 },
+  steel: { defaultHex: '#cbd5e1', metalness: 0.75, roughness: 0.25 },
+  titanium: { defaultHex: '#d6d3d1', metalness: 0.8, roughness: 0.28 },
+  carbon: { defaultHex: '#94a3b8', metalness: 0.2, roughness: 0.6 },
+  gold: { defaultHex: '#fde68a', metalness: 0.82, roughness: 0.22 },
 };
+
+function computeWhiteToRedColor(ratio: number): THREE.Color {
+  const clamped = THREE.MathUtils.clamp(ratio, 0, 1.3);
+  if (clamped <= 0.72) {
+    return WHITE_SAFE.clone().lerp(new THREE.Color('#fef3c7'), clamped / 0.72);
+  }
+  if (clamped <= 1.0) {
+    return new THREE.Color('#fef3c7').lerp(WARN_AMBER, (clamped - 0.72) / 0.28);
+  }
+  return WARN_AMBER.clone().lerp(DANGER_RED, Math.min(1, (clamped - 1.0) / 0.3));
+}
 
 function computeBeamTransform(p1: THREE.Vector3, p2: THREE.Vector3) {
   const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
@@ -57,49 +72,11 @@ function computeBeamTransform(p1: THREE.Vector3, p2: THREE.Vector3) {
   return { mid, length, quat };
 }
 
-function StudioReflectionEnv() {
-  const { scene } = useThree();
-
-  useEffect(() => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const grad = ctx.createLinearGradient(0, 0, 0, 128);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.35, '#cbd5e1');
-    grad.addColorStop(0.5, '#0f172a');
-    grad.addColorStop(0.75, '#38bdf8');
-    grad.addColorStop(1, '#1e293b');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 256, 128);
-
-    ctx.fillStyle = '#fef9c3';
-    ctx.fillRect(20, 12, 80, 26);
-    ctx.fillStyle = '#e0f2fe';
-    ctx.fillRect(150, 16, 80, 26);
-
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.mapping = THREE.EquirectangularReflectionMapping;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    scene.environment = tex;
-
-    return () => {
-      scene.environment = null;
-      tex.dispose();
-    };
-  }, [scene]);
-
-  return null;
-}
-
 function SolidShapeGeometry({ shape }: { shape: SolidPrimitive['shape'] }) {
-  if (shape === 'sphere') return <sphereGeometry args={[0.8, 36, 36]} />;
-  if (shape === 'cone') return <coneGeometry args={[0.8, 1.4, 24]} />;
-  if (shape === 'cylinder') return <cylinderGeometry args={[0.7, 0.7, 1.2, 32]} />;
-  if (shape === 'torus') return <torusGeometry args={[0.7, 0.25, 24, 48]} />;
+  if (shape === 'sphere') return <sphereGeometry args={[0.8, 24, 24]} />;
+  if (shape === 'cone') return <coneGeometry args={[0.8, 1.4, 20]} />;
+  if (shape === 'cylinder') return <cylinderGeometry args={[0.7, 0.7, 1.2, 24]} />;
+  if (shape === 'torus') return <torusGeometry args={[0.7, 0.25, 16, 32]} />;
   return <boxGeometry args={[1, 1, 1]} />;
 }
 
@@ -107,40 +84,184 @@ function SolidMeshView({
   solid,
   defaultMaterial,
   defaultColor,
+  xrayUnitMode,
+  heatmapRatio,
+  isSelected,
+  isFloorHovered,
+  isParamHighlighted,
+  onSelect,
+  onHoverFloor,
+  onLeaveFloor,
 }: {
   solid: SolidPrimitive;
   defaultMaterial: CadMaterial;
   defaultColor: string;
+  xrayUnitMode: boolean;
+  heatmapRatio: number | null;
+  isSelected: boolean;
+  isFloorHovered: boolean;
+  isParamHighlighted: boolean;
+  onSelect?: () => void;
+  onHoverFloor?: (clientX: number, clientY: number) => void;
+  onLeaveFloor?: () => void;
 }) {
-  const matKey = solid.material ?? defaultMaterial ?? 'hologram';
-  const spec = MATERIAL_SPECS[matKey];
-  const color = solid.color ?? defaultColor ?? spec.defaultHex;
+  const matKey = solid.material ?? defaultMaterial ?? 'stucco';
+  const spec = MATERIAL_SPECS[matKey] ?? MATERIAL_SPECS.stucco;
+
+  // 층별 은은한 컬러 구분 적용
+  const floorTint =
+    typeof solid.floorIndex === 'number' && solid.partRole !== 'interior_wall' && solid.partRole !== 'garden'
+      ? getFloorColor(solid.floorIndex)
+      : null;
+
+  const baseHex =
+    solid.color && solid.color !== '#00f3ff'
+      ? solid.color
+      : floorTint ?? MATERIAL_CATALOG[matKey]?.hex ?? defaultColor ?? spec.defaultHex;
+
+  if (heatmapRatio !== null) {
+    const heatColor = computeWhiteToRedColor(heatmapRatio);
+    return (
+      <group
+        position={solid.position}
+        scale={solid.scale}
+        rotation={solid.rotation ?? [0, 0, 0]}
+        onClick={(e) => {
+          if (onSelect) {
+            e.stopPropagation();
+            onSelect();
+          }
+        }}
+      >
+        <mesh>
+          <SolidShapeGeometry shape={solid.shape} />
+          <meshStandardMaterial
+            color={heatColor}
+            emissive={heatColor}
+            emissiveIntensity={0.18}
+            roughness={0.4}
+            transparent
+            opacity={0.48}
+            depthWrite={false}
+          />
+        </mesh>
+        <mesh scale={[1.003, 1.003, 1.003]}>
+          <SolidShapeGeometry shape={solid.shape} />
+          <meshBasicMaterial color="#64748b" wireframe transparent opacity={0.35} />
+        </mesh>
+      </group>
+    );
+  }
+
+  // 방 유형(TYPE-A 등) 선택 시:
+  // 지붕과 상부 슬래브는 컷어웨이(반투명 유리)로 열어주고, 외벽과 내벽(interior_wall)은 실체감 있게 보여줌!
+  if (xrayUnitMode) {
+    const isRoofOrUpperSlab =
+      solid.partRole === 'roof' ||
+      solid.partRole === 'sculpture' ||
+      (solid.partRole === 'slab' && (solid.floorIndex ?? 1) > 1);
+    const isWall = solid.partRole === 'exterior_wall' || solid.partRole === 'interior_wall';
+
+    return (
+      <group
+        position={solid.position}
+        scale={solid.scale}
+        rotation={solid.rotation ?? [0, 0, 0]}
+        onClick={(e) => {
+          if (onSelect) {
+            e.stopPropagation();
+            onSelect();
+          }
+        }}
+        onPointerMove={(e) => {
+          if (onHoverFloor) {
+            e.stopPropagation();
+            onHoverFloor(e.clientX, e.clientY);
+          }
+        }}
+        onPointerOut={() => onLeaveFloor?.()}
+      >
+        <mesh>
+          <SolidShapeGeometry shape={solid.shape} />
+          <meshStandardMaterial
+            color={solid.partRole === 'interior_wall' ? '#0f172a' : baseHex}
+            roughness={0.45}
+            transparent
+            opacity={isRoofOrUpperSlab ? 0.12 : isWall ? 0.85 : 0.45}
+            depthWrite={!isRoofOrUpperSlab}
+          />
+        </mesh>
+        {isWall && (
+          <mesh scale={[1.003, 1.003, 1.003]}>
+            <SolidShapeGeometry shape={solid.shape} />
+            <meshBasicMaterial
+              color={solid.partRole === 'interior_wall' ? '#0284c7' : '#475569'}
+              wireframe
+              transparent
+              opacity={0.45}
+            />
+          </mesh>
+        )}
+      </group>
+    );
+  }
 
   return (
-    <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
+    <group
+      position={solid.position}
+      scale={solid.scale}
+      rotation={solid.rotation ?? [0, 0, 0]}
+      onClick={(e) => {
+        if (onSelect) {
+          e.stopPropagation();
+          onSelect();
+        }
+      }}
+      onPointerMove={(e) => {
+        if (onHoverFloor) {
+          e.stopPropagation();
+          onHoverFloor(e.clientX, e.clientY);
+        }
+      }}
+      onPointerOut={() => onLeaveFloor?.()}
+    >
       <mesh>
         <SolidShapeGeometry shape={solid.shape} />
         <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={spec.emissiveIntensity}
+          color={
+            isParamHighlighted
+              ? '#38bdf8'
+              : isFloorHovered
+              ? '#e0f2fe'
+              : baseHex
+          }
+          emissive={isParamHighlighted ? '#0284c7' : isFloorHovered ? '#38bdf8' : '#000000'}
+          emissiveIntensity={isParamHighlighted ? 0.25 : isFloorHovered ? 0.14 : 0}
           metalness={spec.metalness}
           roughness={spec.roughness}
-          transparent={Boolean(spec.transparent)}
-          opacity={spec.opacity ?? 1}
+          transparent={Boolean(spec.transparent || solid.partRole === 'basement')}
+          opacity={solid.partRole === 'basement' ? 0.55 : spec.opacity ?? 1}
         />
       </mesh>
-      {matKey === 'hologram' && (
-        <mesh scale={[1.005, 1.005, 1.005]}>
-          <SolidShapeGeometry shape={solid.shape} />
-          <meshBasicMaterial color="#00f3ff" wireframe transparent opacity={0.35} />
-        </mesh>
-      )}
+      {/* 건축 외곽선(에지 라인) 및 선택 하이라이트 */}
+      <mesh scale={[1.003, 1.003, 1.003]}>
+        <SolidShapeGeometry shape={solid.shape} />
+        <meshBasicMaterial
+          color={isSelected ? '#0284c7' : isParamHighlighted ? '#0369a1' : '#94a3b8'}
+          wireframe
+          transparent
+          opacity={isSelected || isParamHighlighted ? 0.85 : 0.22}
+        />
+      </mesh>
     </group>
   );
 }
 
-function CameraController({ control = { mode: 'free' } }: { control?: CameraControlState }) {
+function CameraController({
+  control = { mode: 'free' },
+}: {
+  control?: CameraControlState;
+}) {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const { camera } = useThree();
   const animState = useRef({
@@ -157,14 +278,14 @@ function CameraController({ control = { mode: 'free' } }: { control?: CameraCont
       animState.current.yawRemaining = 0;
       animState.current.pitchRemaining = 0;
       if (control.preset === 'front') {
-        camera.position.set(0, 1.5, 5.5);
-        ctrl.target.set(0, 1, 0);
+        camera.position.set(0, 1.8, 6.2);
+        ctrl.target.set(0, 1.1, 0);
       } else if (control.preset === 'top') {
-        camera.position.set(0, 6.5, 0.1);
+        camera.position.set(0, 7.6, 0.1);
         ctrl.target.set(0, 0, 0);
       } else {
-        camera.position.set(3.8, 3.0, 4.8);
-        ctrl.target.set(0, 1, 0);
+        camera.position.set(4.5, 3.6, 5.4);
+        ctrl.target.set(0, 1.1, 0);
       }
       ctrl.update();
       return;
@@ -183,7 +304,7 @@ function CameraController({ control = { mode: 'free' } }: { control?: CameraCont
       const mag = Math.max(0.35, Math.min(2.8, control.zoomFactor));
       const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
       offset.divideScalar(mag);
-      const clampedDist = THREE.MathUtils.clamp(offset.length(), 1.2, 18.0);
+      const clampedDist = THREE.MathUtils.clamp(offset.length(), 1.2, 20.0);
       offset.setLength(clampedDist);
       camera.position.copy(ctrl.target).add(offset);
       ctrl.update();
@@ -202,47 +323,11 @@ function CameraController({ control = { mode: 'free' } }: { control?: CameraCont
   useFrame((_, delta) => {
     const ctrl = controlsRef.current;
     if (!ctrl) return;
-
-    // 손 제스처 줌 (양손 펴고 벌리기=확대 / 모으기=축소)
-    const zoomLog = consumeCameraZoom(Math.min(delta, 0.05));
-    if (zoomLog !== 0) {
-      const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
-      offset.setLength(THREE.MathUtils.clamp(offset.length() * Math.exp(-zoomLog), 1.2, 18.0));
-      camera.position.copy(ctrl.target).add(offset);
-      ctrl.update();
-    }
-
-    // 손 제스처 팬·오빗 ("장면을 잡고 끄는" 느낌: 손을 오른쪽으로 → 장면이 오른쪽으로)
-    const drag = consumeCameraDrag();
-    if (drag.panX || drag.panY) {
-      // 손을 화면 폭만큼 옮기면 장면도 (타깃 거리에서 보이는) 화면 폭만큼 이동
-      const dist = camera.position.distanceTo(ctrl.target);
-      const persp = camera as THREE.PerspectiveCamera;
-      const visH = 2 * dist * Math.tan(THREE.MathUtils.degToRad((persp.fov ?? 45) / 2));
-      const visW = visH * (persp.aspect ?? 16 / 9);
-      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
-      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-      const move = right.multiplyScalar(-drag.panX * visW).add(up.multiplyScalar(drag.panY * visH));
-      camera.position.add(move);
-      ctrl.target.add(move);
-      ctrl.update();
-    }
-    if (drag.yawDeg || drag.pitchDeg) {
-      const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
-      const sph = new THREE.Spherical().setFromVector3(offset);
-      sph.theta -= THREE.MathUtils.degToRad(drag.yawDeg);
-      sph.phi = THREE.MathUtils.clamp(sph.phi - THREE.MathUtils.degToRad(drag.pitchDeg), 0.15, Math.PI / 2 - 0.04);
-      offset.setFromSpherical(sph);
-      camera.position.copy(ctrl.target).add(offset);
-      ctrl.update();
-    }
-
     const { yawRemaining, pitchRemaining, speed } = animState.current;
     if (Math.abs(yawRemaining) < 0.002 && Math.abs(pitchRemaining) < 0.002) return;
 
     const dt = Math.min(delta, 0.05);
     const stepRate = 1.6 * speed * dt;
-
     const dYaw =
       Math.abs(yawRemaining) <= stepRate ? yawRemaining : Math.sign(yawRemaining) * stepRate;
     const dPitch =
@@ -267,48 +352,253 @@ function CameraController({ control = { mode: 'free' } }: { control?: CameraCont
       ref={controlsRef}
       makeDefault
       enableDamping
-      dampingFactor={0.08}
+      dampingFactor={0.09}
       autoRotate={control.mode === 'auto_rotate'}
-      autoRotateSpeed={(control.speed ?? 1.0) * 2.0}
+      autoRotateSpeed={(control.speed ?? 1.0) * 1.8}
       maxPolarAngle={Math.PI / 2 - 0.03}
     />
   );
 }
 
-function StaticStructure({ structure }: { structure: StructureState }) {
+function StaticStructure({
+  structure,
+  hoveredFloorIndex,
+  onSelectPart,
+  onHoverFloor,
+  onLeaveFloor,
+}: {
+  structure: StructureState;
+  hoveredFloorIndex: number | null;
+  onSelectPart: (partId: string | null) => void;
+  onHoverFloor: (floorIndex: number, clientX: number, clientY: number) => void;
+  onLeaveFloor: () => void;
+}) {
   const nodeMap = useMemo(() => {
     const map = new Map<string, NodePoint>();
     structure.nodes.forEach((n) => map.set(n.id, n));
     return map;
   }, [structure.nodes]);
 
+  const spec = structure.buildingSpec;
+  const selectedUnitType = useMemo(
+    () => spec?.unitTypes?.find((u) => u.id === structure.selectedUnitTypeId) ?? null,
+    [spec?.unitTypes, structure.selectedUnitTypeId]
+  );
+
+  const isHeatmap = Boolean(structure.isLoadHeatmapActive && spec);
+  const kdsRange = spec ? getKdsLoadRange(spec.usageType) : null;
+  const vizKey = structure.activeSpecViz?.paramKey;
+
+  const getHeatmapRatioAtY = (yPos: number, isVerticalColumn = false): number | null => {
+    if (!isHeatmap || !spec || !kdsRange) return null;
+    const maxY = Math.max(
+      2.0,
+      ...(structure.solids ?? []).map((s) => s.position[1] + s.scale[1] * 0.5)
+    );
+    const floors = Math.max(1, spec.floors);
+    const floorIdx = Math.min(
+      floors,
+      Math.max(1, Math.ceil((Math.max(0.05, yPos) / maxY) * floors))
+    );
+    const floorLoad = spec.floorLoadsKn?.[floorIdx] ?? kdsRange.legalBaseKn;
+
+    if (isVerticalColumn) {
+      let upperSum = 0;
+      let upperCount = 0;
+      for (let f = floorIdx; f <= floors; f++) {
+        upperSum += spec.floorLoadsKn?.[f] ?? kdsRange.legalBaseKn;
+        upperCount += 1;
+      }
+      const cumulativeAvg = upperSum / Math.max(1, upperCount);
+      return cumulativeAvg / kdsRange.designCapacityKn;
+    }
+
+    return floorLoad / kdsRange.designCapacityKn;
+  };
+
+  // 실시간 수치 조절 시 3D 치수선 · 높이 폴대 · 대지 경계선 계산
+  const dimGuides = useMemo(() => {
+    if (!spec) return null;
+    const SCALE_DIV = 3.2;
+    const siteSideM = Math.sqrt(Math.max(100, spec.siteAreaSqm));
+    const sw = Math.max(3.2, Math.min(13.5, siteSideM / SCALE_DIV)) * 0.5;
+    const sd = sw * 0.86;
+    const totalH = Math.max(1.1, Math.min(9.5, spec.heightMeters / SCALE_DIV));
+    const gardenSolid = (structure.solids ?? []).find((s) => s.partRole === 'garden');
+
+    return {
+      siteBoundary: [
+        [-sw, 0.015, -sd],
+        [sw, 0.015, -sd],
+        [sw, 0.015, sd],
+        [-sw, 0.015, sd],
+        [-sw, 0.015, -sd],
+      ] as [number, number, number][],
+      heightPole: [
+        [-sw + 0.25, 0, sd - 0.25],
+        [-sw + 0.25, totalH, sd - 0.25],
+      ] as [number, number, number][],
+      topLabelPos: [-sw + 0.25, totalH + 0.22, sd - 0.25] as [number, number, number],
+      gardenLabelPos: gardenSolid
+        ? ([gardenSolid.position[0], 0.35, gardenSolid.position[2]] as [number, number, number])
+        : ([1.8, 0.35, 0] as [number, number, number]),
+    };
+  }, [spec, structure.solids]);
+
   return (
     <group>
-      {(structure.solids ?? []).map((solid) => (
-        <SolidMeshView
-          key={solid.id}
-          solid={solid}
-          defaultMaterial={structure.activeMaterial}
-          defaultColor={structure.activeColor}
-        />
-      ))}
+      {/* 빈틈없는 건축 매스 · 외벽 · 내벽 · 슬래브 · 옥상 */}
+      {(structure.solids ?? []).map((solid) => {
+        const isParamHighlighted =
+          (vizKey === 'gardenAreaSqm' && solid.partRole === 'garden') ||
+          ((vizKey === 'undergroundFloors' || vizKey === 'undergroundAreaSqm') &&
+            solid.partRole === 'basement') ||
+          (vizKey === 'rooftops' && solid.partRole === 'roof') ||
+          ((vizKey === 'elevators' || vizKey === 'stairs') && solid.partRole === 'core');
 
+        return (
+          <SolidMeshView
+            key={solid.id}
+            solid={solid}
+            defaultMaterial={structure.activeMaterial}
+            defaultColor={structure.activeColor}
+            xrayUnitMode={Boolean(selectedUnitType)}
+            heatmapRatio={getHeatmapRatioAtY(solid.position[1], false)}
+            isSelected={structure.selectedPartId === solid.id}
+            isFloorHovered={
+              typeof solid.floorIndex === 'number' &&
+              solid.floorIndex !== 0 &&
+              hoveredFloorIndex === solid.floorIndex
+            }
+            isParamHighlighted={isParamHighlighted}
+            onSelect={() => onSelectPart(solid.id)}
+            onHoverFloor={(cx, cy) => {
+              if (typeof solid.floorIndex === 'number' && solid.floorIndex !== 0) {
+                onHoverFloor(solid.floorIndex, cx, cy);
+              }
+            }}
+            onLeaveFloor={onLeaveFloor}
+          />
+        );
+      })}
+
+      {/* 외벽 개구부 내부에 정확히 매립된 3D 유리 창호 */}
+      {!isHeatmap &&
+        (spec?.exteriorWindows ?? []).map((win) => (
+          <group
+            key={win.id}
+            position={win.position}
+            rotation={[0, win.rotationY, 0]}
+            scale={win.scale}
+          >
+            <mesh>
+              <boxGeometry args={[1, 1, 1]} />
+              <meshStandardMaterial
+                color="#7dd3fc"
+                metalness={0.4}
+                roughness={0.12}
+                transparent
+                opacity={selectedUnitType ? 0.35 : 0.72}
+              />
+            </mesh>
+            <mesh scale={[1.01, 1.01, 1.05]}>
+              <boxGeometry args={[1, 1, 1]} />
+              <meshBasicMaterial color="#334155" wireframe transparent opacity={0.4} />
+            </mesh>
+          </group>
+        ))}
+
+      {/* 수도·전기 배관 3D 라인 */}
+      {(structure.showMepPipes || Boolean(selectedUnitType)) &&
+        (spec?.mepPipes ?? []).map((pipe) => (
+          <Line
+            key={pipe.id}
+            points={pipe.points}
+            color={pipe.system === 'water' ? '#2563eb' : '#d97706'}
+            lineWidth={pipe.id.includes('riser') ? 3.5 : 2.0}
+          />
+        ))}
+
+      {/* 방 유형 선택 시 내부 방 바닥 존 하이라이트 (내벽·외벽을 가리지 않도록 얇은 바닥 구역 표시) */}
+      {selectedUnitType &&
+        selectedUnitType.placements.map((pl, idx) => (
+          <group
+            key={`unit_pl_${idx}`}
+            position={[pl.position[0], pl.position[1] - pl.scale[1] * 0.35, pl.position[2]]}
+            scale={[pl.scale[0], pl.scale[1] * 0.25, pl.scale[2]]}
+          >
+            <mesh>
+              <boxGeometry args={[1, 1, 1]} />
+              <meshStandardMaterial
+                color={selectedUnitType.color}
+                emissive={selectedUnitType.color}
+                emissiveIntensity={0.35}
+                transparent
+                opacity={0.65}
+              />
+            </mesh>
+          </group>
+        ))}
+
+      {/* 대지 경계선 및 높이 기준 스케일 폴 (수치 조절 시 실시간 크기 변화 가시화) */}
+      {dimGuides && (
+        <group>
+          <Line
+            points={dimGuides.siteBoundary}
+            color={vizKey === 'siteAreaSqm' ? '#0284c7' : '#94a3b8'}
+            lineWidth={vizKey === 'siteAreaSqm' ? 2.5 : 1.2}
+            dashed
+            dashSize={0.25}
+            gapSize={0.15}
+          />
+          <Line
+            points={dimGuides.heightPole}
+            color={vizKey === 'heightMeters' || vizKey === 'floors' ? '#0284c7' : '#64748b'}
+            lineWidth={vizKey === 'heightMeters' || vizKey === 'floors' ? 3 : 1.5}
+          />
+          {structure.activeSpecViz && spec && (
+            <Html
+              position={
+                vizKey === 'gardenAreaSqm'
+                  ? dimGuides.gardenLabelPos
+                  : dimGuides.topLabelPos
+              }
+              center
+              distanceFactor={10}
+            >
+              <div className="px-2.5 py-1 rounded-lg bg-slate-900/90 text-white text-[11px] font-mono whitespace-nowrap shadow-lg border border-sky-400">
+                <span className="text-sky-300 font-bold">{structure.activeSpecViz.label}:</span>{' '}
+                <span>{structure.activeSpecViz.formattedValue}</span>
+                {structure.activeSpecViz.deltaText && (
+                  <span className="ml-1.5 text-amber-300 font-bold">
+                    ({structure.activeSpecViz.deltaText})
+                  </span>
+                )}
+              </div>
+            </Html>
+          )}
+        </group>
+      )}
+
+      {/* 구조 조인트 노드 & 기둥 */}
       {structure.nodes.map((node) => {
         const isGrounded = node.isFixed;
+        const heatRatio = getHeatmapRatioAtY(node.position[1], true);
+        const nodeColor =
+          heatRatio !== null
+            ? computeWhiteToRedColor(heatRatio)
+            : isGrounded
+            ? FIXED_SLATE
+            : '#94a3b8';
+
         return (
           <mesh key={node.id} position={node.position}>
             {isGrounded ? (
-              <boxGeometry args={[0.16, 0.16, 0.16]} />
+              <boxGeometry args={[0.11, 0.11, 0.11]} />
             ) : (
-              <sphereGeometry args={[0.075, 16, 16]} />
+              <sphereGeometry args={[0.05, 10, 10]} />
             )}
-            <meshStandardMaterial
-              color={isGrounded ? FIXED_AMBER : structure.activeColor}
-              emissive={isGrounded ? FIXED_AMBER : structure.activeColor}
-              emissiveIntensity={structure.activeMaterial === 'hologram' ? 1.1 : 0.2}
-              metalness={0.6}
-              roughness={0.25}
-            />
+            <meshStandardMaterial color={nodeColor} metalness={0.35} roughness={0.35} />
           </mesh>
         );
       })}
@@ -322,22 +612,28 @@ function StaticStructure({ structure }: { structure: StructureState }) {
         const p2 = new THREE.Vector3(...n2.position);
         const { mid, length, quat } = computeBeamTransform(p1, p2);
 
-        const matKey = beam.material ?? structure.activeMaterial ?? 'hologram';
-        const spec = MATERIAL_SPECS[matKey];
-        const baseColor = new THREE.Color(beam.color ?? spec.defaultHex);
-        const stressBlend = Math.max(0, (beam.stress - 0.45) * 1.8);
-        const finalColor = baseColor.clone().lerp(DANGER_RED, Math.min(1, stressBlend));
-        const radius = beam.radius ?? 0.04;
+        const isVertical = Math.abs(p2.y - p1.y) > Math.hypot(p2.x - p1.x, p2.z - p1.z);
+        const heatRatio = getHeatmapRatioAtY(mid.y, isVertical);
+
+        const matKey = beam.material ?? structure.activeMaterial ?? 'steel';
+        const specMat = MATERIAL_SPECS[matKey] ?? MATERIAL_SPECS.steel;
+        const baseColor = new THREE.Color(
+          beam.color && beam.color !== '#00f3ff' ? beam.color : specMat.defaultHex
+        );
+        const stressBlend = Math.max(0, (beam.stress - 0.55) * 1.6);
+        const finalColor =
+          heatRatio !== null
+            ? computeWhiteToRedColor(heatRatio)
+            : baseColor.clone().lerp(DANGER_RED, Math.min(1, stressBlend));
+        const radius = beam.radius ?? 0.032;
 
         return (
           <mesh key={beam.id} position={mid} quaternion={quat} scale={[1, length, 1]}>
-            <cylinderGeometry args={[radius, radius, 1, 16]} />
+            <cylinderGeometry args={[radius, radius, 1, 10]} />
             <meshStandardMaterial
               color={finalColor}
-              emissive={stressBlend > 0.2 ? DANGER_RED : finalColor}
-              emissiveIntensity={spec.emissiveIntensity + stressBlend * 1.1}
-              metalness={spec.metalness}
-              roughness={spec.roughness}
+              metalness={heatRatio !== null ? 0.15 : specMat.metalness}
+              roughness={heatRatio !== null ? 0.4 : specMat.roughness}
             />
           </mesh>
         );
@@ -458,7 +754,7 @@ function DynamicPhysicsStructure({
       }
 
       const strain = Math.abs(displacement) / restLen;
-      const stress = THREE.MathUtils.clamp(strain * 5.5, 0.06, 1.0);
+      const stress = THREE.MathUtils.clamp(strain * 4.5, 0.05, 1.0);
       latestStressRef.current[beam.id] = stress;
 
       const { mid, length, quat } = computeBeamTransform(pA, pB);
@@ -468,17 +764,13 @@ function DynamicPhysicsStructure({
         mesh.scale.set(1, length, 1);
       }
 
-      const matKey = beam.material ?? structure.activeMaterial ?? 'hologram';
-      const spec = MATERIAL_SPECS[matKey];
-      const baseColor = new THREE.Color(beam.color ?? spec.defaultHex);
+      const baseColor = new THREE.Color('#cbd5e1');
       const lerpedColor = baseColor.clone().lerp(DANGER_RED, stress);
       mat.color.copy(lerpedColor);
-      mat.emissive.copy(lerpedColor);
-      mat.emissiveIntensity = spec.emissiveIntensity + stress * 1.2;
     });
 
     const now = state.clock.elapsedTime;
-    if (now - lastSyncTimeRef.current > 0.25) {
+    if (now - lastSyncTimeRef.current > 0.35) {
       lastSyncTimeRef.current = now;
       const updatedBeams: BeamMember[] = structure.beams.map((b) => ({
         ...b,
@@ -490,7 +782,6 @@ function DynamicPhysicsStructure({
 
   return (
     <group>
-      {/* 물리 지면 충돌체 */}
       <RigidBody type="fixed" position={[0, -0.5, 0]}>
         <mesh>
           <boxGeometry args={[40, 1, 40]} />
@@ -498,7 +789,6 @@ function DynamicPhysicsStructure({
         </mesh>
       </RigidBody>
 
-      {/* 입체 3D 솔리드 물리 시뮬레이션 */}
       {(structure.solids ?? []).map((solid) => (
         <RigidBody
           key={solid.id}
@@ -513,6 +803,11 @@ function DynamicPhysicsStructure({
             solid={{ ...solid, position: [0, 0, 0] }}
             defaultMaterial={structure.activeMaterial}
             defaultColor={structure.activeColor}
+            xrayUnitMode={false}
+            heatmapRatio={null}
+            isSelected={false}
+            isFloorHovered={false}
+            isParamHighlighted={false}
           />
         </RigidBody>
       ))}
@@ -534,24 +829,18 @@ function DynamicPhysicsStructure({
           >
             <mesh>
               {node.isFixed ? (
-                <boxGeometry args={[0.16, 0.16, 0.16]} />
+                <boxGeometry args={[0.11, 0.11, 0.11]} />
               ) : (
-                <sphereGeometry args={[0.075, 16, 16]} />
+                <sphereGeometry args={[0.05, 10, 10]} />
               )}
-              <meshStandardMaterial
-                color={node.isFixed ? FIXED_AMBER : structure.activeColor}
-                emissive={node.isFixed ? FIXED_AMBER : structure.activeColor}
-                emissiveIntensity={0.6}
-              />
+              <meshStandardMaterial color={node.isFixed ? FIXED_SLATE : '#94a3b8'} />
             </mesh>
           </RigidBody>
         );
       })}
 
       {structure.beams.map((beam) => {
-        const matKey = beam.material ?? structure.activeMaterial ?? 'hologram';
-        const spec = MATERIAL_SPECS[matKey];
-        const radius = beam.radius ?? 0.04;
+        const radius = beam.radius ?? 0.032;
         return (
           <mesh
             key={beam.id}
@@ -559,16 +848,14 @@ function DynamicPhysicsStructure({
               beamMeshRefs.current[beam.id] = el;
             }}
           >
-            <cylinderGeometry args={[radius, radius, 1, 16]} />
+            <cylinderGeometry args={[radius, radius, 1, 10]} />
             <meshStandardMaterial
               ref={(el) => {
                 beamMatRefs.current[beam.id] = el;
               }}
-              color={beam.color ?? spec.defaultHex}
-              emissive={beam.color ?? spec.defaultHex}
-              emissiveIntensity={spec.emissiveIntensity}
-              metalness={spec.metalness}
-              roughness={spec.roughness}
+              color="#cbd5e1"
+              metalness={0.5}
+              roughness={0.3}
             />
           </mesh>
         );
@@ -577,206 +864,92 @@ function DynamicPhysicsStructure({
   );
 }
 
-/** 손 커서: 핀치 시 노드가 찍힐 위치. 기존 노드에 겹치면 초록(병합), 핀치 중이면 빨강 */
-function HandCursor({ cursor, nodes }: { cursor: SceneHandCursor; nodes: NodePoint[] }) {
-  const [x, y, z] = cursor.position;
-  const onNode = nodes.some(
-    (n) => Math.hypot(n.position[0] - x, n.position[1] - y, n.position[2] - z) < 0.15
-  );
-  const color = cursor.selecting ? SELECT_GREEN : cursor.pinching ? '#ff1e42' : onNode ? '#39ff88' : '#00f3ff';
-  const r = cursor.pinching ? 0.09 : 0.14;
-
-  return (
-    <group renderOrder={10}>
-      <Billboard position={cursor.position}>
-        <mesh>
-          <ringGeometry args={[r, r + 0.025, 40]} />
-          <meshBasicMaterial color={color} transparent opacity={0.95} depthTest={false} toneMapped={false} />
-        </mesh>
-        <mesh>
-          <circleGeometry args={[r, 40]} />
-          <meshBasicMaterial color={color} transparent opacity={0.18} depthTest={false} toneMapped={false} />
-        </mesh>
-      </Billboard>
-
-      {/* 깊이 가늠용: 바닥까지 수직선 + 바닥 그림자 링 */}
-      {y > 0 && (
-        <Line points={[cursor.position, [x, 0, z]]} color={color} lineWidth={1} dashed dashSize={0.06} gapSize={0.06} transparent opacity={0.5} />
-      )}
-      <mesh position={[x, 0.005, z]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.1, 0.13, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={0.45} toneMapped={false} />
-      </mesh>
-
-      {/* 다음 핀치로 생길 빔 미리보기 (선택 모드에선 안 보임) */}
-      {cursor.linkFrom && !cursor.selecting && (
-        <Line points={[cursor.linkFrom, cursor.position]} color={color} lineWidth={2} dashed dashSize={0.1} gapSize={0.07} transparent opacity={0.8} depthTest={false} />
-      )}
-    </group>
-  );
-}
-
-const SELECT_GREEN = '#7dff8a';
-const HOVER_YELLOW = '#ffd54a';
-/** 커서 링에서 이 픽셀 이내면 가리킨 것으로 봄 */
-const PICK_PX = 40;
-
-/**
- * 선택 커서가 화면에서 가장 가까이 겹친 요소 찾기 (화면 좌표 기준).
- * 사용자는 3D 깊이가 아니라 "링이 물체 위에 보이는지"로 조준하므로 투영 후 픽셀 거리로 판단.
- */
-function SelectionPicker({
-  cursor,
-  structure,
-  onHover,
-}: {
-  cursor: SceneHandCursor | null | undefined;
-  structure: StructureState;
-  onHover?: (sel: Selection | null) => void;
-}) {
-  const { camera, size } = useThree();
-  const last = useRef<{ hitKey: string; selKey: string }>({ hitKey: '', selKey: '' });
-  const v = useMemo(() => new THREE.Vector3(), []);
-
-  useFrame(() => {
-    // 손 회전의 화면 축 → 월드 축 변환용 (HandTracker는 Canvas 밖이라 여기서 공유)
-    const cq = camera.quaternion;
-    cameraGesture.cameraQuat = [cq.x, cq.y, cq.z, cq.w];
-
-    if (!onHover) return;
-    const emit = (hit: PickHit | null) => {
-      const hitKey = hit ? `${hit.kind}:${hit.id}` : '';
-      if (hitKey === last.current.hitKey) return;
-      last.current.hitKey = hitKey;
-      const sel = hit ? expandSelection(structure, hit) : null;
-      const selKey = sel?.key ?? '';
-      if (selKey === last.current.selKey) return;
-      last.current.selKey = selKey;
-      onHover(sel);
-    };
-    if (!cursor?.selecting || structure.isSimulating) return emit(null);
-
-    /** 월드 → 화면 픽셀. 카메라 뒤면 null */
-    const toPx = (p: readonly number[]): [number, number] | null => {
-      v.set(p[0], p[1], p[2]).project(camera);
-      if (v.z > 1) return null;
-      return [((v.x + 1) / 2) * size.width, ((1 - v.y) / 2) * size.height];
-    };
-    const c = toPx(cursor.position);
-    if (!c) return emit(null);
-
-    let best: PickHit | null = null;
-    let bestD = PICK_PX;
-    const nodePx = new Map<string, [number, number] | null>();
-    for (const n of structure.nodes) {
-      const q = toPx(n.position);
-      nodePx.set(n.id, q);
-      if (!q) continue;
-      const d = Math.hypot(q[0] - c[0], q[1] - c[1]);
-      if (d < bestD) [bestD, best] = [d, { kind: 'node', id: n.id }];
-    }
-    for (const b of structure.beams) {
-      const a = nodePx.get(b.startNodeId);
-      const e = nodePx.get(b.endNodeId);
-      if (!a || !e) continue;
-      // 점-선분 거리 (노드보다 살짝 불리하게 → 끝점 근처에선 노드 우선)
-      const dx = e[0] - a[0], dy = e[1] - a[1];
-      const len2 = dx * dx + dy * dy || 1e-6;
-      const t = Math.max(0, Math.min(1, ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / len2));
-      const d = Math.hypot(a[0] + dx * t - c[0], a[1] + dy * t - c[1]) + 4;
-      if (d < bestD) [bestD, best] = [d, { kind: 'beam', id: b.id }];
-    }
-    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
-    for (const so of structure.solids ?? []) {
-      const q = toPx(so.position);
-      if (!q) continue;
-      // 화면상 반경: 중심에서 카메라 오른쪽으로 (최대 스케일 × 0.8)만큼 떨어진 점까지
-      const r3 = Math.max(...so.scale) * 0.8;
-      const edge = toPx([so.position[0] + right.x * r3, so.position[1] + right.y * r3, so.position[2] + right.z * r3]);
-      const rPx = edge ? Math.hypot(edge[0] - q[0], edge[1] - q[1]) : 0;
-      const d = Math.max(0, Math.hypot(q[0] - c[0], q[1] - c[1]) - rPx) + 8;
-      if (d < bestD) [bestD, best] = [d, { kind: 'solid', id: so.id }];
-    }
-    emit(best);
-  });
-
-  return null;
-}
-
-/** 선택·hover 표시: 원래 메시 위에 반투명 발광 껍데기를 덧그림 (기존 렌더링 코드는 그대로) */
-function SelectionHighlight({ structure, sel, color }: { structure: StructureState; sel: Selection; color: string }) {
-  const nodeSet = new Set(sel.nodeIds);
-  const beamSet = new Set(sel.beamIds);
-  const solidSet = new Set(sel.solidIds);
-  const nodeMap = new Map(structure.nodes.map((n) => [n.id, n]));
-  const mat = <meshBasicMaterial color={color} transparent opacity={0.35} depthWrite={false} toneMapped={false} />;
-
-  return (
-    <group>
-      {structure.nodes
-        .filter((n) => nodeSet.has(n.id))
-        .map((n) => (
-          <mesh key={n.id} position={n.position}>
-            <sphereGeometry args={[0.15, 16, 16]} />
-            {mat}
-          </mesh>
-        ))}
-      {structure.beams
-        .filter((b) => beamSet.has(b.id))
-        .map((b) => {
-          const n1 = nodeMap.get(b.startNodeId);
-          const n2 = nodeMap.get(b.endNodeId);
-          if (!n1 || !n2) return null;
-          const { mid, length, quat } = computeBeamTransform(new THREE.Vector3(...n1.position), new THREE.Vector3(...n2.position));
-          const r = (b.radius ?? 0.04) * 2.4;
-          return (
-            <mesh key={b.id} position={mid} quaternion={quat} scale={[1, length, 1]}>
-              <cylinderGeometry args={[r, r, 1, 12]} />
-              {mat}
-            </mesh>
-          );
-        })}
-      {(structure.solids ?? [])
-        .filter((so) => solidSet.has(so.id))
-        .map((so) => (
-          <group key={so.id} position={so.position} scale={so.scale} rotation={so.rotation ?? [0, 0, 0]}>
-            <mesh scale={[1.06, 1.06, 1.06]}>
-              <SolidShapeGeometry shape={so.shape} />
-              <meshBasicMaterial color={color} wireframe transparent opacity={0.8} toneMapped={false} />
-            </mesh>
-          </group>
-        ))}
-    </group>
-  );
-}
-
-export default function SceneCanvas({ structure, onUpdateStress, handCursor, selection, onHoverSelection }: Props) {
+export default function SceneCanvas({ structure, onUpdateStress, onSelectPart }: Props) {
+  const [hoveredTooltip, setHoveredTooltip] = useState<HoveredFloorTooltip | null>(null);
   const simKey = `${structure.solids?.length ?? 0}-${structure.nodes.length}-${structure.beams.length}`;
 
+  const handleHoverFloor = (floorIndex: number, clientX: number, clientY: number) => {
+    const spec = structure.buildingSpec;
+    if (!spec) return;
+
+    const avgFloorArea = Number(
+      (spec.totalFloorAreaSqm / Math.max(1, spec.floors)).toFixed(1)
+    );
+    const floorHeightM = Number(
+      (spec.heightMeters / Math.max(1, spec.floors)).toFixed(2)
+    );
+    const roomsList =
+      spec.unitTypes?.[0]?.rooms
+        .filter((r) => r.liveLoadKn < 3.0)
+        .map((r) => r.name)
+        .slice(0, 3)
+        .join(' · ') || '거실 · 주방 · 침실';
+
+    if (floorIndex < 0) {
+      setHoveredTooltip({
+        x: clientX,
+        y: clientY,
+        floorIndex,
+        title: `지하층 (B1~B${spec.undergroundFloors})`,
+        areaText: `지하 연면적 ${spec.undergroundAreaSqm.toLocaleString()} ㎡`,
+        heightText: `지하 ${spec.undergroundFloors}개층`,
+        roomsText: '지하 주차장 · 기계·전기실',
+      });
+      return;
+    }
+
+    if (floorIndex === 99) {
+      setHoveredTooltip({
+        x: clientX,
+        y: clientY,
+        floorIndex,
+        title: `옥상층 (RF · 루프탑 ${spec.rooftops}개소)`,
+        areaText: `옥상 면적 약 ${spec.buildingAreaSqm.toLocaleString()} ㎡`,
+        heightText: `최고 높이 ${spec.heightMeters} m`,
+        roomsText: '루프탑 테라스 · 조형 캐노피 · 코어탑',
+      });
+      return;
+    }
+
+    const loadKn = spec.floorLoadsKn?.[floorIndex] ?? 2.0;
+    setHoveredTooltip({
+      x: clientX,
+      y: clientY,
+      floorIndex,
+      title: `지상 ${floorIndex}층 (${floorIndex}F)`,
+      areaText: `층 바닥면적 ${avgFloorArea.toLocaleString()} ㎡`,
+      heightText: `층고 ${floorHeightM} m · 활하중 ${loadKn.toFixed(1)} kN/㎡`,
+      roomsText: roomsList,
+    });
+  };
+
   return (
-    <div className="w-full h-full bg-[#050811]">
-      <Canvas camera={{ position: [0, 2.4, 5.2], fov: 45 }} gl={{ antialias: true }}>
-        <color attach="background" args={['#050811']} />
-        <fog attach="fog" args={['#050811', 10, 26]} />
+    <div className="relative w-full h-full bg-[#f4f6f9]">
+      <Canvas
+        dpr={[1, 1.5]}
+        performance={{ min: 0.5 }}
+        camera={{ position: [4.4, 3.4, 5.2], fov: 44 }}
+        gl={{ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true }}
+        onPointerMissed={() => onSelectPart(null)}
+      >
+        <color attach="background" args={['#f4f6f9']} />
+        <fog attach="fog" args={['#f4f6f9', 18, 40]} />
 
-        <ambientLight intensity={0.55} />
-        <directionalLight position={[6, 10, 6]} intensity={2.4} color="#ffffff" />
-        <directionalLight position={[-6, 4, -4]} intensity={1.2} color="#38bdf8" />
-        <pointLight position={[0, 4, 3]} intensity={1.2} color="#fef3c7" />
-
-        <StudioReflectionEnv />
+        <hemisphereLight args={['#ffffff', '#e2e8f0', 1.15]} />
+        <directionalLight position={[8, 12, 6]} intensity={1.35} color="#ffffff" />
+        <directionalLight position={[-6, 6, -5]} intensity={0.65} color="#f8fafc" />
 
         <Grid
           position={[0, 0, 0]}
           args={[24, 24]}
           cellSize={0.25}
-          cellThickness={0.6}
-          cellColor="#0b3b4c"
+          cellThickness={0.5}
+          cellColor="#e2e8f0"
           sectionSize={1}
-          sectionThickness={1.2}
-          sectionColor="#00f3ff"
-          fadeDistance={18}
-          fadeStrength={1.2}
+          sectionThickness={0.9}
+          sectionColor="#cbd5e1"
+          fadeDistance={20}
+          fadeStrength={1}
           infiniteGrid
         />
 
@@ -785,22 +958,43 @@ export default function SceneCanvas({ structure, onUpdateStress, handCursor, sel
             <DynamicPhysicsStructure structure={structure} onUpdateStress={onUpdateStress} />
           </Physics>
         ) : (
-          <StaticStructure structure={structure} />
+          <StaticStructure
+            structure={structure}
+            hoveredFloorIndex={hoveredTooltip?.floorIndex ?? null}
+            onSelectPart={onSelectPart}
+            onHoverFloor={handleHoverFloor}
+            onLeaveFloor={() => setHoveredTooltip(null)}
+          />
         )}
-
-        {/* 시뮬 중엔 노드가 움직여서 하이라이트 위치가 어긋남 → 정지 상태에서만 표시 */}
-        {!structure.isSimulating && selection?.hover && selection.hover.key !== selection.selected?.key && (
-          <SelectionHighlight structure={structure} sel={selection.hover} color={HOVER_YELLOW} />
-        )}
-        {!structure.isSimulating && selection?.selected && (
-          <SelectionHighlight structure={structure} sel={selection.selected} color={SELECT_GREEN} />
-        )}
-        <SelectionPicker cursor={handCursor} structure={structure} onHover={onHoverSelection} />
-
-        {handCursor && <HandCursor cursor={handCursor} nodes={structure.nodes} />}
 
         <CameraController control={structure.cameraControl} />
+        {/* (조원호) 손 커서·선택·제스처 카메라 — src/hand/HandSceneLayer.tsx */}
+        <HandSceneLayer structure={structure} />
       </Canvas>
+
+      {/* 마우스 커서 호버 시 층수·바닥면적·층고·실 구성 실시간 툴팁 */}
+      {hoveredTooltip && (
+        <div
+          className="pointer-events-none fixed z-50 bg-white/95 backdrop-blur-md border border-sky-400 rounded-xl px-3 py-2 shadow-xl text-xs text-slate-800 space-y-0.5"
+          style={{
+            left: Math.min(window.innerWidth - 240, hoveredTooltip.x + 14),
+            top: Math.max(12, hoveredTooltip.y - 12),
+          }}
+        >
+          <div className="flex items-center gap-1.5">
+            <span
+              className="w-2.5 h-2.5 rounded-sm border border-slate-400"
+              style={{ backgroundColor: getFloorColor(hoveredTooltip.floorIndex) }}
+            />
+            <span className="font-bold text-slate-900">{hoveredTooltip.title}</span>
+          </div>
+          <div className="font-mono text-[11px] font-bold text-sky-700">
+            {hoveredTooltip.areaText}
+          </div>
+          <div className="text-[10.5px] text-slate-600">{hoveredTooltip.heightText}</div>
+          <div className="text-[10px] text-slate-500">{hoveredTooltip.roomsText}</div>
+        </div>
+      )}
     </div>
   );
 }

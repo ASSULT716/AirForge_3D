@@ -1,15 +1,32 @@
-//데이터 규격 파일 (팀장 외 수정 금지)
+export type CadTool = 'draw' | 'erase' | 'move' | 'deform' | 'spray';
+export type CadMaterial = 'hologram' | 'steel' | 'titanium' | 'carbon' | 'gold';
+
+export interface CameraControlState {
+  mode: 'free' | 'auto_rotate' | 'step_rotate' | 'preset';
+  yawDeg?: number;
+  pitchDeg?: number;
+  speed?: number;
+  zoomFactor?: number;
+  preset?: 'front' | 'top' | 'iso';
+  commandId?: number;
+}
+
 export interface NodePoint {
   id: string;
-  position: [number, number, number]; // [x, y, z] 미터 단위 (0.25m 그리드 스냅)
-  isFixed: boolean; // 바닥/벽 고정 지점 여부
+  position: [number, number, number];
+  isFixed: boolean;
+  role?: 'primary' | 'reinforcement';
 }
 
 export interface BeamMember {
   id: string;
   startNodeId: string;
   endNodeId: string;
-  stress: number; // 0.0 (안전/Cyan) ~ 1.0 (파손위험/Red)
+  stress: number;
+  color?: string;
+  material?: CadMaterial;
+  radius?: number;
+  role?: 'primary' | 'reinforcement';
 }
 
 export interface StructureState {
@@ -17,4 +34,9 @@ export interface StructureState {
   beams: BeamMember[];
   targetLoadKg: number;
   isSimulating: boolean;
+  activeTool: CadTool;
+  activeColor: string;
+  activeMaterial: CadMaterial;
+  cameraControl: CameraControlState;
+  statusMessage?: string;
 }

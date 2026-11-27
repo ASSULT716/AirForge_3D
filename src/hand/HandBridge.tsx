@@ -15,7 +15,7 @@ interface Props {
   onPinchAction: (tool: CadTool, rawPos: [number, number, number], isNewStroke?: boolean) => void;
   /** 음성 최종 텍스트 → App(AI 해석) */
   onVoiceCommand: (rawText: string) => void;
-  /** 직전에 그린 노드 (빔 미리보기 시작점) */
+  /** 직전에 그린 노드 (그리기 제거 후 미사용. App 연결점 유지용) */
   lastDrawnNodeIdRef: MutableRefObject<string | null>;
 }
 
@@ -23,7 +23,7 @@ interface Props {
 const partIdOf = (sel: Selection | null) =>
   sel && sel.nodeIds.length === 0 && sel.solidIds.length === 1 ? sel.solidIds[0] : null;
 
-export default function HandBridge({ structure, setStructure, onPinchAction, onVoiceCommand, lastDrawnNodeIdRef }: Props) {
+export default function HandBridge({ structure, setStructure, onPinchAction, onVoiceCommand }: Props) {
   const structureRef = useRef(structure);
   structureRef.current = structure;
 
@@ -47,12 +47,7 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
 
   const handleCursor = (c: HandCursorState | null) => {
     if (!c) return handStore.set({ cursor: null });
-    const s = structureRef.current;
-    const linkFrom =
-      c.chainActive && !c.selecting && s.activeTool === 'draw'
-        ? s.nodes.find((n) => n.id === lastDrawnNodeIdRef.current)?.position ?? null
-        : null;
-    handStore.set({ cursor: { position: c.position, pinching: c.pinching, selecting: c.selecting, linkFrom } });
+    handStore.set({ cursor: { screen: c.screen, pinching: c.pinching, selecting: c.selecting } });
   };
 
   // ✌️ 조준 → 주먹 확정. 이미 선택된 구조물을 다시 고르면 해제 (토글)

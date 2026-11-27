@@ -20,7 +20,7 @@ interface Props {
   onPinchAction: (tool: CadTool, rawPos: [number, number, number], isNewStroke?: boolean) => void;
   /** 음성 최종 텍스트 / 직접 입력 → App(executeNaturalCommand)이 해석 */
   onVoiceCommand: (rawText: string) => void;
-  /** 3D 씬에 커서 표시용. 스냅된 월드 좌표가 바뀔 때만 호출 (손 없으면 null) */
+  /** 3D 씬에 커서 표시용. 화면 좌표가 바뀔 때만 호출 (손 없으면 null) */
   onCursor?: (cursor: HandCursorState | null) => void;
   /** 양손 펴고 벌리기/모으기 → 카메라 줌. factor > 1 확대, < 1 축소 (프레임 간 상대 배율) */
   onCameraZoom?: (factor: number) => void;
@@ -37,8 +37,8 @@ interface Props {
 }
 
 export interface HandCursorState {
-  /** 핀치 시 노드가 찍힐 스냅 좌표 */
-  position: [number, number, number];
+  /** 화면 좌표 (0~1, 좌상단 원점). 마우스 포인터처럼 3D 씬 캔버스 전체에 대응 */
+  screen: [number, number];
   pinching: boolean;
   /** true면 다음 핀치가 직전 노드와 빔으로 이어짐 */
   chainActive: boolean;
@@ -47,22 +47,22 @@ export interface HandCursorState {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 설정값 (SceneCanvas 카메라 확정되면 WORLD_* 범위만 맞추면 됨)
+// 설정값
 // ─────────────────────────────────────────────────────────────
-const GRID = 0.25;
-const WORLD_X: [number, number] = [-8, 8];
-const WORLD_Y: [number, number] = [0, 8]; // 화면 아래 = 지면(y=0)
-const WORLD_Z: [number, number] = [-8, 8];
+/** 커서 화면 좌표 단위 (0~1). 1/1000 = 1080p에서 ~1px → 변화 감지만 줄이고 정밀도는 유지 */
+const CURSOR_STEP = 0.001;
 /** 오른손 커서가 움직이는 카메라 영역(정규화, 거울 기준). 화면 끝까지 손 뻗지 않아도 되게 */
 const ACTIVE_X: [number, number] = [0.15, 0.85];
 const ACTIVE_Y: [number, number] = [0.1, 0.9];
-/** 왼손 손목 높이 → z. 손 올리면 화면 안쪽(-z), 내리면 앞(+z). 화면 높이 1.0 이동 = 10m (40% = 4m). 클수록 민감 */
-const Z_PER_SCREEN = 10;
-
-/** 커서 축을 카메라 좌우 회전(yaw)에 맞출 때 이 각도 단위로 스냅 (그리드 직각·대각선 유지) */
-const CURSOR_YAW_SNAP_DEG = 45;
-
-const EMA_ALPHA = 0.35; // 클수록 반응 빠름, 작을수록 부드러움
+/**
+ * 커서 One Euro 필터 (정규화 화면 좌표 기준).
+ * 멈춰 있으면 컷오프 ≈ MIN_CUTOFF → 떨림 강하게 제거, 빠르게 움직이면 컷오프↑ → 지연 적음
+ */
+const CURSOR_MIN_CUTOFF = 1.2; // Hz. 작을수록 정지 시 더 안정
+const CURSOR_BETA = 8; // 속도 반응. 클수록 빠른 움직임에 덜 끌림
+const CURSOR_D_CUTOFF = 1; // Hz. 속도 추정 스무딩
+/** 커서 기준 랜드마크: 5 = 검지 뿌리 관절 (핀치 동작에 영향 거의 없음) */
+const CURSOR_LM = 5;
 const PINCH_ON = 0.15; // (엄지-검지 거리) / (손목-중지MCP 거리). 손끝이 실제로 닿아야 ~0.15 이하
 const PINCH_OFF = 0.3;
 const PINCH_COOLDOWN_MS = 250;
@@ -179,36 +179,30 @@ const GRAB_MIN_GAP = 0.3;
 // ─────────────────────────────────────────────────────────────
 // 순수 유틸
 // ─────────────────────────────────────────────────────────────
-type Vec3 = [number, number, number];
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const invLerp = (lo: number, hi: number, v: number) => clamp((v - lo) / (hi - lo), 0, 1);
-/**
- * 카메라 좌우 회전(yaw, 45° 스냅) 기준 커서 축 → 월드 변환.
- * 손 좌우 = 화면 오른쪽 방향, 왼손 깊이(+) = 카메라 쪽. y(높이)는 그대로.
- * 기본 정면 시점이면 (lx, lz) 그대로 → 기존 동작과 같음
- */
-function cursorToWorld(lx: number, ly: number, lz: number, cameraQuat: readonly number[]): Vec3 {
-  const q = new THREE.Quaternion(cameraQuat[0], cameraQuat[1], cameraQuat[2], cameraQuat[3]);
-  const back = new THREE.Vector3(0, 0, 1).applyQuaternion(q); // 카메라 → 시청자 방향
-  // 위에서 내려다볼 때(back이 거의 수직)도 yaw가 안정적이도록 up 벡터로 보조
-  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-  const h = Math.hypot(back.x, back.z) > 0.2 ? back : up.negate();
-  const step = (CURSOR_YAW_SNAP_DEG * Math.PI) / 180;
-  const yaw = Math.round(Math.atan2(h.x, h.z) / step) * step; // 0 = 정면(+z에서 봄)
-  const c = Math.cos(yaw);
-  const sn = Math.sin(yaw);
-  // right = (cos, 0, -sin), back = (sin, 0, cos)
-  const wx = lx * c + lz * sn;
-  const wz = -lx * sn + lz * c;
-  return [snap(clamp(wx, WORLD_X[0], WORLD_X[1])), snap(ly), snap(clamp(wz, WORLD_Z[0], WORLD_Z[1]))];
+type Vec2 = [number, number];
+const quantize = (v: number) => Math.round(v / CURSOR_STEP) * CURSOR_STEP;
+
+/** One Euro 필터 (Casiez et al. 2012), 2D */
+interface OneEuro2 {
+  x: Vec2;
+  dx: Vec2;
+  t: number;
+}
+const smoothAlpha = (cutoff: number, dt: number) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+function oneEuroStep(f: OneEuro2 | null, raw: Vec2, now: number): OneEuro2 {
+  if (!f) return { x: raw, dx: [0, 0], t: now };
+  const dt = Math.max(1e-3, (now - f.t) / 1000);
+  const aD = smoothAlpha(CURSOR_D_CUTOFF, dt);
+  const dx: Vec2 = [0, 1].map((i) => lerp(f.dx[i], (raw[i] - f.x[i]) / dt, aD)) as Vec2;
+  const cutoff = CURSOR_MIN_CUTOFF + CURSOR_BETA * Math.hypot(dx[0], dx[1]);
+  const a = smoothAlpha(cutoff, dt);
+  return { x: [lerp(f.x[0], raw[0], a), lerp(f.x[1], raw[1], a)], dx, t: now };
 }
 
-const snap = (v: number) => {
-  const s = Math.round(v / GRID) * GRID;
-  return s === 0 ? 0 : s; // -0 제거
-};
 const dist = (a: NormalizedLandmark, b: NormalizedLandmark) => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** 엄지·검지 거리를 손 크기로 정규화 → 카메라 거리와 무관한 핀치 비율 */
@@ -778,7 +772,7 @@ const SOFTWARE_GL = /swiftshader|llvmpipe|software|basic render/i;
 type TrackStatus = 'off' | 'loading' | 'tracking' | 'error';
 
 interface HudInfo {
-  cursor: Vec3 | null;
+  cursor: Vec2 | null;
   pinching: boolean;
   hands: number;
   chainLen: number;
@@ -838,22 +832,18 @@ export default function HandTracker(props: Props) {
 
   // ── 그리기 상태 (렌더와 무관하므로 ref) ──
   const draw = useRef({
-    smoothCursor: null as [number, number] | null, // 정규화 화면좌표 EMA
-    smoothDepth: 0.5, // 왼손 높이 EMA (0~1)
-    depthOffset: 0, // 클러치 재파지 시 손 높이↔z 보정값 (m)
-    depthClutch: false, // 왼손이 안 펴짐 = z 고정 중
-    zLayer: 0,
+    smoothCursor: null as OneEuro2 | null, // 정규화 화면좌표 (One Euro)
     pinching: false,
     lastPinchAt: 0,
     pinchSince: 0,
     pinchCommitted: false,
     /** 최근 커서 기록 (핀치 직전 위치 찾기용, ~0.5초) */
-    cursorHist: [] as { t: number; p: Vec3 }[],
+    cursorHist: [] as { t: number; p: Vec2 }[],
     /** 엄지·검지가 모이기 시작한 시각 (비율이 PINCH_OFF 아래로 내려간 순간) */
     closeStart: 0,
     prevPinchRatio: 1,
     /** 핀치 중 고정된 찍을 위치 */
-    pinchPos: null as Vec3 | null,
+    pinchPos: null as Vec2 | null,
     fistSince: 0,
     lastHandsAt: 0,
     chainLen: 0, // 현재 스트로크 노드 수 (0 = 다음 핀치가 새 스트로크)
@@ -865,7 +855,7 @@ export default function HandTracker(props: Props) {
     lastSelectAt: 0,
     prevRightStable: 'none' as HandPose,
     /** ✌️ 유지 중 마지막 커서. 주먹 쥐는 동안 손끝이 움직여도 조준점 고정 */
-    selectCursor: null as Vec3 | null,
+    selectCursor: null as Vec2 | null,
     /** 움켜쥐기 회전 세션 */
     rot: {
       active: false,
@@ -935,6 +925,7 @@ export default function HandTracker(props: Props) {
     let pending = false;
     let submittedAt = 0;
     let lastInfoKey = '';
+    let lastCursorKey = '';
     let lastHint = '';
     let lastTestKey = '';
     let testWasActive = false;
@@ -979,14 +970,20 @@ export default function HandTracker(props: Props) {
     const ctx = canvas.getContext('2d')!;
 
     const pushInfo = (next: HudInfo) => {
-      const k = `${next.cursor?.join(',')}|${next.pinching}|${next.hands}|${next.chainLen}|${next.hint}|${next.gesture}|${next.mode}|${next.orbit}|${next.rot}`;
+      // 커서는 촘촘하게 움직이므로 씬 커서(onCursor)는 매번 갱신, HUD 리렌더(setInfo)는 1% 단위로만
+      const coarse = next.cursor?.map((v) => Math.round(v * 100)).join(',');
+      const k = `${coarse}|${next.pinching}|${next.hands}|${next.chainLen}|${next.hint}|${next.gesture}|${next.mode}|${next.orbit}|${next.rot}`;
+      const ck = `${next.cursor?.join(',')}|${next.pinching}|${next.chainLen}`;
       if (k !== lastInfoKey) {
         lastInfoKey = k;
         setInfo(next);
+      }
+      if (ck !== lastCursorKey) {
+        lastCursorKey = ck;
         propsRef.current.onCursor?.(
           next.cursor
             ? {
-                position: next.cursor,
+                screen: next.cursor,
                 pinching: next.pinching,
                 chainActive: next.chainLen > 0,
                 selecting: true, // 그리기 기능 제거 → 커서는 항상 선택용
@@ -1090,7 +1087,7 @@ export default function HandTracker(props: Props) {
         const w = res.worldLandmarks[i];
         return !!w && isGeometricOpen(w);
       };
-      // 오른손이 그리기(draw)·선택(select) 자세면 = 깊이 조절 → 왼손 z가 우선, 줌 진입 금지
+      // 오른손이 조준(draw·select) 자세면 줌·카메라 회전 진입 금지 (조준 중 화면이 움직이면 안 됨)
       const depthPriority = rightPose === 'draw' || rightPose === 'select';
       const bothOpen =
         !depthPriority && !!drawHand && !!depthHand && isOpen(drawIdx) && isOpen(depthIdx);
@@ -1134,42 +1131,24 @@ export default function HandTracker(props: Props) {
       }
       const zooming = z.active;
 
-      // 왼손 → z 레이어: 오른손이 그리기·선택 자세일 때만 갱신 (그 외엔 고정 → 줌 시작 동작과 안 겹침)
-      if (depthHand && depthPriority && !zooming) {
-        // 클러치: 왼손이 다 펴져 있을 때만 z 조절, 그 외(주먹 등) = z 고정. 다시 펴면 그 손 높이를 현재 z에 다시 맞춤 → 여러 번 끊어서 길게 이동
-        const handY = depthHand[0].y;
-        const rawZ = (y: number) => (y - 0.5) * Z_PER_SCREEN; // 화면 가운데 = 0 (감도는 WORLD_Z 범위와 무관)
-        if (!depthWorld || !isGeometricOpen(depthWorld)) {
-          d.depthClutch = true;
-        } else {
-          if (d.depthClutch) {
-            d.depthClutch = false;
-            d.smoothDepth = handY;
-            d.depthOffset = d.zLayer - rawZ(handY);
-          }
-          d.smoothDepth = lerp(d.smoothDepth, handY, EMA_ALPHA);
-          d.zLayer = snap(clamp(rawZ(d.smoothDepth) + d.depthOffset, WORLD_Z[0], WORLD_Z[1]));
-        }
-      }
-
-      let cursor: Vec3 | null = null;
+      let cursor: Vec2 | null = null;
       if (zooming) {
         // 줌 중엔 그리기 정지: 커서 숨김 + 핀치/주먹 판정 안 함
         d.smoothCursor = null;
         d.pinching = false;
         d.fistSince = 0;
       } else if (drawHand) {
-        // 엄지·검지 중간점 = 커서 (핀치할 때 커서가 튀지 않음)
-        const rawX = 1 - (drawHand[4].x + drawHand[8].x) / 2;
-        const rawY = (drawHand[4].y + drawHand[8].y) / 2;
-        d.smoothCursor = d.smoothCursor
-          ? [lerp(d.smoothCursor[0], rawX, EMA_ALPHA), lerp(d.smoothCursor[1], rawY, EMA_ALPHA)]
-          : [rawX, rawY];
+        // 커서 = 검지 뿌리 관절(index_mcp, 5번). 엄지·검지를 모아도 거의 안 움직임
+        // (손끝 중간점은 엄지가 더 많이 움직이고 손끝이 겹치면 인식도 흔들려서 핀치할 때 커서가 떨렸음)
+        const rawX = 1 - drawHand[CURSOR_LM].x;
+        const rawY = drawHand[CURSOR_LM].y;
+        d.smoothCursor = oneEuroStep(d.smoothCursor, [rawX, rawY], now);
 
-        const tx = invLerp(ACTIVE_X[0], ACTIVE_X[1], d.smoothCursor[0]);
-        const ty = invLerp(ACTIVE_Y[0], ACTIVE_Y[1], d.smoothCursor[1]);
-        // 카메라를 옆으로 돌려도 손 좌우 = 화면 좌우가 되게 카메라 yaw 기준으로 축 회전
-        const snapped = cursorToWorld(lerp(WORLD_X[0], WORLD_X[1], tx), lerp(WORLD_Y[1], WORLD_Y[0], ty), d.zLayer, cameraGesture.cameraQuat);
+        // 카메라 활성 영역 → 3D 씬 화면 전체 (마우스 포인터처럼 깊이 없음. 카메라 시점과 무관)
+        const snapped: Vec2 = [
+          quantize(invLerp(ACTIVE_X[0], ACTIVE_X[1], d.smoothCursor.x[0])),
+          quantize(invLerp(ACTIVE_Y[0], ACTIVE_Y[1], d.smoothCursor.x[1])),
+        ];
         // 카메라 이동·움켜쥐기 중엔 커서 숨김 (EMA는 계속 → 모드 복귀 시 커서 안 튐)
         if (rightPose === 'select') {
           // 원시 자세가 아직 ✌️일 때만 조준점 갱신. 주먹으로 접는 중(200ms 확인 대기)엔 마지막 조준점 유지
@@ -1303,7 +1282,7 @@ export default function HandTracker(props: Props) {
       }
 
       const zoomLine = zooming && drawHand && depthHand ?([drawHand[9], depthHand[9]] as const) : null;
-      const overlayCursor = cursor ? d.smoothCursor : null;
+      const overlayCursor = cursor && d.smoothCursor ? d.smoothCursor.x : null;
       renderOverlay(ctx, canvas, hands, drawHand, overlayCursor, d.pinching, zoomLine, (i) => {
         // 진단: 손가락별 접힘(검·중·약·새 ●=접힘) + 엄지 비율(t) + 손가락 곧음(s) → 임계값 튜닝용
         const w = res.worldLandmarks[i];
@@ -1311,7 +1290,7 @@ export default function HandTracker(props: Props) {
         const hold = i === drawIdx ? d.rightPose : d.leftPose;
         const tu = `t${hold.thumbRatio.toFixed(2)} s${hold.straightness.toFixed(2)}`;
         if (i !== drawIdx) {
-          const role = orbit ? 'ORBIT' : `z=${d.zLayer.toFixed(2)}${d.depthClutch ? ' HOLD' : ''}`;
+          const role = orbit ? 'ORBIT' : 'LEFT';
           return `${role} ${curl} ${tu}`;
         }
         return `${curl} p${pinchRatio(hands[i]).toFixed(2)} ${tu}`;
@@ -1640,8 +1619,8 @@ export default function HandTracker(props: Props) {
           <div className="absolute bottom-0 left-0 right-0 flex justify-between bg-black/50 px-2 py-1">
             <span>
               {info.cursor
-                ? `X ${info.cursor[0].toFixed(2)}  Y ${info.cursor[1].toFixed(2)}  Z ${info.cursor[2].toFixed(2)}`
-                : 'X —  Y —  Z —'}
+                ? `X ${Math.round(info.cursor[0] * 100)}%  Y ${Math.round(info.cursor[1] * 100)}%`
+                : 'X —  Y —'}
             </span>
             <span className={info.pinching ? 'text-[#ff1e42]' : ''}>
               {info.pinching ? 'PINCH' : info.gesture || '—'}

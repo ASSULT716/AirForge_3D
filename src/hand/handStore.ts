@@ -5,10 +5,9 @@ import { useSyncExternalStore } from 'react';
 import type { Selection } from '../services/selection';
 
 export interface SceneHandCursor {
-  position: [number, number, number];
+  /** 화면 좌표 (0~1, 좌상단 원점). 깊이 없음 → 마우스처럼 카메라 → 이 점으로 레이를 쏴서 선택 */
+  screen: [number, number];
   pinching: boolean;
-  /** 핀치하면 이 좌표에서 커서까지 빔이 생김 (없으면 새 스트로크) */
-  linkFrom: [number, number, number] | null;
   /** 선택 커서(✌️) 모드: 초록 링 + 가리킨 구조물 하이라이트 */
   selecting: boolean;
 }

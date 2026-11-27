@@ -25,14 +25,18 @@ export type BuildingTemplateId =
   | 'twin-pavilion'
   | 'bridge-cantilever'
   | 'split-gable'
-  | 'atrium-ring';
+  | 'atrium-ring'
+  | 'mono-loft'
+  | 'courtyard-hanok'
+  | 'stacked-cube';
 
 export type RoofStyle =
   | 'flat-overhang'
   | 'gable'
   | 'shed'
   | 'butterfly'
-  | 'split-gable';
+  | 'split-gable'
+  | 'hip-eaves';
 
 export type InteriorTheme =
   | 'warm-wood'
@@ -42,7 +46,30 @@ export type InteriorTheme =
 
 export type StudioViewMode = 'exterior' | 'interior_cutaway';
 
-export type SiteShape = 'rectangle' | 'triangle' | 'circle' | 'trapezoid';
+export type SiteShape = 'rectangle' | 'triangle' | 'circle' | 'trapezoid' | 'custom';
+
+/** Vision AI가 참조 사진에서 추출하는 정밀 건축 DNA */
+export interface ArchitecturalDna {
+  massingStyle: BuildingTemplateId;
+  roofStyle: RoofStyle;
+  roofPitchDeg: number; // 지붕 경사각 (0 ~ 38도)
+  overhangScale: number; // 처마 돌출 비율 (0.06 ~ 0.42)
+  windowWallRatio: number; // 외벽 대비 창호 비율 (0.25 ~ 0.85)
+  floor1Material: CadMaterial;
+  upperMaterial: CadMaterial;
+  roofMaterial: CadMaterial;
+  wallColor: string;
+  upperWallColor: string;
+  roofColor: string;
+  interiorTheme: InteriorTheme;
+  interiorWallColor: string;
+  interiorFloorColor: string;
+  suggestedFloors: number;
+  hasCantilever: boolean;
+  hasPorchDeck: boolean;
+  gardenDensity: number; // 0.6 ~ 1.6
+  architecturalNote: string;
+}
 
 export interface BuildingTemplateOption {
   id: BuildingTemplateId;
@@ -50,15 +77,22 @@ export interface BuildingTemplateOption {
   subtitle: string;
   concept: string;
   roofStyle: RoofStyle;
+  roofPitchDeg?: number;
+  overhangScale?: number;
+  windowWallRatio?: number;
   primaryMaterial: CadMaterial;
   accentMaterial: CadMaterial;
+  roofMaterial?: CadMaterial;
   wallColor: string;
+  upperWallColor?: string;
   roofColor: string;
   interiorTheme: InteriorTheme;
   interiorWallColor: string;
   interiorFloorColor: string;
   openPlanRatio: number;
   gardenMultiplier: number;
+  hasCantilever?: boolean;
+  hasPorchDeck?: boolean;
   structureBadge: string;
   roofBadge: string;
   isPhotoDerived?: boolean;
@@ -105,12 +139,17 @@ export interface SolidPrimitive {
     | 'furniture'
     | 'unit_divider'
     | 'roof'
+    | 'roof_infill'
     | 'core'
     | 'basement'
     | 'garden'
     | 'sculpture'
     | 'site_boundary';
-  shape: 'box' | 'sphere' | 'cone' | 'cylinder' | 'torus';
+  /**
+   * gable_wall: 이등변 삼각형 박공 마감벽 (박공 지붕과 벽체 사이 빈틈 밀봉)
+   * wedge_wall: 직각 삼각형 경사 마감벽 (경사·나비·스플릿 지붕 측벽 빈틈 밀봉)
+   */
+  shape: 'box' | 'sphere' | 'cone' | 'cylinder' | 'torus' | 'gable_wall' | 'wedge_wall';
   position: [number, number, number];
   scale: [number, number, number];
   rotation?: [number, number, number];
@@ -196,13 +235,22 @@ export interface BuildingSpec {
   templateId?: BuildingTemplateId;
   selectedTemplateName?: string;
   dynamicTemplates?: BuildingTemplateOption[];
+  architecturalDna?: ArchitecturalDna;
   roofStyle?: RoofStyle;
+  roofPitchDeg?: number;
+  overhangScale?: number;
+  windowWallRatio?: number;
   accentMaterial?: CadMaterial;
+  roofMaterial?: CadMaterial;
   interiorTheme?: InteriorTheme;
   interiorWallColor?: string;
   interiorFloorColor?: string;
   openPlanRatio?: number;
   siteShape?: SiteShape;
+  /** 자유 변형 대지 경계 2D 꼭짓점 배열 ([x, z] 월드 좌표, 반시계/시계 폐곡선) */
+  sitePolygon?: [number, number][];
+  /** true이면 꼭짓점 드래그 시 기존 대지면적(siteAreaSqm)을 유지하도록 비율 보정 */
+  lockSiteAreaOnDrag?: boolean;
   useHouseholds?: boolean;
   siteAreaSqm: number;
   buildingAreaSqm: number;
@@ -219,9 +267,11 @@ export interface BuildingSpec {
   gardenAreaSqm: number;
   designConcept?: string;
   customWallColor?: string;
+  customUpperWallColor?: string;
   customRoofColor?: string;
   styleSummary?: string;
   photoCount?: number;
+  analysisSource?: 'vision-ai' | 'local-fallback';
   unitTypes?: UnitDesignType[];
   exteriorWindows?: ExteriorWindow3D[];
   mepPipes?: MepPipe3D[];
@@ -245,6 +295,7 @@ export interface StructureState {
   selectedUnitTypeId?: string | null;
   selectedPartId?: string | null;
   selectedFloorIndex?: number | null;
+  isSiteEditMode?: boolean;
   isLoadHeatmapActive?: boolean;
   showMepPipes?: boolean;
   viewMode?: StudioViewMode;

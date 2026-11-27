@@ -1,8 +1,8 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import {
   ActiveSpecVisualization,
   BuildingSpec,
-  BuildingTemplateId,
+  BuildingTemplateOption,
   CadMaterial,
   DesignCategory,
   SiteShape,
@@ -10,7 +10,9 @@ import {
 import { calculateKoreanBuildingLimits } from '../utils/buildingEstimator';
 import {
   BUILDING_TEMPLATES_BY_CATEGORY,
+  createDefaultSitePolygon,
   getDefaultSpecForCategory,
+  rescalePolygonToArea,
 } from '../utils/architectureGenerator';
 import {
   analyzeMultipleHousePhotosAndAdaptSpec,
@@ -20,6 +22,8 @@ import {
 interface Props {
   initialSpec?: BuildingSpec;
   isGenerating: boolean;
+  isSiteEditMode: boolean;
+  onToggleSiteEditMode: (next: boolean) => void;
   onLivePreviewSpec: (
     spec: BuildingSpec,
     activeViz: ActiveSpecVisualization | null,
@@ -189,6 +193,8 @@ function AccordionSpecItem({
 export default function BuildingSpecBuilder({
   initialSpec,
   isGenerating,
+  isSiteEditMode,
+  onToggleSiteEditMode,
   onLivePreviewSpec,
   onSubmitSpec,
   onSelectFree3DMode,
@@ -200,12 +206,47 @@ export default function BuildingSpecBuilder({
   const [lockedKeys, setLockedKeys] = useState<Partial<Record<SpecFieldKey, boolean>>>({});
   const [expandedKey, setExpandedKey] = useState<SpecFieldKey | null>(null);
   const [baselineSpec, setBaselineSpec] = useState<BuildingSpec>(defaultInit);
+  const [activePrimaryMaterial, setActivePrimaryMaterial] = useState<CadMaterial>('stucco');
 
   // 여러 장 사진 무드보드 상태
   const [refPhotos, setRefPhotos] = useState<string[]>([]);
   const [extractedStyle, setExtractedStyle] = useState<ExtractedHouseStyle | null>(null);
   const [isAnalyzingPhoto, setIsAnalyzingPhoto] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // 3D 캔버스에서 대지 꼭짓점을 드래그했을 때 바뀐 대지 폴리곤·대지면적·건축면적을 패널 상태에 즉시 동기화
+  useEffect(() => {
+    if (!initialSpec) return;
+    setSpecState((prev) => {
+      const samePoly =
+        prev.sitePolygon?.length === initialSpec.sitePolygon?.length &&
+        (prev.sitePolygon ?? []).every(
+          (pt, i) =>
+            pt[0] === initialSpec.sitePolygon?.[i]?.[0] &&
+            pt[1] === initialSpec.sitePolygon?.[i]?.[1]
+        );
+      if (
+        samePoly &&
+        prev.siteAreaSqm === initialSpec.siteAreaSqm &&
+        prev.buildingAreaSqm === initialSpec.buildingAreaSqm &&
+        prev.siteShape === initialSpec.siteShape
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        siteShape: initialSpec.siteShape,
+        sitePolygon: initialSpec.sitePolygon,
+        siteAreaSqm: initialSpec.siteAreaSqm,
+        buildingAreaSqm: initialSpec.buildingAreaSqm,
+      };
+    });
+  }, [
+    initialSpec?.sitePolygon,
+    initialSpec?.siteAreaSqm,
+    initialSpec?.buildingAreaSqm,
+    initialSpec?.siteShape,
+  ]);
 
   const limits = useMemo(
     () =>
@@ -223,19 +264,48 @@ export default function BuildingSpecBuilder({
     [specState]
   );
 
+  // 단독주택 기본 10종 / 사진 업로드 시 Vision AI 맞춤형 10종
+  const templatesForCurrent: BuildingTemplateOption[] = useMemo(() => {
+    if (specState.usageType === '3D 디자인') return [];
+    if (specState.dynamicTemplates && specState.dynamicTemplates.length > 0) {
+      return specState.dynamicTemplates;
+    }
+    return BUILDING_TEMPLATES_BY_CATEGORY[specState.usageType];
+  }, [specState.usageType, specState.dynamicTemplates]);
+
   const applyPhotoCollection = async (nextUrls: string[]) => {
     setRefPhotos(nextUrls);
     if (nextUrls.length === 0) {
       setExtractedStyle(null);
+      const cat = specState.usageType === '3D 디자인' ? '단독주택' : specState.usageType;
+      const defaultTemplates = BUILDING_TEMPLATES_BY_CATEGORY[cat];
+      const firstDef = defaultTemplates[0];
       const cleared: BuildingSpec = {
         ...specState,
+        templateId: firstDef.id,
+        selectedTemplateName: firstDef.name,
+        dynamicTemplates: defaultTemplates,
+        architecturalDna: undefined,
+        roofStyle: firstDef.roofStyle,
+        roofPitchDeg: firstDef.roofPitchDeg ?? 0,
+        overhangScale: firstDef.overhangScale ?? 0.22,
+        windowWallRatio: firstDef.windowWallRatio ?? 0.56,
+        accentMaterial: firstDef.accentMaterial,
+        roofMaterial: firstDef.roofMaterial ?? 'steel',
+        interiorTheme: firstDef.interiorTheme,
+        interiorWallColor: firstDef.interiorWallColor,
+        interiorFloorColor: firstDef.interiorFloorColor,
+        openPlanRatio: firstDef.openPlanRatio,
         customWallColor: undefined,
+        customUpperWallColor: undefined,
         customRoofColor: undefined,
         styleSummary: undefined,
+        analysisSource: undefined,
         photoCount: 0,
       };
       setSpecState(cleared);
-      onLivePreviewSpec(cleared, null, 'stucco');
+      setActivePrimaryMaterial(firstDef.primaryMaterial);
+      onLivePreviewSpec(cleared, null, firstDef.primaryMaterial);
       return;
     }
 
@@ -249,6 +319,7 @@ export default function BuildingSpecBuilder({
       setExtractedStyle(extracted);
       setSpecState(adaptedSpec);
       setBaselineSpec(adaptedSpec);
+      setActivePrimaryMaterial(extracted.material);
       onLivePreviewSpec(adaptedSpec, null, extracted.material);
     } finally {
       setIsAnalyzingPhoto(false);
@@ -281,6 +352,12 @@ export default function BuildingSpecBuilder({
     const next: BuildingSpec = { ...specState, [priorityKey]: rawVal };
 
     if (priorityKey === 'siteAreaSqm') {
+      // 자유형 폴리곤이면 형태를 유지한 채 면적만 비율 확대/축소
+      if (next.sitePolygon && next.sitePolygon.length >= 3) {
+        next.sitePolygon = rescalePolygonToArea(next.sitePolygon, rawVal);
+      } else {
+        next.sitePolygon = createDefaultSitePolygon(rawVal, next.siteShape ?? 'rectangle');
+      }
       const nextLimits = calculateKoreanBuildingLimits(next);
       if (!lockedKeys.buildingAreaSqm && next.buildingAreaSqm > nextLimits.maxBuildingAreaSqm) {
         next.buildingAreaSqm = nextLimits.maxBuildingAreaSqm;
@@ -378,50 +455,82 @@ export default function BuildingSpecBuilder({
         deltaText:
           diff === 0 ? '기준값과 동일' : diff > 0 ? `+${diff}${unit} 증가` : `${diff}${unit} 감소`,
       },
-      extractedStyle?.material
+      activePrimaryMaterial
     );
   };
 
-  const applyPreset = (preset: BuildingSpec) => {
-    setSpecState(preset);
-    setBaselineSpec(preset);
-    onLivePreviewSpec(preset, null, extractedStyle?.material);
-  };
-
-  const handleDesignCategoryChange = (nextCategory: DesignCategory) => {
+  const handleDesignCategoryChange = async (nextCategory: DesignCategory) => {
     if (nextCategory === '3D 디자인') {
+      onToggleSiteEditMode(false);
       onSelectFree3DMode();
       return;
     }
     const def = getDefaultSpecForCategory(nextCategory);
-    applyPreset({
-      ...def,
-      roofStyle: specState.roofStyle ?? def.roofStyle,
-      accentMaterial: specState.accentMaterial ?? def.accentMaterial,
-      interiorTheme: specState.interiorTheme ?? def.interiorTheme,
-      interiorWallColor: specState.interiorWallColor ?? def.interiorWallColor,
-      interiorFloorColor: specState.interiorFloorColor ?? def.interiorFloorColor,
-      customWallColor: specState.customWallColor,
-      customRoofColor: specState.customRoofColor,
-      styleSummary: specState.styleSummary,
-    });
+    if (refPhotos.length > 0) {
+      const { adaptedSpec, extracted } = await analyzeMultipleHousePhotosAndAdaptSpec(
+        refPhotos,
+        def,
+        lockedKeys
+      );
+      setExtractedStyle(extracted);
+      setSpecState(adaptedSpec);
+      setBaselineSpec(adaptedSpec);
+      setActivePrimaryMaterial(extracted.material);
+      onLivePreviewSpec(adaptedSpec, null, extracted.material);
+    } else {
+      setSpecState(def);
+      setBaselineSpec(def);
+      setActivePrimaryMaterial('stucco');
+      onLivePreviewSpec(def, null, 'stucco');
+    }
   };
 
-  const handleTemplateSelect = (nextTpl: BuildingTemplateId) => {
-    if (specState.usageType === '3D 디자인') return;
-    const preset = getDefaultSpecForCategory(specState.usageType, nextTpl);
-    applyPreset({
+  // 10종 디자인 템플릿 중 선택 시 매스·지붕·경사각·처마·창호비율·층별재질·실내 테마 일괄 전환
+  const handleTemplateCardSelect = (tpl: BuildingTemplateOption) => {
+    const nextGarden = !lockedKeys.gardenAreaSqm
+      ? Math.min(
+          Math.round(specState.siteAreaSqm * 0.55),
+          Math.max(0, Math.round(baselineSpec.gardenAreaSqm * tpl.gardenMultiplier))
+        )
+      : specState.gardenAreaSqm;
+
+    const updatedSpec: BuildingSpec = {
       ...specState,
-      templateId: nextTpl,
-      projectName: preset.projectName,
-      designConcept: preset.designConcept,
-    });
+      projectName: `AirForge ${tpl.name.replace(/^\[사진 직결\]\s*/, '')}`,
+      templateId: tpl.id,
+      selectedTemplateName: tpl.name,
+      roofStyle: tpl.roofStyle,
+      roofPitchDeg: tpl.roofPitchDeg ?? (tpl.roofStyle === 'flat-overhang' ? 0 : 20),
+      overhangScale: tpl.overhangScale ?? 0.22,
+      windowWallRatio: tpl.windowWallRatio ?? 0.56,
+      accentMaterial: tpl.accentMaterial,
+      roofMaterial: tpl.roofMaterial ?? (tpl.accentMaterial === 'wood' ? 'wood' : 'steel'),
+      interiorTheme: tpl.interiorTheme,
+      interiorWallColor: tpl.interiorWallColor,
+      interiorFloorColor: tpl.interiorFloorColor,
+      openPlanRatio: tpl.openPlanRatio,
+      gardenAreaSqm: nextGarden,
+      customWallColor: tpl.wallColor,
+      customUpperWallColor: tpl.upperWallColor,
+      customRoofColor: tpl.roofColor,
+      designConcept: tpl.concept,
+    };
+
+    setSpecState(updatedSpec);
+    setActivePrimaryMaterial(tpl.primaryMaterial);
+    onLivePreviewSpec(updatedSpec, null, tpl.primaryMaterial);
   };
 
-  const templatesForCurrent =
-    specState.usageType === '3D 디자인'
-      ? []
-      : BUILDING_TEMPLATES_BY_CATEGORY[specState.usageType];
+  const handleResetSiteShape = (shapeId: Exclude<SiteShape, 'custom'>) => {
+    const freshPolygon = createDefaultSitePolygon(specState.siteAreaSqm, shapeId);
+    const next: BuildingSpec = {
+      ...specState,
+      siteShape: shapeId,
+      sitePolygon: freshPolygon,
+    };
+    setSpecState(next);
+    onLivePreviewSpec(next, null, activePrimaryMaterial);
+  };
 
   const categories: {
     groupTitle: string;
@@ -446,7 +555,7 @@ export default function BuildingSpecBuilder({
           min: 100,
           max: 20000,
           step: 10,
-          lawNote: `대지 200㎡ 이상 시 조경 최소 ${limits.minGardenAreaSqm}㎡ 확보 필요`,
+          lawNote: `대지 200㎡ 이상 시 조경 최소 ${limits.minGardenAreaSqm}㎡ · 자유형 경계 드래그 시 자동 연동`,
         },
         {
           key: 'buildingAreaSqm',
@@ -473,7 +582,7 @@ export default function BuildingSpecBuilder({
           min: 0,
           max: Math.max(100, Math.floor(specState.siteAreaSqm * 0.9)),
           step: 5,
-          lawNote: `법정 최소 ${limits.minGardenAreaSqm}㎡`,
+          lawNote: `법정 최소 ${limits.minGardenAreaSqm}㎡ · 대지 경계 내부 남는 땅에만 안전 배치`,
         },
       ],
     },
@@ -581,15 +690,15 @@ export default function BuildingSpecBuilder({
 
   return (
     <div className="space-y-2.5 text-slate-800">
-      {/* 여러 장 집 느낌 사진 업로드 -> 외관·지붕·층별·실내 스타일 동시 추출 */}
+      {/* 여러 장 사진 업로드 -> Vision AI 건축 DNA 정밀 추출 & 10종 템플릿 생성 */}
       <div className="p-2 rounded-xl bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-200 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <span className="text-[10.5px] font-extrabold text-sky-900 block">
-              원하는 집 느낌 사진 여러 장 넣기 (외관 · 지붕 · 인테리어)
+              원하는 집 사진 넣기 (Vision AI 건축 DNA 정밀 분석)
             </span>
             <span className="text-[9.5px] text-slate-600 block truncate">
-              1번 사진: 주 외장재 · 2번 사진: 지붕/상층재 · 3번 사진: 실내 벽·바닥 분위기
+              지붕 각도·처마·창호 비율·1F/상층 외장재·실내 분위기를 추출해 10종 템플릿을 생성합니다
             </span>
           </div>
           <input
@@ -611,10 +720,10 @@ export default function BuildingSpecBuilder({
               className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-[10.5px] cursor-pointer shadow-xs disabled:opacity-50"
             >
               {isAnalyzingPhoto
-                ? '분석 중...'
+                ? 'Vision AI 분석 중...'
                 : refPhotos.length > 0
                 ? `+ 사진 추가 (${refPhotos.length}/6)`
-                : '사진 여러 장 선택'}
+                : '사진 선택'}
             </button>
             {refPhotos.length > 0 && (
               <button
@@ -628,12 +737,11 @@ export default function BuildingSpecBuilder({
           </div>
         </div>
 
-        {/* 업로드된 다중 사진 썸네일 무드보드 */}
         {refPhotos.length > 0 && (
           <div className="bg-white/90 border border-sky-200 rounded-lg p-1.5 space-y-1.5">
             <div className="flex gap-1.5 overflow-x-auto pb-0.5">
               {refPhotos.map((url, idx) => (
-                <div key={idx} className="relative shrink-0 group">
+                <div key={idx} className="relative shrink-0">
                   <img
                     src={url}
                     alt={`참조 사진 ${idx + 1}`}
@@ -655,15 +763,28 @@ export default function BuildingSpecBuilder({
             </div>
 
             {extractedStyle && (
-              <div>
-                <div className="text-[10px] font-bold text-slate-900 truncate">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-1">
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
+                      extractedStyle.analysisSource === 'vision-ai'
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : 'bg-amber-100 text-amber-800 border border-amber-300'
+                    }`}
+                  >
+                    {extractedStyle.analysisSource === 'vision-ai'
+                      ? `✓ Vision AI 분석 완료 · ${extractedStyle.modelUsed}`
+                      : `⚠ ${extractedStyle.modelUsed}`}
+                  </span>
+                </div>
+                <div className="text-[10px] font-bold text-slate-900 leading-snug">
                   {extractedStyle.styleSummary}
                 </div>
-                <div className="flex flex-wrap gap-1 mt-1">
+                <div className="flex flex-wrap gap-1">
                   {extractedStyle.tags.map((tag, idx) => (
                     <span
                       key={idx}
-                      className="px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 font-mono text-[9.5px] font-bold"
+                      className="px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 font-mono text-[9px] font-bold"
                     >
                       {tag}
                     </span>
@@ -692,7 +813,7 @@ export default function BuildingSpecBuilder({
             onChange={(e) => handleDesignCategoryChange(e.target.value as DesignCategory)}
             className="w-full bg-sky-50 border border-sky-300 focus:border-sky-500 rounded px-2 py-1 text-xs font-bold text-sky-900 outline-none"
           >
-            <option value="단독주택">단독주택</option>
+            <option value="단독주택">단독주택 (10종 템플릿)</option>
             <option value="공동주택">공동주택</option>
             <option value="업무·상업시설">업무·상업시설</option>
             <option value="복합문화시설">복합문화시설</option>
@@ -701,70 +822,141 @@ export default function BuildingSpecBuilder({
         </div>
       </div>
 
-      {/* 대지 경계 모양 자유 선택 */}
-      <div>
-        <span className="text-[10px] font-bold text-slate-500 block mb-1">
-          대지 경계 모양 (동일 면적 내 자유 변형)
-        </span>
-        <div className="grid grid-cols-4 gap-1">
-          {(
-            [
-              { id: 'rectangle', label: '▭ 직사각형' },
-              { id: 'triangle', label: '△ 삼각형' },
-              { id: 'circle', label: '○ 원형' },
-              { id: 'trapezoid', label: '⏢ 사다리꼴' },
-            ] as { id: SiteShape; label: string }[]
-          ).map((shapeItem) => {
-            const active = (specState.siteShape ?? 'rectangle') === shapeItem.id;
-            return (
+      {/* 자유형 대지 경계 편집 (마우스/제스처 드래그) + 기본형 빠른 초기화 */}
+      <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <span className="text-[10.5px] font-extrabold text-slate-800 block">
+              자유형 대지 경계 편집 ({specState.sitePolygon?.length ?? 4}각형 ·{' '}
+              {specState.siteAreaSqm.toLocaleString()}㎡)
+            </span>
+            <span className="text-[9.5px] text-slate-500 block">
+              경계 핀을 마우스·제스처로 드래그하면 건물이 깨지지 않고 내부에 자동 재구성됩니다
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onToggleSiteEditMode(!isSiteEditMode)}
+            className={`px-2.5 py-1.5 rounded-lg text-[10.5px] font-bold border cursor-pointer shrink-0 transition ${
+              isSiteEditMode
+                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                : 'bg-white text-sky-800 border-sky-300 hover:bg-sky-50'
+            }`}
+          >
+            {isSiteEditMode ? '경계 드래그 편집 ON' : '경계 드래그 편집'}
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 pt-0.5">
+          <label className="flex items-center gap-1.5 text-[10px] font-bold text-slate-700 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={Boolean(specState.lockSiteAreaOnDrag)}
+              onChange={(e) => {
+                const next = { ...specState, lockSiteAreaOnDrag: e.target.checked };
+                setSpecState(next);
+                onLivePreviewSpec(next, null, activePrimaryMaterial);
+              }}
+              className="accent-sky-600 cursor-pointer"
+            />
+            드래그 시 기존 대지면적 고정 유지
+          </label>
+          <div className="flex items-center gap-1">
+            {(
+              [
+                { id: 'rectangle', label: '▭' },
+                { id: 'triangle', label: '△' },
+                { id: 'circle', label: '○' },
+                { id: 'trapezoid', label: '⏢' },
+              ] as { id: Exclude<SiteShape, 'custom'>; label: string }[]
+            ).map((shapeItem) => (
               <button
                 key={shapeItem.id}
                 type="button"
-                onClick={() => {
-                  const next = { ...specState, siteShape: shapeItem.id };
-                  setSpecState(next);
-                  onLivePreviewSpec(next, null, extractedStyle?.material);
-                }}
-                className={`py-1 px-1.5 rounded text-[10.5px] font-bold border cursor-pointer transition ${
-                  active
+                title={`${shapeItem.id} 기본형으로 초기화`}
+                onClick={() => handleResetSiteShape(shapeItem.id)}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold border cursor-pointer transition ${
+                  specState.siteShape === shapeItem.id
                     ? 'bg-slate-800 text-white border-slate-800'
-                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-400'
+                    : 'bg-white text-slate-600 border-slate-300 hover:border-slate-500'
                 }`}
               >
                 {shapeItem.label}
               </button>
-            );
-          })}
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* 건물 유형별 기본 디자인 템플릿 */}
+      {/* 단독주택 10종(또는 용도별) 디자인 템플릿 선택 그리드 */}
       {templatesForCurrent.length > 0 && (
-        <div className="space-y-1">
-          <span className="text-[10px] font-bold text-slate-500 block">
-            {specState.usageType} 기본 디자인 템플릿
-          </span>
-          <div className="grid grid-cols-3 gap-1.5">
-            {templatesForCurrent.map((tpl) => {
-              const isSelected = specState.templateId === tpl.id;
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10.5px] font-extrabold text-slate-800">
+              {specState.usageType} 디자인 템플릿 ({templatesForCurrent.length}종 구조·지붕·실내)
+            </span>
+            {refPhotos.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 font-mono text-[9.5px] font-bold">
+                사진 {refPhotos.length}장 맞춤 {templatesForCurrent.length}종
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5 max-h-[210px] overflow-y-auto pr-1">
+            {templatesForCurrent.map((tpl, idx) => {
+              const isSelected =
+                (specState.selectedTemplateName && specState.selectedTemplateName === tpl.name) ||
+                (!specState.selectedTemplateName && specState.templateId === tpl.id && idx === 0);
+
               return (
                 <button
-                  key={tpl.id}
+                  key={`${tpl.id}_${tpl.name}_${idx}`}
                   type="button"
-                  onClick={() => handleTemplateSelect(tpl.id)}
-                  className={`p-1.5 rounded-lg border text-left transition cursor-pointer ${
+                  onClick={() => handleTemplateCardSelect(tpl)}
+                  className={`${
+                    idx === 0 ? 'col-span-2' : 'col-span-1'
+                  } p-2 rounded-lg border text-left transition cursor-pointer ${
                     isSelected
                       ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
-                      : 'bg-slate-50 text-slate-800 border-slate-200 hover:border-sky-400'
+                      : 'bg-slate-50 text-slate-800 border-slate-200 hover:border-sky-400 hover:bg-white'
                   }`}
                 >
-                  <div className="text-[10.5px] font-bold truncate">{tpl.name}</div>
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[10.5px] font-extrabold truncate">
+                      {idx + 1}안. {tpl.name}
+                    </span>
+                    <span
+                      className={`shrink-0 px-1.5 py-0.2 rounded font-mono text-[8.5px] font-bold ${
+                        isSelected
+                          ? 'bg-sky-800/80 text-sky-100'
+                          : 'bg-slate-200/80 text-slate-700'
+                      }`}
+                    >
+                      {tpl.roofBadge}
+                    </span>
+                  </div>
                   <div
-                    className={`text-[9px] line-clamp-1 mt-0.5 ${
-                      isSelected ? 'text-sky-100' : 'text-slate-500'
+                    className={`text-[9.5px] line-clamp-2 mt-0.5 leading-snug ${
+                      isSelected ? 'text-sky-100' : 'text-slate-600'
                     }`}
                   >
                     {tpl.subtitle}
+                  </div>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    <span
+                      className={`px-1 py-0.2 rounded font-mono text-[8.5px] ${
+                        isSelected ? 'bg-white/20 text-white' : 'bg-sky-50 text-sky-700'
+                      }`}
+                    >
+                      {tpl.structureBadge}
+                    </span>
+                    <span
+                      className={`px-1 py-0.2 rounded font-mono text-[8.5px] ${
+                        isSelected ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-800'
+                      }`}
+                    >
+                      1F {tpl.primaryMaterial.toUpperCase()} · 상층 {tpl.accentMaterial.toUpperCase()}
+                    </span>
                   </div>
                 </button>
               );
@@ -774,7 +966,7 @@ export default function BuildingSpecBuilder({
       )}
 
       {/* 카테고리별 구분선이 적용된 아코디언 제원 리스트 */}
-      <div className="max-h-[28vh] overflow-y-auto pr-1 space-y-3">
+      <div className="max-h-[22vh] overflow-y-auto pr-1 space-y-3">
         {categories.map((cat) => (
           <div key={cat.groupTitle} className="space-y-1">
             <div className="flex items-center gap-2 pt-1">
@@ -796,7 +988,7 @@ export default function BuildingSpecBuilder({
                 onToggle={() => {
                   const nextKey = expandedKey === item.key ? null : item.key;
                   setExpandedKey(nextKey);
-                  if (!nextKey) onLivePreviewSpec(specState, null, extractedStyle?.material);
+                  if (!nextKey) onLivePreviewSpec(specState, null, activePrimaryMaterial);
                 }}
                 label={item.label}
                 unit={item.unit}
@@ -818,8 +1010,8 @@ export default function BuildingSpecBuilder({
         <button
           onClick={() => {
             setBaselineSpec(specState);
-            onLivePreviewSpec(specState, null, extractedStyle?.material);
-            onSubmitSpec(specState, extractedStyle?.material);
+            onLivePreviewSpec(specState, null, activePrimaryMaterial);
+            onSubmitSpec(specState, activePrimaryMaterial);
           }}
           disabled={isGenerating}
           className="flex-1 py-2 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50 shadow-sm transition"

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   StructureState,
   NodePoint,
@@ -28,11 +28,43 @@ import {
 import { syncBuildingWithSolids } from './utils/buildingEstimator';
 import { downloadStructureAsSTL } from './utils/exportStl';
 import {
+  computePolygonAreaSqm,
   generateWatertightArchitecture,
   getDefaultSpecForCategory,
+  rescalePolygonToArea,
 } from './utils/architectureGenerator';
 
 const snap = (v: number) => Math.round(v * 4) / 4;
+
+/** 자유형 대지 폴리곤 변경 시 면적 유지 옵션 적용 + 건물 구조 안전 재구성 공통 함수 */
+function applySitePolygonToState(
+  prev: StructureState,
+  rawPolygon: [number, number][]
+): StructureState {
+  if (!prev.buildingSpec || rawPolygon.length < 3) return prev;
+  const spec = prev.buildingSpec;
+  const finalPolygon = spec.lockSiteAreaOnDrag
+    ? rescalePolygonToArea(rawPolygon, spec.siteAreaSqm)
+    : rawPolygon;
+  const nextSiteAreaSqm = spec.lockSiteAreaOnDrag
+    ? spec.siteAreaSqm
+    : computePolygonAreaSqm(finalPolygon);
+
+  const nextSpec: BuildingSpec = {
+    ...spec,
+    siteShape: 'custom',
+    sitePolygon: finalPolygon,
+    siteAreaSqm: nextSiteAreaSqm,
+  };
+  const built = generateWatertightArchitecture(nextSpec, prev.activeMaterial);
+  return {
+    ...prev,
+    buildingSpec: built.spec,
+    solids: built.solids,
+    nodes: built.nodes,
+    beams: built.beams,
+  };
+}
 
 export default function App() {
   const initialArch = useMemo(() => {
@@ -49,6 +81,7 @@ export default function App() {
     activeMaterial: 'stucco',
     activeColor: '#f5f2eb',
     selectedFloorIndex: null,
+    isSiteEditMode: false,
     showMepPipes: false,
     viewMode: 'exterior',
     activeSpecViz: null,
@@ -56,7 +89,7 @@ export default function App() {
       {
         id: 'welcome',
         role: 'assistant',
-        text: '기본 단독주택 템플릿이 배치되었습니다. 상단에서 원하는 집 느낌 사진을 여러 장 올리면 외벽·지붕·층별 매스·실내 벽체와 가구까지 자동으로 재설계됩니다.',
+        text: '단독주택 10종 디자인 템플릿과 자유형 대지 경계 편집이 준비되었습니다. 사진을 올리면 Vision AI가 지붕·창호·외장재 DNA를 추출하며, "경계 드래그 편집"을 켜고 핀을 끌면 대지 모양에 맞춰 건물이 깨지지 않고 자동 재구성됩니다.',
         timestamp: Date.now(),
       },
     ],
@@ -83,6 +116,24 @@ export default function App() {
   const selectedPart =
     (structure.solids ?? []).find((s) => s.id === structure.selectedPartId) ?? null;
 
+  const handleToggleSiteEditMode = useCallback((next: boolean) => {
+    setStructure((p) => ({
+      ...p,
+      isSiteEditMode: next,
+      selectedPartId: next ? null : p.selectedPartId,
+      selectedFloorIndex: next ? null : p.selectedFloorIndex,
+      selectedUnitTypeId: next ? null : p.selectedUnitTypeId,
+      isLoadHeatmapActive: next ? false : p.isLoadHeatmapActive,
+      statusMessage: next
+        ? '대지 경계 자유 편집 활성화 · 파란 핀을 마우스/제스처로 드래그하세요'
+        : '대지 경계 편집 종료',
+    }));
+  }, []);
+
+  const handleUpdateSitePolygon = useCallback((nextPolygon: [number, number][]) => {
+    setStructure((prev) => applySitePolygonToState(prev, nextPolygon));
+  }, []);
+
   const handleSubmitBuildingSpec = async (spec: BuildingSpec, overrideMaterial?: CadMaterial) => {
     if (isReinforcing) return;
     setIsFree3DMode(false);
@@ -91,6 +142,7 @@ export default function App() {
     setStructure((p) => ({
       ...p,
       activeMaterial: matToUse,
+      isSiteEditMode: false,
       statusMessage: `'${spec.projectName}' 건축 매스·지붕·실내 인테리어 동기화 중...`,
     }));
     try {
@@ -111,6 +163,7 @@ export default function App() {
       buildingSpec: undefined,
       selectedUnitTypeId: null,
       selectedFloorIndex: null,
+      isSiteEditMode: false,
       isLoadHeatmapActive: false,
       viewMode: 'exterior',
       statusMessage: '3D 디자인 (3D 프린팅·자유 조형) 대화 모드 활성화',
@@ -197,6 +250,27 @@ export default function App() {
     const beamId = `beam_${uid()}`;
 
     setStructure((prev) => {
+      // 자유형 대지 경계 편집 모드가 켜져 있으면 손 제스처 핀치로 가장 가까운 대지 꼭짓점을 실시간 드래그 변형
+      if (prev.isSiteEditMode && prev.buildingSpec?.sitePolygon && prev.buildingSpec.sitePolygon.length >= 3) {
+        const poly = prev.buildingSpec.sitePolygon;
+        let nearestIdx = -1;
+        let minDist = 1.4;
+        poly.forEach(([vx, vz], idx) => {
+          const d = Math.hypot(vx - rawPos[0], vz - rawPos[2]);
+          if (d < minDist) {
+            minDist = d;
+            nearestIdx = idx;
+          }
+        });
+        if (nearestIdx === -1) return prev;
+        const clampedX = Number(Math.max(-7.5, Math.min(7.5, rawPos[0])).toFixed(2));
+        const clampedZ = Number(Math.max(-7.5, Math.min(7.5, rawPos[2])).toFixed(2));
+        const nextPoly = poly.map((v, idx): [number, number] =>
+          idx === nearestIdx ? [clampedX, clampedZ] : v
+        );
+        return applySitePolygonToState(prev, nextPoly);
+      }
+
       if (tool === 'draw') {
         const existing = prev.nodes.find(
           (n) =>
@@ -396,9 +470,9 @@ export default function App() {
             selectedFloorIndex: null,
           }))
         }
+        onUpdateSitePolygon={handleUpdateSitePolygon}
       />
 
-      {/* 손·음성 입력 연결점 */}
       <HandBridge
         structure={structure}
         setStructure={setStructure}
@@ -452,6 +526,7 @@ export default function App() {
             selectedUnitTypeId: null,
             selectedPartId: null,
             selectedFloorIndex: null,
+            isSiteEditMode: false,
             showMepPipes: false,
             viewMode: 'exterior',
             isLoadHeatmapActive: false,
@@ -466,7 +541,6 @@ export default function App() {
         }}
       />
 
-      {/* 좌측 상단: 방 유형 2D 평면도 */}
       {selectedUnitType && (
         <FloorPlanViewer
           unitType={selectedUnitType}
@@ -474,7 +548,6 @@ export default function App() {
         />
       )}
 
-      {/* 우측 상단: 개별 요소 및 층 전체 일괄 선택 인스펙터 */}
       {selectedPart && (
         <PartInspector
           part={selectedPart}
@@ -510,7 +583,6 @@ export default function App() {
         />
       )}
 
-      {/* 우측 상단: KDS 41 12 00 하중 시뮬레이터 */}
       {!selectedPart && structure.buildingSpec && (
         <FloorLoadPanel
           spec={structure.buildingSpec}
@@ -519,6 +591,7 @@ export default function App() {
             setStructure((p) => ({
               ...p,
               isLoadHeatmapActive: active,
+              isSiteEditMode: active ? false : p.isSiteEditMode,
               selectedUnitTypeId: active ? null : p.selectedUnitTypeId,
             }))
           }
@@ -553,10 +626,20 @@ export default function App() {
         />
       )}
 
-      {/* 우측 하단: 실내 투시 뷰 · 배관 투시 · 다른 디자인 뽑기 · 견적서 · STL 출력 */}
+      {/* 우측 하단 액션 바 */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-wrap gap-2 bg-white/95 backdrop-blur-md border border-slate-300 p-2.5 rounded-xl shadow-lg">
         {structure.buildingSpec && (
           <>
+            <button
+              onClick={() => handleToggleSiteEditMode(!structure.isSiteEditMode)}
+              className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
+                structure.isSiteEditMode
+                  ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                  : 'bg-sky-50 text-sky-800 border-sky-300 hover:bg-sky-100'
+              }`}
+            >
+              {structure.isSiteEditMode ? '대지 경계 편집 ON' : '대지 경계 드래그 편집'}
+            </button>
             <button
               onClick={() =>
                 setStructure((p) => ({
@@ -611,13 +694,13 @@ export default function App() {
         </button>
       </div>
 
-      {/* 좌측 하단: 제원 설정 + 다중 사진 무드보드 + 방 유형 + 대화형 수정창 */}
+      {/* 좌측 하단 스튜디오 패널 */}
       <FloatingPanel
         title={isFree3DMode ? '3D DESIGN & PRINTING STUDIO' : 'AIRFORGE ARCHITECT STUDIO'}
         subtitle="DRAG BAR TO MOVE · RESIZE"
         initialX={16}
-        initialY={Math.max(64, window.innerHeight - 640)}
-        baseWidth={480}
+        initialY={Math.max(48, window.innerHeight - 680)}
+        baseWidth={490}
         zIndex={50}
         headerRightExtra={
           (!isSpecBuilderOpen || isFree3DMode) && (
@@ -639,6 +722,8 @@ export default function App() {
             <BuildingSpecBuilder
               initialSpec={structure.buildingSpec}
               isGenerating={isReinforcing}
+              isSiteEditMode={Boolean(structure.isSiteEditMode)}
+              onToggleSiteEditMode={handleToggleSiteEditMode}
               onLivePreviewSpec={(nextSpec, activeViz, overrideMaterial) => {
                 const matToUse = overrideMaterial ?? structure.activeMaterial;
                 const built = generateWatertightArchitecture(nextSpec, matToUse);
@@ -658,7 +743,6 @@ export default function App() {
             />
           )}
 
-          {/* 방(세대) 디자인 유형 선택기 */}
           {structure.buildingSpec?.unitTypes && structure.buildingSpec.unitTypes.length > 0 && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1.5">
               <div className="flex items-center justify-between text-[11px]">
@@ -685,6 +769,7 @@ export default function App() {
                           ...p,
                           selectedUnitTypeId: isSelected ? null : ut.id,
                           viewMode: 'exterior',
+                          isSiteEditMode: false,
                           isLoadHeatmapActive: false,
                         }))
                       }
@@ -711,7 +796,6 @@ export default function App() {
             </div>
           )}
 
-          {/* 대화창 접기/펼치기 바 */}
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <span className="font-mono text-[11px] font-bold text-sky-700">AI DESIGN CHAT</span>
             <button

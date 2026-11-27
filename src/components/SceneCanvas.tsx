@@ -13,13 +13,18 @@ import {
   SolidPrimitive,
 } from '../types/cad';
 import { getKdsLoadRange, MATERIAL_CATALOG } from '../utils/buildingEstimator';
-import { getFloorColor, getSiteBoundaryPoints } from '../utils/architectureGenerator';
+import {
+  computePolygonAreaSqm,
+  getFloorColor,
+  getSiteBoundaryPoints,
+} from '../utils/architectureGenerator';
 import { getPbrMaterialBundle } from '../utils/proceduralTextures';
 
 interface Props {
   structure: StructureState;
   onUpdateStress: (updatedBeams: StructureState['beams']) => void;
   onSelectPart: (partId: string | null) => void;
+  onUpdateSitePolygon?: (nextPolygon: [number, number][]) => void;
 }
 
 interface HoveredFloorTooltip {
@@ -38,7 +43,40 @@ const DANGER_RED = new THREE.Color('#ef4444');
 const FIXED_SLATE = new THREE.Color('#475569');
 const UP_VEC = new THREE.Vector3(0, 1, 0);
 
-// 스튜디오 하늘-지평선-지면 PBR 환경맵 (철·티타늄·골드·유리가 실제 금속/유리처럼 반사되도록 지원)
+// ---------- 지붕-벽체 밀봉용 정규화 삼각 지오메트리 (단위 큐브 [-0.5, 0.5] 기준) ----------
+let cachedGableGeo: THREE.ExtrudeGeometry | null = null;
+let cachedWedgeGeo: THREE.ExtrudeGeometry | null = null;
+
+function getGableWallGeometry(): THREE.ExtrudeGeometry {
+  if (cachedGableGeo) return cachedGableGeo;
+  const shape = new THREE.Shape();
+  shape.moveTo(-0.5, -0.5);
+  shape.lineTo(0.5, -0.5);
+  shape.lineTo(0, 0.5);
+  shape.closePath();
+
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false });
+  geo.translate(0, 0, -0.5);
+  geo.computeVertexNormals();
+  cachedGableGeo = geo;
+  return geo;
+}
+
+function getWedgeWallGeometry(): THREE.ExtrudeGeometry {
+  if (cachedWedgeGeo) return cachedWedgeGeo;
+  const shape = new THREE.Shape();
+  shape.moveTo(-0.5, -0.5);
+  shape.lineTo(0.5, -0.5);
+  shape.lineTo(0.5, 0.5);
+  shape.closePath();
+
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false });
+  geo.translate(0, 0, -0.5);
+  geo.computeVertexNormals();
+  cachedWedgeGeo = geo;
+  return geo;
+}
+
 function StudioEnvironment() {
   const { gl, scene } = useThree();
 
@@ -53,18 +91,15 @@ function StudioEnvironment() {
       let g = 244;
       let b = 248;
       if (v > 0.52) {
-        // 상부 스카이 라이트
         const t = (v - 0.52) / 0.48;
         r = Math.round(238 - t * 28);
         g = Math.round(244 - t * 14);
         b = Math.round(252 - t * 2);
       } else if (v > 0.46) {
-        // 밝은 스튜디오 수평선 하이라이트
         r = 255;
         g = 252;
         b = 246;
       } else {
-        // 하부 따뜻한 건축 대지 반사광
         const t = (0.46 - v) / 0.46;
         r = Math.round(232 - t * 55);
         g = Math.round(226 - t * 52);
@@ -120,6 +155,8 @@ function computeBeamTransform(p1: THREE.Vector3, p2: THREE.Vector3) {
 }
 
 function SolidShapeGeometry({ shape }: { shape: SolidPrimitive['shape'] }) {
+  if (shape === 'gable_wall') return <primitive object={getGableWallGeometry()} attach="geometry" />;
+  if (shape === 'wedge_wall') return <primitive object={getWedgeWallGeometry()} attach="geometry" />;
   if (shape === 'sphere') return <sphereGeometry args={[0.8, 24, 24]} />;
   if (shape === 'cone') return <coneGeometry args={[0.8, 1.4, 20]} />;
   if (shape === 'cylinder') return <cylinderGeometry args={[0.7, 0.7, 1.2, 24]} />;
@@ -170,7 +207,6 @@ function SolidMeshView({
       ? getFloorColor(solid.floorIndex)
       : null;
 
-  // 텍스처 고유의 색상을 살리기 위해 기본 재질(wood/steel/concrete)은 화이트 틴트 또는 은은한 조색 적용
   const rawTint =
     solid.color && solid.color !== '#00f3ff'
       ? solid.color
@@ -181,9 +217,13 @@ function SolidMeshView({
       ? '#ffffff'
       : rawTint;
 
-  // 0. 실내 투시 뷰(지붕 + 남/동측 전면 외벽 오픈 -> 실내 바닥·내벽·가구 선명 표시)
+  // 0. 실내 투시 뷰 (지붕 + 지붕 마감벽 + 남/동측 전면 외벽 숨김)
   if (interiorCutawayMode) {
-    if (solid.partRole === 'roof' || solid.partRole === 'sculpture') {
+    if (
+      solid.partRole === 'roof' ||
+      solid.partRole === 'roof_infill' ||
+      solid.partRole === 'sculpture'
+    ) {
       return null;
     }
     if (
@@ -254,7 +294,9 @@ function SolidMeshView({
   // 3. 방 평면도(TYPE-A 등) 선택 시 전체 건물 내 방 구역 투시
   if (xrayUnitMode) {
     const isRoofOrSculpture =
-      solid.partRole === 'roof' || solid.partRole === 'sculpture';
+      solid.partRole === 'roof' ||
+      solid.partRole === 'roof_infill' ||
+      solid.partRole === 'sculpture';
     const isWall =
       solid.partRole === 'exterior_wall' ||
       solid.partRole === 'interior_wall' ||
@@ -375,10 +417,160 @@ function SolidMeshView({
   );
 }
 
+/** 자유형 대지 경계 3D 꼭짓점 드래그 · 변 중간점 추가 · 더블클릭 삭제 편집기 */
+function SiteBoundaryEditor({
+  polygon2D,
+  isEditMode,
+  onUpdatePolygon,
+  onDraggingChange,
+}: {
+  polygon2D: [number, number][];
+  isEditMode: boolean;
+  onUpdatePolygon?: (nextPolygon: [number, number][]) => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (draggingIdx === null) return;
+    const handleUp = () => {
+      setDraggingIdx(null);
+      onDraggingChange(false);
+    };
+    window.addEventListener('pointerup', handleUp);
+    return () => window.removeEventListener('pointerup', handleUp);
+  }, [draggingIdx, onDraggingChange]);
+
+  const liveAreaSqm = useMemo(() => computePolygonAreaSqm(polygon2D), [polygon2D]);
+
+  if (!isEditMode || !onUpdatePolygon) return null;
+
+  const handlePlaneMove = (pt: THREE.Vector3) => {
+    if (draggingIdx === null) return;
+    const clampedX = Number(THREE.MathUtils.clamp(pt.x, -7.5, 7.5).toFixed(2));
+    const clampedZ = Number(THREE.MathUtils.clamp(pt.z, -7.5, 7.5).toFixed(2));
+    const nextPoly = polygon2D.map((v, i): [number, number] =>
+      i === draggingIdx ? [clampedX, clampedZ] : v
+    );
+    onUpdatePolygon(nextPoly);
+  };
+
+  return (
+    <group>
+      {/* 드래그 중 부드러운 XZ 평면 포인터 추적용 투명 플레인 */}
+      {draggingIdx !== null && (
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, 0.02, 0]}
+          onPointerMove={(e) => {
+            e.stopPropagation();
+            handlePlaneMove(e.point);
+          }}
+          onPointerUp={(e) => {
+            e.stopPropagation();
+            setDraggingIdx(null);
+            onDraggingChange(false);
+          }}
+        >
+          <planeGeometry args={[40, 40]} />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      )}
+
+      {/* 각 꼭짓점 드래그 핸들 (마우스 드래그 및 제스처 핀치 대상) */}
+      {polygon2D.map(([vx, vz], idx) => {
+        const isActive = draggingIdx === idx || hoveredIdx === idx;
+        return (
+          <group key={`site_vtx_${idx}`} position={[vx, 0.08, vz]}>
+            <mesh
+              onPointerOver={(e) => {
+                e.stopPropagation();
+                setHoveredIdx(idx);
+                document.body.style.cursor = 'grab';
+              }}
+              onPointerOut={() => {
+                setHoveredIdx(null);
+                if (draggingIdx === null) document.body.style.cursor = 'auto';
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                setDraggingIdx(idx);
+                onDraggingChange(true);
+                document.body.style.cursor = 'grabbing';
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                if (polygon2D.length <= 3) return;
+                onUpdatePolygon(polygon2D.filter((_, i) => i !== idx));
+              }}
+            >
+              <cylinderGeometry args={[isActive ? 0.14 : 0.11, isActive ? 0.14 : 0.11, 0.18, 16]} />
+              <meshStandardMaterial
+                color={draggingIdx === idx ? '#f59e0b' : isActive ? '#0ea5e9' : '#0284c7'}
+                emissive={isActive ? '#0284c7' : '#000000'}
+                emissiveIntensity={0.35}
+                roughness={0.25}
+                metalness={0.3}
+              />
+            </mesh>
+            <Html position={[0, 0.22, 0]} center distanceFactor={11}>
+              <div className="pointer-events-none px-1.5 py-0.5 rounded bg-slate-900/85 text-white font-mono text-[9.5px] font-bold whitespace-nowrap border border-sky-400">
+                P{idx + 1}
+              </div>
+            </Html>
+          </group>
+        );
+      })}
+
+      {/* 변 중앙 '+' 핸들 (클릭 시 꼭짓점 추가, 최대 12개) */}
+      {polygon2D.length < 12 &&
+        polygon2D.map(([x1, z1], idx) => {
+          const [x2, z2] = polygon2D[(idx + 1) % polygon2D.length];
+          const mx = Number(((x1 + x2) * 0.5).toFixed(2));
+          const mz = Number(((z1 + z2) * 0.5).toFixed(2));
+          return (
+            <mesh
+              key={`site_mid_${idx}`}
+              position={[mx, 0.05, mz]}
+              onClick={(e) => {
+                e.stopPropagation();
+                const next = [...polygon2D];
+                next.splice(idx + 1, 0, [mx, mz]);
+                onUpdatePolygon(next);
+              }}
+              onPointerOver={(e) => {
+                e.stopPropagation();
+                document.body.style.cursor = 'pointer';
+              }}
+              onPointerOut={() => {
+                if (draggingIdx === null) document.body.style.cursor = 'auto';
+              }}
+            >
+              <sphereGeometry args={[0.07, 12, 12]} />
+              <meshStandardMaterial color="#10b981" roughness={0.3} />
+            </mesh>
+          );
+        })}
+
+      {/* 드래그 중 실시간 대지면적 표시 */}
+      {draggingIdx !== null && (
+        <Html position={[polygon2D[draggingIdx][0], 0.45, polygon2D[draggingIdx][1]]} center>
+          <div className="pointer-events-none px-2 py-1 rounded-lg bg-slate-900/95 text-white font-mono text-[11px] font-bold whitespace-nowrap shadow-lg border border-amber-400">
+            자유 대지면적: {liveAreaSqm.toLocaleString()} ㎡ ({polygon2D.length}각형)
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
 function CameraController({
   control = { mode: 'free' },
+  disabled = false,
 }: {
   control?: CameraControlState;
+  disabled?: boolean;
 }) {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const { camera } = useThree();
@@ -465,9 +657,10 @@ function CameraController({
     <OrbitControls
       ref={controlsRef}
       makeDefault
+      enabled={!disabled}
       enableDamping
       dampingFactor={0.09}
-      autoRotate={control.mode === 'auto_rotate'}
+      autoRotate={control.mode === 'auto_rotate' && !disabled}
       autoRotateSpeed={(control.speed ?? 1.0) * 1.8}
       maxPolarAngle={Math.PI / 2 - 0.03}
     />
@@ -480,12 +673,16 @@ function StaticStructure({
   onSelectPart,
   onHoverFloor,
   onLeaveFloor,
+  onUpdateSitePolygon,
+  onDraggingSiteChange,
 }: {
   structure: StructureState;
   hoveredFloorIndex: number | null;
   onSelectPart: (partId: string | null) => void;
   onHoverFloor: (floorIndex: number, clientX: number, clientY: number) => void;
   onLeaveFloor: () => void;
+  onUpdateSitePolygon?: (nextPolygon: [number, number][]) => void;
+  onDraggingSiteChange: (dragging: boolean) => void;
 }) {
   const nodeMap = useMemo(() => {
     const map = new Map<string, NodePoint>();
@@ -502,6 +699,7 @@ function StaticStructure({
   const isHeatmap = Boolean(structure.isLoadHeatmapActive && spec);
   const isPipeXray = Boolean(structure.showMepPipes);
   const isInteriorCutaway = structure.viewMode === 'interior_cutaway';
+  const isSiteEditMode = Boolean(structure.isSiteEditMode && spec);
   const kdsRange = spec ? getKdsLoadRange(spec.usageType) : null;
   const vizKey = structure.activeSpecViz?.paramKey;
   const glassPbr = getPbrMaterialBundle('glass');
@@ -557,20 +755,22 @@ function StaticStructure({
   const dimGuides = useMemo(() => {
     if (!spec) return null;
     const SCALE_DIV = 3.2;
-    const { points, halfW, halfD } = getSiteBoundaryPoints(
+    const { points, polygon2D, minX, maxZ } = getSiteBoundaryPoints(
       spec.siteAreaSqm,
-      spec.siteShape ?? 'rectangle'
+      spec.siteShape ?? 'rectangle',
+      spec.sitePolygon
     );
     const totalH = Math.max(0.95, Math.min(12.0, spec.heightMeters / SCALE_DIV));
     const gardenSolid = (structure.solids ?? []).find((s) => s.partRole === 'garden');
 
     return {
       siteBoundary: points,
+      polygon2D,
       heightPole: [
-        [-halfW * 0.88, 0, halfD * 0.88],
-        [-halfW * 0.88, totalH, halfD * 0.88],
+        [minX + 0.18, 0, maxZ - 0.18],
+        [minX + 0.18, totalH, maxZ - 0.18],
       ] as [number, number, number][],
-      topLabelPos: [-halfW * 0.88, totalH + 0.22, halfD * 0.88] as [number, number, number],
+      topLabelPos: [minX + 0.18, totalH + 0.22, maxZ - 0.18] as [number, number, number],
       gardenLabelPos: gardenSolid
         ? ([gardenSolid.position[0], 0.35, gardenSolid.position[2]] as [number, number, number])
         : ([1.5, 0.35, 0] as [number, number, number]),
@@ -608,7 +808,9 @@ function StaticStructure({
               hoveredFloorIndex === solid.floorIndex
             }
             isParamHighlighted={isParamHighlighted}
-            onSelect={() => onSelectPart(solid.id)}
+            onSelect={() => {
+              if (!isSiteEditMode) onSelectPart(solid.id);
+            }}
             onHoverFloor={(cx, cy) => {
               if (typeof solid.floorIndex === 'number' && solid.floorIndex !== 0) {
                 onHoverFloor(solid.floorIndex, cx, cy);
@@ -619,7 +821,7 @@ function StaticStructure({
         );
       })}
 
-      {/* 외벽 로이 복층 유리 창호 (실내 투시 뷰에서는 절개면 창호 자동 숨김) */}
+      {/* 외벽 로이 복층 유리 창호 */}
       {!isHeatmap &&
         (spec?.exteriorWindows ?? [])
           .filter((win) => !(isInteriorCutaway && (win.wall === 'S' || win.wall === 'E')))
@@ -656,7 +858,7 @@ function StaticStructure({
           />
         ))}
 
-      {/* 방 평면도 선택 시 전체 건물 내 해당 방 위치(층·구역) 3D 가시화 */}
+      {/* 방 평면도 선택 시 전체 건물 내 해당 방 위치 3D 가시화 */}
       {selectedUnitType &&
         !isPipeXray &&
         selectedUnitType.placements.map((pl, idx) => (
@@ -687,16 +889,22 @@ function StaticStructure({
           </group>
         ))}
 
-      {/* 대지 경계선 및 높이 기준 폴 */}
+      {/* 대지 경계선 + 자유형 꼭짓점 드래그 핸들 + 높이 기준 폴 */}
       {dimGuides && (
         <group>
           <Line
             points={dimGuides.siteBoundary}
-            color={vizKey === 'siteAreaSqm' ? '#0284c7' : '#64748b'}
-            lineWidth={vizKey === 'siteAreaSqm' ? 2.8 : 1.6}
-            dashed
+            color={isSiteEditMode || vizKey === 'siteAreaSqm' ? '#0284c7' : '#64748b'}
+            lineWidth={isSiteEditMode || vizKey === 'siteAreaSqm' ? 3.2 : 1.6}
+            dashed={!isSiteEditMode}
             dashSize={0.25}
             gapSize={0.14}
+          />
+          <SiteBoundaryEditor
+            polygon2D={dimGuides.polygon2D}
+            isEditMode={isSiteEditMode}
+            onUpdatePolygon={onUpdateSitePolygon}
+            onDraggingChange={onDraggingSiteChange}
           />
           <Line
             points={dimGuides.heightPole}
@@ -725,7 +933,7 @@ function StaticStructure({
         </group>
       )}
 
-      {/* 구조 조인트 노드 & 수직 강재 H빔/원형 기둥 */}
+      {/* 구조 조인트 노드 & 수직 강재 기둥 */}
       {structure.nodes.map((node) => {
         const isGrounded = node.isFixed;
         const heatRatio = getColumnBeamHeatRatio(node.position[1]);
@@ -873,12 +1081,7 @@ function DynamicPhysicsStructure({
       </RigidBody>
 
       {(structure.solids ?? []).map((solid) => (
-        <RigidBody
-          key={solid.id}
-          type="fixed"
-          position={solid.position}
-          colliders="hull"
-        >
+        <RigidBody key={solid.id} type="fixed" position={solid.position} colliders="hull">
           <SolidMeshView
             solid={{ ...solid, position: [0, 0, 0] }}
             defaultMaterial={structure.activeMaterial}
@@ -938,8 +1141,14 @@ function DynamicPhysicsStructure({
   );
 }
 
-export default function SceneCanvas({ structure, onUpdateStress, onSelectPart }: Props) {
+export default function SceneCanvas({
+  structure,
+  onUpdateStress,
+  onSelectPart,
+  onUpdateSitePolygon,
+}: Props) {
   const [hoveredTooltip, setHoveredTooltip] = useState<HoveredFloorTooltip | null>(null);
+  const [isDraggingSite, setIsDraggingSite] = useState(false);
   const simKey = `${structure.solids?.length ?? 0}-${structure.nodes.length}-${structure.beams.length}`;
 
   const handleHoverFloor = (floorIndex: number, clientX: number, clientY: number) => {
@@ -977,10 +1186,10 @@ export default function SceneCanvas({ structure, onUpdateStress, onSelectPart }:
         x: clientX,
         y: clientY,
         floorIndex,
-        title: `옥상층 (RF · 루프탑 ${spec.rooftops}개소)`,
-        areaText: `옥상 면적 약 ${spec.buildingAreaSqm.toLocaleString()} ㎡`,
+        title: `지붕·옥상층 (RF · 루프탑 ${spec.rooftops}개소)`,
+        areaText: `건축면적 약 ${spec.buildingAreaSqm.toLocaleString()} ㎡`,
         heightText: `최고 높이 ${spec.heightMeters} m`,
-        roomsText: '지붕 구조 · 루프탑 테라스 · 조경',
+        roomsText: '밀봉 지붕 구조 · 처마 · 루프탑',
       });
       return;
     }
@@ -1069,13 +1278,22 @@ export default function SceneCanvas({ structure, onUpdateStress, onSelectPart }:
             onSelectPart={onSelectPart}
             onHoverFloor={handleHoverFloor}
             onLeaveFloor={() => setHoveredTooltip(null)}
+            onUpdateSitePolygon={onUpdateSitePolygon}
+            onDraggingSiteChange={setIsDraggingSite}
           />
         )}
 
-        <CameraController control={structure.cameraControl} />
+        <CameraController control={structure.cameraControl} disabled={isDraggingSite} />
       </Canvas>
 
-      {hoveredTooltip && (
+      {/* 대지 경계 편집 모드 안내 배너 */}
+      {structure.isSiteEditMode && (
+        <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-sky-700/95 text-white text-xs font-bold shadow-lg border border-sky-300">
+          대지 경계 자유 편집 ON · 파란 핀(P1~P{structure.buildingSpec?.sitePolygon?.length ?? 4}) 드래그 · 초록점 클릭(꼭짓점 추가) · 핀 더블클릭(삭제)
+        </div>
+      )}
+
+      {hoveredTooltip && !structure.isSiteEditMode && (
         <div
           className="pointer-events-none fixed z-50 bg-white/95 backdrop-blur-md border border-sky-400 rounded-xl px-3 py-2 shadow-xl text-xs text-slate-800 space-y-0.5"
           style={{

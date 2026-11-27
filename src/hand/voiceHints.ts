@@ -79,7 +79,7 @@ export function voiceHints(c: HintContext): VoiceHint[] {
       add(h('두 배로 키워', '전체 크기 x2'), h('절반으로 줄여', '전체 크기 x0.5'));
       break;
     case 'taper':
-      add(h('뾰족하게', '윗면을 점으로 = 원뿔'), h('윗면 절반으로', '원뿔대'), h('윗면 두 배로', '접시처럼 벌어짐'));
+      add(h('뾰족하게 만들어', '윗면을 점으로 = 원뿔'), h('윗면 절반으로', '원뿔대'), h('윗면 두 배로', '접시처럼 벌어짐'));
       break;
     case 'offset':
       add(h('30센티 오프셋', '테두리 30cm 남기고 안쪽 면'));
@@ -91,7 +91,7 @@ export function voiceHints(c: HintContext): VoiceHint[] {
     const bore = cyl.lathe?.bore;
     if (bore && bore.depth < 1) add(h('50센티 더 파줘', '구멍 더 깊게'), h('뚫어', '끝까지 관통 = 파이프'));
     else if (!bore) add(h('1미터 파줘', '안쪽 원 만들고 파기 = 컵'), h('20센티 오프셋', '안쪽 원만 그리기'));
-    if (c.editMode !== 'taper') add(h('뾰족하게', '원뿔로'), h('윗면 절반으로', '원뿔대'));
+    if (c.editMode !== 'taper') add(h('뾰족하게 만들어', '원뿔로'), h('윗면 절반으로', '원뿔대'));
     add(h('위로 1미터 늘려', '높이'));
   } else if (box) {
     add(h('위로 2미터 늘려', '높이 늘리기'), h('30센티 오프셋', '창문·문 테두리'), h('50센티 줄여', '높이 줄이기'));

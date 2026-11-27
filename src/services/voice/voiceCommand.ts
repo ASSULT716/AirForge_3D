@@ -269,6 +269,8 @@ function buildCommand(
     case 'offset_face':
       return { type: 'offset', meters: meters() };
     case 'scale_part': {
+      // 윗면·아랫면을 말했으면 전체 크기가 아니라 면 크기 (Jev intent가 배율 표현에 끌려가는 경우 보정)
+      if ((choice(r, 'face_end') ?? 'not_specified') !== 'not_specified') return buildCommand('taper_face', r, text, angles, ctx, distances, scales);
       const f = scales.find((c) => c.key === choice(r, 'scale_factor'))?.factor ?? (scales.length === 1 ? scales[0].factor : null);
       return { type: 'scale', factor: f };
     }

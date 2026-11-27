@@ -1,10 +1,9 @@
 //(조원호) MediaPipe 스켈레톤 + 핀치/음성
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { GestureRecognizer, type Landmark, type NormalizedLandmark } from '@mediapipe/tasks-vision';
-import wasmLoaderUrl from '@mediapipe/tasks-vision/vision_wasm_internal.js?url';
-import wasmBinaryUrl from '@mediapipe/tasks-vision/vision_wasm_internal.wasm?url';
+import { HandLandmarker, type Landmark, type NormalizedLandmark } from '@mediapipe/tasks-vision';
 import * as THREE from 'three';
 import { CadTool } from '../types/cad';
+import { createHandDetector, type HandDetector, type HandFrame } from '../services/handDetector';
 import { cameraGesture, pushCameraOrbit, pushCameraPan } from '../services/cameraGesture';
 import { handQuat, pickAxis, snapDeg, twistDeg, viewAxisToWorld, type Axis } from '../services/handRotate';
 
@@ -78,6 +77,13 @@ const ROT_LOCK_RATIO = 1.8;
 const ROT_DEADZONE_DEG = 2;
 /** 놓을 때 스냅 단위 */
 const ROT_SNAP_DEG = 15;
+/**
+ * 인식은 20~30Hz라 각도가 계단식으로 들어옴 → 화면 프레임마다 목표 각도로 보간해서 보냄.
+ * 이 시간(≈인식 간격)에 걸쳐 따라감. 너무 크면 손보다 늦게 따라옴
+ */
+const ROT_INTERP_MS = 45;
+/** 보간 중 이만큼 바뀔 때만 App에 전달 (App 리렌더 횟수 제한) */
+const ROT_EMIT_STEP_DEG = 0.5;
 
 // ── 카메라 드래그 (오른손 3손가락 = 팬, 왼손 3손가락 = 오빗) ──
 /** 손바닥 중심 EMA */
@@ -119,12 +125,14 @@ function stepDrag(t: DragTrack, lm: NormalizedLandmark[]): [number, number] | nu
 const PINCH_CONFIRM_MS = 200;
 const FIST_HOLD_MS = 350;
 const HANDS_LOST_RESET_MS = 1000;
-/** GestureRecognizer가 이 점수 이상으로 Closed_Fist라고 하면 주먹 */
-const FIST_SCORE = 0.6;
+/**
+ * 기하 주먹 보조 판정: 손끝 4개가 모두 손바닥 중심에서 (손 크기 × 이 값) 이내.
+ * 비틀어 쥐거나 손가락이 가려져 접힘 판정이 흔들릴 때용 (예전 학습 분류기 Closed_Fist 대체).
+ * 핀치·그리기 자세는 검지 끝이 멀어서 걸리지 않음. 움켜쥐기는 classifyPose에서 먼저 판정됨
+ */
+const FIST_TIP_MAX = 0.7;
 
 // ── 양손 줌 ──
-/** 모델이 이 점수 이상으로 Open_Palm이면 펼친 손 */
-const OPEN_SCORE = 0.5;
 /** 양손이 이만큼 펴진 채 유지돼야 줌 모드 진입 (스쳐 지나가는 오인식 방지) */
 const ZOOM_ENTER_MS = 250;
 /** 줌 중 한 손이 잠깐 안 펴진 걸로 잡혀도 이 시간까진 유지 */
@@ -157,9 +165,6 @@ const GRAB_THUMB_MAX_EXIT = 1.3;
 /** 엄지끝↔검지끝 / 손 크기. 이보다 붙어 있으면 핀치이지 움켜쥐기 아님 */
 const GRAB_MIN_GAP = 0.3;
 
-const LOCAL_MODEL_URL =`${import.meta.env.BASE_URL}models/gesture_recognizer.task`;
-const REMOTE_MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task';
 
 // ─────────────────────────────────────────────────────────────
 // 순수 유틸
@@ -215,7 +220,16 @@ function isGeometricFist(w: Landmark[]) {
     [16, 14],
     [20, 18],
   ].filter(([t, p]) => isCurled(w, t, p)).length;
-  return isCurled(w, 8, 6) && curled >= 3;
+  if (isCurled(w, 8, 6) && curled >= 3) return true;
+  // 보조: 손끝 4개가 모두 손바닥 중심 가까이 (비틀어 쥔 주먹)
+  const size = dist3(w[0], w[9]) || 1e-6;
+  const c = { x: 0, y: 0, z: 0 };
+  for (const i of [0, 5, 9, 13, 17]) {
+    c.x += w[i].x / 5;
+    c.y += w[i].y / 5;
+    c.z += w[i].z / 5;
+  }
+  return [8, 12, 16, 20].every((i) => dist3(w[i], c as Landmark) / size < FIST_TIP_MAX);
 }
 
 // ── 자세 분류 ──
@@ -265,7 +279,7 @@ function fingerStraightness(w: Landmark[]) {
   });
 }
 
-function classifyPose(w: Landmark[], prev: PoseFlags, modelFist: boolean): PoseResult {
+function classifyPose(w: Landmark[], prev: PoseFlags): PoseResult {
   const size = dist3(w[0], w[9]) || 1e-6;
   const thumbRatio = dist3(w[4], w[17]) / size;
   const thumbOut = prev.thumbOut ? thumbRatio > THUMB_IN : thumbRatio > THUMB_OUT;
@@ -283,7 +297,7 @@ function classifyPose(w: Landmark[], prev: PoseFlags, modelFist: boolean): PoseR
   let pose: HandPose;
   // 펼침(open)보다 먼저: 살짝 굽힌 손도 4손가락 '안 접힘'이라 open 조건을 만족함
   if (grab) pose = 'grab';
-  else if (modelFist || isGeometricFist(w)) pose = 'fist';
+  else if (isGeometricFist(w)) pose = 'fist';
   else if (mid && ring && pinky) pose = 'draw';
   else if (ring && pinky && !idx && !mid) pose = thumbOut ? 'pan' : 'select';
   else if (openCount === 4) pose = 'open';
@@ -423,6 +437,8 @@ interface GestureTestStep {
   check: (s: PoseSnapshot, b: PoseSnapshot) => boolean;
   /** true = 자세 유지(1초) 대신 한 번 달성하면 바로 통과 (선택·회전·드래그 같은 동작) */
   instant?: boolean;
+  /** 이 단계만 제한시간 다르게 (손 폈다 다시 쥐는 등 준비 동작이 긴 단계) */
+  timeoutMs?: number;
   /** "지금:" 칸 표시 (없으면 인식된 자세 이름) */
   observe?: (s: PoseSnapshot, b: PoseSnapshot) => string;
 }
@@ -480,6 +496,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
     hand: 'right',
     glyph: { hands: [{ side: 'right', fingers: [O, O, O, O, O], grab: true }] },
     instant: true,
+    timeoutMs: 15000,
     check: (s) => s.rotView === 0 && Math.abs(s.rotViewDeg) >= 30,
     // 이전 단계의 Y축 잠금이 남아 있으면 다시 잡으라고 안내
     observe: (s) => (s.rotView === 1 ? 'Y축 잠김 → 손 폈다가 다시 움켜쥐기' : rotObserve(s)),
@@ -535,6 +552,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
 const TEST_HOLD_MS = 1000;
 /** 이 시간 안에 통과 못 하면 실패 */
 const TEST_TIMEOUT_MS = 8000;
+const stepTimeout = (idx: number) => GESTURE_TEST_STEPS[idx]?.timeoutMs ?? TEST_TIMEOUT_MS;
 /** 단계 사이 쉬는 시간 (통과/실패 표시) */
 const TEST_GAP_MS = 800;
 
@@ -658,7 +676,7 @@ function tickGestureTest(test: GestureTest, s: PoseSnapshot, now: number) {
     test.misses[k] = (test.misses[k] ?? 0) + 1;
     test.missFrames += 1;
   }
-  if (now - test.stepStart > TEST_TIMEOUT_MS) finish(false, false);
+  if (now - test.stepStart > stepTimeout(test.idx)) finish(false, false);
 }
 
 /** 결과를 텍스트로 (클립보드 복사 → 튜닝 요청용) */
@@ -709,35 +727,19 @@ const getSpeechCtor = (): SpeechCtor | undefined => {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition;
 };
 
-// ── MediaPipe GestureRecognizer 초기화 (랜드마크 + 학습된 제스처 분류 동시 제공) (로컬 모델 → 실패 시 CDN, GPU → 실패 시 CPU) ──
-async function createRecognizer(): Promise<GestureRecognizer> {
-  const fileset = { wasmLoaderPath: wasmLoaderUrl, wasmBinaryPath: wasmBinaryUrl };
-  const attempts: Array<{ model: string; delegate: 'GPU' | 'CPU' }> = [
-    { model: LOCAL_MODEL_URL, delegate: 'GPU' },
-    { model: LOCAL_MODEL_URL, delegate: 'CPU' },
-    { model: REMOTE_MODEL_URL, delegate: 'GPU' },
-    { model: REMOTE_MODEL_URL, delegate: 'CPU' },
-  ];
-  let lastErr: unknown;
-  for (const a of attempts) {
-    try {
-      return await GestureRecognizer.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: a.model, delegate: a.delegate },
-        runningMode: 'VIDEO',
-        numHands: 2,
-        // 두 번째 손(왼손)이 잘 잡히도록 HandLandmarker 때보다 낮춤
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-        cannedGesturesClassifierOptions: { scoreThreshold: 0.3 },
-      });
-    } catch (e) {
-      lastErr = e;
-      console.warn(`[HandTracker] recognizer 생성 실패 (${a.delegate}, ${a.model})`, e);
-    }
+// ── MediaPipe HandLandmarker 초기화 (로컬 모델 → 실패 시 CDN, CPU → 실패 시 GPU) ──
+/** 실제 WebGL 렌더러 이름. SwiftShader/llvmpipe 등이면 GPU 가속이 꺼진 것 (GPU delegate가 CPU보다 느려짐) */
+function webglRenderer(): string {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2') ?? document.createElement('canvas').getContext('webgl');
+    if (!gl) return 'no-webgl';
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+  } catch {
+    return 'unknown';
   }
-  throw lastErr;
 }
+const SOFTWARE_GL = /swiftshader|llvmpipe|software|basic render/i;
 
 // ─────────────────────────────────────────────────────────────
 // 컴포넌트
@@ -790,7 +792,12 @@ export default function HandTracker(props: Props) {
   const [testUi, setTestUi] = useState<TestUi | null>(null);
   const [copied, setCopied] = useState(false);
   /** 손 인식 처리 속도 (0.5초마다 갱신). fps = 초당 처리 프레임, ms = 프레임당 인식 시간 평균 */
-  const [perf, setPerf] = useState<{ fps: number; ms: number } | null>(null);
+  /** inf = 추론 시간, logic = 내 제스처 처리 시간, lat = 프레임 캡처 → 결과 도착 (워커 왕복 포함) (ms 평균) */
+  const [perf, setPerf] = useState<{ fps: number; inf: number; logic: number; lat: number } | null>(null);
+  /** delegate + 실행 위치(워커/메인) + WebGL 렌더러 (소프트웨어 렌더러면 경고) */
+  const [backend, setBackend] = useState<{ delegate: string; worker: boolean; gl: string; soft: boolean } | null>(null);
+  /** 웹캠이 실제로 협상한 해상도·fps (요청값과 다를 수 있음 → 60 안 나오면 카메라 하드웨어 한계) */
+  const [camInfo, setCamInfo] = useState<{ w: number; h: number; fps: number } | null>(null);
 
   const [micOn, setMicOn] = useState(false);
   const [voiceText, setVoiceText] = useState('');
@@ -829,6 +836,9 @@ export default function HandTracker(props: Props) {
       world: null as { axis: Axis; sign: 1 | -1 } | null,
       /** 마지막으로 보낸 각도 (데드존 기준) */
       out: 0,
+      /** 화면 프레임 보간된 각도 / 마지막으로 App에 보낸 각도 */
+      shown: 0,
+      emitted: 0,
       /** 잠긴 화면 축 기준 각도 (TEST 채점용, 월드 부호 미적용) */
       viewDeg: 0,
     },
@@ -885,9 +895,16 @@ export default function HandTracker(props: Props) {
     if (!cameraOn) return;
     let cancelled = false;
     let raf = 0;
+    /** requestVideoFrameCallback 핸들 (지원 안 하는 브라우저는 rAF 폴백) */
+    let vfc = 0;
     let stream: MediaStream | null = null;
-    let landmarker: GestureRecognizer | null = null;
+    let detector: HandDetector | null = null;
     let lastVideoTime = -1;
+    /** 검출기가 프레임 처리 중 (결과 올 때까지 새 프레임 안 보냄) */
+    let busy = false;
+    /** 처리 중에 새 카메라 프레임이 왔음 → 결과 오자마자 최신 프레임 보냄 (밀린 프레임은 버림) */
+    let pending = false;
+    let submittedAt = 0;
     let lastInfoKey = '';
     let lastHint = '';
     let lastTestKey = '';
@@ -899,7 +916,7 @@ export default function HandTracker(props: Props) {
       if (!t.active && t.idx < GESTURE_TEST_STEPS.length) return;
       const inGap = t.active && now < t.stepStart;
       const progress = t.active && t.matchSince ? Math.min(1, (now - t.matchSince) / TEST_HOLD_MS) : 0;
-      const remainingS = t.active ? Math.max(0, Math.ceil((TEST_TIMEOUT_MS - Math.max(0, now - t.stepStart)) / 1000)) : 0;
+      const remainingS = t.active ? Math.max(0, Math.ceil((stepTimeout(t.idx) - Math.max(0, now - t.stepStart)) / 1000)) : 0;
       const observed = lastObserved;
       const step = GESTURE_TEST_STEPS[Math.min(t.idx, GESTURE_TEST_STEPS.length - 1)];
       const live = t.active && lastSnap ? liveHands(step, lastSnap) : [];
@@ -924,7 +941,9 @@ export default function HandTracker(props: Props) {
     // FPS 측정 (0.5초 창)
     let perfStart = performance.now();
     let perfFrames = 0;
-    let perfMs = 0;
+    let perfInf = 0;
+    let perfLogic = 0;
+    let perfLat = 0;
 
     const video = videoRef.current!;
     const canvas = canvasRef.current!;
@@ -948,8 +967,7 @@ export default function HandTracker(props: Props) {
       }
     };
 
-    const process = (now: number) => {
-      const res = landmarker!.recognizeForVideo(video, now);
+    const process = (res: HandFrame, now: number) => {
       const d = draw.current;
       const hands = res.landmarks;
 
@@ -965,8 +983,6 @@ export default function HandTracker(props: Props) {
       }
       const drawHand = drawIdx >= 0 ? hands[drawIdx] : null;
       const depthHand = depthIdx >= 0 ? hands[depthIdx] : null;
-      const top = drawIdx >= 0 ? res.gestures[drawIdx]?.[0] : undefined;
-      const gesture = top && top.categoryName !== 'None' ? top.categoryName : '';
 
       if (hands.length > 0) d.lastHandsAt = now;
       else if (d.chainLen > 0 && now - d.lastHandsAt > HANDS_LOST_RESET_MS) breakChain();
@@ -974,14 +990,10 @@ export default function HandTracker(props: Props) {
       // ── 자세 분류 (200ms 유지돼야 stable 갱신) ──
       const drawWorld = drawIdx >= 0 ? res.worldLandmarks[drawIdx] : undefined;
       const depthWorld = depthIdx >= 0 ? res.worldLandmarks[depthIdx] : undefined;
-      const modelFist = top?.categoryName === 'Closed_Fist' && top.score >= FIST_SCORE;
-      if (drawWorld) stepPose(d.rightPose, classifyPose(drawWorld, d.rightPose.flags, modelFist), now);
+      if (drawWorld) stepPose(d.rightPose, classifyPose(drawWorld, d.rightPose.flags), now);
       else d.rightPose = newPoseHold();
-      if (depthWorld) {
-        const lg = res.gestures[depthIdx]?.[0];
-        const leftFist = lg?.categoryName === 'Closed_Fist' && lg.score >= FIST_SCORE;
-        stepPose(d.leftPose, classifyPose(depthWorld, d.leftPose.flags, leftFist), now);
-      } else d.leftPose = newPoseHold();
+      if (depthWorld) stepPose(d.leftPose, classifyPose(depthWorld, d.leftPose.flags), now);
+      else d.leftPose = newPoseHold();
       const rightPose = d.rightPose.stable;
 
       // ── ✌️ → 주먹 = 선택 확정 ──
@@ -1010,6 +1022,8 @@ export default function HandTracker(props: Props) {
           r.view = null;
           r.world = null;
           r.out = 0;
+          r.shown = 0;
+          r.emitted = 0;
           r.viewDeg = 0;
           emitRot({ phase: 'start', axis: null, deg: 0 });
         } else {
@@ -1027,10 +1041,8 @@ export default function HandTracker(props: Props) {
           if (r.view !== null) r.viewDeg = tw[r.view];
           if (r.view !== null && r.world) {
             const raw = tw[r.view] * r.world.sign;
-            if (Math.abs(raw - r.out) > ROT_DEADZONE_DEG) {
-              r.out = raw;
-              emitRot({ phase: 'update', axis: r.world.axis, deg: raw });
-            }
+            // 목표 각도만 갱신. 실제 전달은 animateRot이 화면 프레임마다 보간해서 함
+            if (Math.abs(raw - r.out) > ROT_DEADZONE_DEG) r.out = raw;
           }
         }
       } else if (r.active) {
@@ -1046,8 +1058,6 @@ export default function HandTracker(props: Props) {
       const z = d.zoom;
       const isOpen = (i: number) => {
         // 움켜쥐기로 잡힌 손도 4손가락이 펴져 있으면 펼침으로 봄 → 양손이면 줌이 우선 (TEST: 줌 중 왼손이 움켜쥐기로 오인됨)
-        const g = res.gestures[i]?.[0];
-        if (g?.categoryName === 'Open_Palm' && g.score >= OPEN_SCORE) return true;
         const w = res.worldLandmarks[i];
         return !!w && isGeometricOpen(w);
       };
@@ -1129,9 +1139,9 @@ export default function HandTracker(props: Props) {
           if (!NO_CURSOR_POSES.has(rightPose)) cursor = snapped;
         }
 
-        // 주먹 판정을 먼저 (학습 모델 분류): 주먹 쥐는 동안 엄지·검지가 가까워져도 핀치로 안 봄
-        // 모델(Closed_Fist) 또는 기하 판정 중 하나라도 주먹이면 주먹 (즉시 판정, 유지시간은 FIST_HOLD_MS)
-        const fist = modelFist || (!!drawWorld && isGeometricFist(drawWorld));
+        // 주먹 판정을 먼저 (기하 판정): 주먹 쥐는 동안 엄지·검지가 가까워져도 핀치로 안 봄
+        // 기하 주먹 판정 (접힘 3/4 또는 손끝이 손바닥 중심 가까이). 즉시 판정, 유지시간은 FIST_HOLD_MS
+        const fist = !!drawWorld && isGeometricFist(drawWorld);
         // 검지가 접혀 있으면 엄지가 닿아도 핀치 아님 (주먹 쥐는 과정에서 흔함)
         const indexCurled = !!drawWorld && isCurled(drawWorld, 8, 6);
 
@@ -1256,7 +1266,7 @@ export default function HandTracker(props: Props) {
         hands: hands.length,
         chainLen: d.chainLen,
         hint: lastHint,
-        gesture: zooming ? `ZOOM x${z.total.toFixed(2)}` : gesture,
+        gesture: zooming ? `ZOOM x${z.total.toFixed(2)}` : drawHand && rightPose !== 'none' ? POSE_LABEL[rightPose] : '',
         mode,
         orbit,
         rot: !d.rot.active
@@ -1267,25 +1277,76 @@ export default function HandTracker(props: Props) {
       });
     };
 
-    const loop = () => {
-      raf = requestAnimationFrame(loop);
-      if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
-      lastVideoTime = video.currentTime;
-      try {
-        const t0 = performance.now();
-        process(t0);
-        const t1 = performance.now();
-        perfFrames += 1;
-        perfMs += t1 - t0;
-        if (t1 - perfStart >= 500) {
-          setPerf({ fps: (perfFrames * 1000) / (t1 - perfStart), ms: perfMs / perfFrames });
-          perfStart = t1;
-          perfFrames = 0;
-          perfMs = 0;
-        }
-      } catch (e) {
-        console.error('[HandTracker] detect 실패', e);
+    // 새 카메라 프레임이 디코딩되는 즉시 처리 (rAF 폴링은 프레임 도착 후 다음 화면 갱신까지 최대 16ms 더 기다림)
+    const hasVfc = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+    const schedule = () => {
+      if (cancelled) return;
+      if (hasVfc) vfc = video.requestVideoFrameCallback(loop);
+      else raf = requestAnimationFrame(loop);
+    };
+    // ── 회전 보간: 인식 결과 사이를 화면 프레임(60Hz)으로 채움 ──
+    let animRaf = 0;
+    let animLast = performance.now();
+    const animateRot = () => {
+      animRaf = requestAnimationFrame(animateRot);
+      const now = performance.now();
+      const dt = now - animLast;
+      animLast = now;
+      const r = draw.current.rot;
+      if (!r.active || !r.world || r.shown === r.out) return;
+      r.shown += (r.out - r.shown) * Math.min(1, dt / ROT_INTERP_MS);
+      if (Math.abs(r.out - r.shown) < 0.05) r.shown = r.out;
+      if (Math.abs(r.shown - r.emitted) >= ROT_EMIT_STEP_DEG || r.shown === r.out) {
+        if (r.shown === r.emitted) return;
+        r.emitted = r.shown;
+        if (!draw.current.test.active) propsRef.current.onObjectRotate?.({ phase: 'update', axis: r.world.axis, deg: r.shown });
       }
+    };
+    animRaf = requestAnimationFrame(animateRot);
+
+    const submit = () => {
+      if (!detector || video.readyState < 2) return;
+      busy = true;
+      pending = false;
+      submittedAt = performance.now();
+      detector.submit(video, submittedAt);
+    };
+    const onResult = (f: HandFrame | null) => {
+      busy = false;
+      if (cancelled) return;
+      if (f) {
+        try {
+          const t0 = performance.now();
+          process(f, t0);
+          const t1 = performance.now();
+          perfFrames += 1;
+          perfInf += f.inferMs;
+          perfLogic += t1 - t0;
+          perfLat += t0 - submittedAt;
+          if (t1 - perfStart >= 500) {
+            setPerf({
+              fps: (perfFrames * 1000) / (t1 - perfStart),
+              inf: perfInf / perfFrames,
+              logic: perfLogic / perfFrames,
+              lat: perfLat / perfFrames,
+            });
+            perfStart = t1;
+            perfFrames = perfInf = perfLogic = perfLat = 0;
+          }
+        } catch (e) {
+          console.error('[HandTracker] 처리 실패', e);
+        }
+      }
+      if (pending) submit();
+    };
+    const loop = () => {
+      schedule();
+      if (!detector || video.readyState < 2) return;
+      // rAF 폴백일 때만 의미 있음 (rVFC는 새 프레임마다 한 번씩만 호출됨)
+      if (!hasVfc && video.currentTime === lastVideoTime) return;
+      lastVideoTime = video.currentTime;
+      if (busy) pending = true;
+      else submit();
     };
 
     (async () => {
@@ -1293,9 +1354,17 @@ export default function HandTracker(props: Props) {
       setErrorMsg('');
       try {
         const [lm, s] = await Promise.all([
-          createRecognizer(),
+          createHandDetector(onResult),
+          // MediaPipe는 내부에서 192~224px로 줄여 쓰므로 720p는 낭비 (디코드·GPU 업로드 비용만 큼).
+          // 싼 웹캠은 저해상도에서만 60fps 모드가 있는 경우가 많음 → 해상도보다 fps 우선
           navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 }, facingMode: 'user' },
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 360 },
+              aspectRatio: { ideal: 16 / 9 },
+              frameRate: { ideal: 60 },
+              facingMode: 'user',
+            },
             audio: false,
           }),
         ]);
@@ -1304,13 +1373,21 @@ export default function HandTracker(props: Props) {
           s.getTracks().forEach((t) => t.stop());
           return;
         }
-        landmarker = lm;
+        detector = lm;
         stream = s;
         video.srcObject = s;
         await video.play();
         if (cancelled) return;
+        const gl = webglRenderer();
+        setBackend({ delegate: lm.delegate, worker: lm.kind === 'worker', gl, soft: SOFTWARE_GL.test(gl) });
+        console.info('[HandTracker] 검출기', lm.kind, lm.delegate, '/ WebGL', gl);
+        const st = s.getVideoTracks()[0]?.getSettings();
+        if (st) {
+          setCamInfo({ w: st.width ?? 0, h: st.height ?? 0, fps: st.frameRate ?? 0 });
+          console.info('[HandTracker] 카메라 설정', st);
+        }
         setStatus('tracking');
-        raf = requestAnimationFrame(loop);
+        schedule();
       } catch (e) {
         if (cancelled) return;
         console.error('[HandTracker] 초기화 실패', e);
@@ -1323,11 +1400,15 @@ export default function HandTracker(props: Props) {
       cancelled = true;
       propsRef.current.onCursor?.(null);
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(animRaf);
+      if (vfc) video.cancelVideoFrameCallback(vfc);
       stream?.getTracks().forEach((t) => t.stop());
       video.srcObject = null;
-      landmarker?.close();
+      detector?.close();
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       setPerf(null);
+      setCamInfo(null);
+      setBackend(null);
     };
   }, [cameraOn, breakChain, commitPoint]);
 
@@ -1402,7 +1483,7 @@ export default function HandTracker(props: Props) {
     // 첫 단계 전에도 잠깐 준비 시간
     draw.current.test = newGestureTest(performance.now() + TEST_GAP_MS);
     setCopied(false);
-    setTestUi({ running: true, idx: 0, progress: 0, remainingS: 8, observed: '', flash: null, inGap: true, live: [], results: [] });
+    setTestUi({ running: true, idx: 0, progress: 0, remainingS: Math.ceil(stepTimeout(0) / 1000), observed: '', flash: null, inGap: true, live: [], results: [] });
   };
   const skipStep = () => {
     draw.current.test.skip = true;
@@ -1454,10 +1535,11 @@ export default function HandTracker(props: Props) {
             {shownStatus === 'tracking' && perf && (
               <span
                 className="rounded bg-black/60 px-1 tabular-nums"
-                style={{ color: perf.fps >= 25 ? '#7dff8a' : perf.fps >= 15 ? '#ffd54a' : '#ff1e42' }}
-                title="손 인식 처리 속도: 초당 프레임 / 프레임당 인식 시간"
+                style={{ color: perf.fps >= 55 ? '#7dff8a' : perf.fps >= 30 ? '#ffd54a' : '#ff1e42' }}
+                title={`손 인식: 초당 처리 프레임/카메라 최대 · 추론+제스처처리 · 캡처→결과 지연 · W=워커 M=메인스레드${camInfo ? ` · 카메라 ${camInfo.w}x${camInfo.h} 최대 ${Math.round(camInfo.fps)}fps` : ''}${backend ? ` · WebGL: ${backend.gl}` : ''}`}
               >
-                {`${Math.round(perf.fps)}fps · ${perf.ms.toFixed(0)}ms`}
+                {`${Math.round(perf.fps)}${camInfo ? `/${Math.round(camInfo.fps)}` : ''}fps · 인식${perf.inf.toFixed(0)}+${perf.logic.toFixed(0)} 지연${perf.lat.toFixed(0)}ms`}
+                {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '⚠SW' : ''}`}
               </span>
             )}
           </span>
@@ -1827,7 +1909,7 @@ function renderOverlay(
     ctx.strokeStyle = isDraw ? 'rgba(0,243,255,0.9)' : 'rgba(180,120,255,0.8)';
     ctx.lineWidth = 3;
     ctx.beginPath();
-    for (const { start, end } of GestureRecognizer.HAND_CONNECTIONS) {
+    for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
       ctx.moveTo(px(lm[start]), py(lm[start]));
       ctx.lineTo(px(lm[end]), py(lm[end]));
     }

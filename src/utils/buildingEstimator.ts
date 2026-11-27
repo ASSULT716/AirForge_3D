@@ -150,19 +150,20 @@ export function calculateKoreanBuildingLimits(params: {
       ? 0
       : Math.max(50, Math.floor(siteAreaSqm * 0.85 * undergroundFloors));
 
-  const minFloorsForHeight = Math.max(1, Math.ceil(heightMeters / 6.0));
-  const maxFloorsForHeight = Math.max(minFloorsForHeight, Math.floor(heightMeters / 2.6));
+  // 최소 층수는 항상 1층부터 허용
+  const minFloorsForHeight = 1;
+  const maxFloorsForHeight = Math.max(1, Math.floor(heightMeters / 2.4));
 
-  const minHouseholds = 1;
+  const minHouseholds = 0;
   const maxHouseholds =
     usageType === '단독주택'
-      ? Math.min(19, Math.max(1, Math.floor(totalFloorAreaSqm / 35)))
+      ? Math.min(19, Math.max(1, Math.floor(totalFloorAreaSqm / 30)))
       : usageType === '공동주택'
-      ? Math.max(2, Math.floor(totalFloorAreaSqm / 30))
-      : Math.max(1, Math.floor(totalFloorAreaSqm / 45));
+      ? Math.max(2, Math.floor(totalFloorAreaSqm / 25))
+      : Math.max(1, Math.floor(totalFloorAreaSqm / 40));
 
-  const minUnitTypes = 1;
-  const maxUnitTypes = Math.min(5, Math.max(1, households));
+  const minUnitTypes = households > 0 ? 1 : 0;
+  const maxUnitTypes = households > 0 ? Math.min(5, Math.max(1, households)) : 0;
 
   const combinedTotalArea = totalFloorAreaSqm + undergroundAreaSqm;
   const avgFloorArea = totalFloorAreaSqm / Math.max(1, floors);

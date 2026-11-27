@@ -507,13 +507,33 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
     instant: true,
     check: (s, b) => s.selectFires > b.selectFires,
   },
-  { id: 'pan', title: '카메라 이동', how: '오른손 엄지·검지·중지 펴기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, O, X, X] }], arrows: 'drag' }, check: (s) => s.right === 'pan' },
+  {
+    id: 'pan',
+    title: '카메라 이동',
+    how: '양손 보이게. 왼손은 펴고, 오른손 엄지·검지·중지 펴기',
+    hand: 'right',
+    glyph: {
+      hands: [
+        { side: 'right', fingers: [O, O, O, X, X] },
+        { side: 'left', fingers: [O, O, O, O, O], dim: true },
+      ],
+      arrows: 'drag',
+    },
+    check: (s) => s.mode === 'pan',
+    observe: (s) => (s.mode === 'pan' ? '카메라 이동' : s.right === 'pan' ? '오른손 OK · 왼손을 펴기' : s.right ? POSE_LABEL[s.right] : '손 없음'),
+  },
   {
     id: 'pan_drag',
     title: '카메라 이동 (동작)',
-    how: '오른손 3손가락 편 채로 좌우로 크게 움직이기',
+    how: '왼손 편 채로, 오른손 3손가락을 좌우로 크게 움직이기',
     hand: 'right',
-    glyph: { hands: [{ side: 'right', fingers: [O, O, O, X, X] }], arrows: 'drag' },
+    glyph: {
+      hands: [
+        { side: 'right', fingers: [O, O, O, X, X] },
+        { side: 'left', fingers: [O, O, O, O, O], dim: true },
+      ],
+      arrows: 'drag',
+    },
     instant: true,
     check: (s, b) => s.panTravel - b.panTravel >= 0.15,
     observe: (s, b) => `${s.right ? POSE_LABEL[s.right] : '손 없음'} · 이동 ${Math.round(((s.panTravel - b.panTravel) / 0.15) * 100)}%`,
@@ -545,7 +565,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
   {
     id: 'orbit',
     title: '카메라 회전',
-    how: '양손 보이게. 오른손은 펴거나 V자, 왼손 엄지·검지·중지 펴기',
+    how: '양손 보이게. 오른손은 펴고, 왼손 엄지·검지·중지 펴기',
     hand: 'left',
     glyph: {
       hands: [
@@ -559,7 +579,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
   {
     id: 'orbit_drag',
     title: '카메라 회전 (동작)',
-    how: '왼손 3손가락 편 채로 좌우로 크게 움직이기',
+    how: '오른손 편 채로, 왼손 3손가락을 좌우로 크게 움직이기',
     hand: 'left',
     glyph: {
       hands: [
@@ -1266,8 +1286,11 @@ export default function HandTracker(props: Props) {
 
       // ── HUD 모드 ──
       // ── 모드 배타: 줌 > 물체 회전 > (팬 | 오빗, 먼저 시작한 쪽 유지) > 손 자세 ──
-      const panWant = rightPose === 'pan' && !!drawHand && !zooming && !d.rot.active;
-      const orbitWant = !zooming && !depthPriority && !d.rot.active && !!depthHand && d.leftPose.stable === 'pan';
+      // 카메라 이동·회전은 서로 거울 자세: 한 손 3손가락 + 반대 손 펼침 (한 손만 보이면 안 움직임 → 오작동 방지)
+      const panWant =
+        !zooming && !d.rot.active && !!drawHand && rightPose === 'pan' && depthIdx >= 0 && isOpen(depthIdx);
+      const orbitWant =
+        !zooming && !d.rot.active && !!depthHand && d.leftPose.stable === 'pan' && drawIdx >= 0 && isOpen(drawIdx);
       if ((d.camMode === 'pan' && !panWant) || (d.camMode === 'orbit' && !orbitWant)) d.camMode = null;
       if (!d.camMode) d.camMode = panWant ? 'pan' : orbitWant ? 'orbit' : null;
       const orbit = d.camMode === 'orbit';

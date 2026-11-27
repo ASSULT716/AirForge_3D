@@ -56,8 +56,8 @@ const WORLD_Z: [number, number] = [-2, 2];
 /** 오른손 커서가 움직이는 카메라 영역(정규화, 거울 기준). 화면 끝까지 손 뻗지 않아도 되게 */
 const ACTIVE_X: [number, number] = [0.15, 0.85];
 const ACTIVE_Y: [number, number] = [0.1, 0.9];
-/** 왼손 손목 높이 → z 매핑 영역. 손 올리면 화면 안쪽(-z) */
-const DEPTH_Y: [number, number] = [0.2, 0.8];
+/** 왼손 손목 높이 → z 매핑 영역. 손 올리면 화면 안쪽(-z), 내리면 앞(+z) */
+const DEPTH_Y: [number, number] = [0.3, 0.7]; // 폭 0.4 = 화면 높이 40% 이동으로 z 전체(4m) 커버. 좁힐수록 민감
 
 const EMA_ALPHA = 0.35; // 클수록 반응 빠름, 작을수록 부드러움
 const PINCH_ON = 0.15; // (엄지-검지 거리) / (손목-중지MCP 거리). 손끝이 실제로 닿아야 ~0.15 이하
@@ -809,6 +809,8 @@ export default function HandTracker(props: Props) {
   const draw = useRef({
     smoothCursor: null as [number, number] | null, // 정규화 화면좌표 EMA
     smoothDepth: 0.5, // 왼손 높이 EMA (0~1)
+    depthOffset: 0, // 클러치 재파지 시 손 높이↔z 보정값 (t 단위)
+    depthClutch: false, // 왼손이 안 펴짐 = z 고정 중
     zLayer: 0,
     pinching: false,
     lastPinchAt: 0,
@@ -1061,8 +1063,8 @@ export default function HandTracker(props: Props) {
         const w = res.worldLandmarks[i];
         return !!w && isGeometricOpen(w);
       };
-      // 오른손 중지·약지·소지가 접힌 자세(draw)가 유지되면 = 깊이 조절 → 왼손 z가 우선, 줌 진입 금지
-      const depthPriority = rightPose === 'draw';
+      // 오른손이 그리기(draw)·선택(select) 자세면 = 깊이 조절 → 왼손 z가 우선, 줌 진입 금지
+      const depthPriority = rightPose === 'draw' || rightPose === 'select';
       const bothOpen =
         !depthPriority && !!drawHand && !!depthHand && isOpen(drawIdx) && isOpen(depthIdx);
       if (bothOpen) {
@@ -1105,11 +1107,23 @@ export default function HandTracker(props: Props) {
       }
       const zooming = z.active;
 
-      // 왼손 → z 레이어: 오른손이 깊이 자세일 때만 갱신 (그 외엔 고정 → 줌 시작 동작과 안 겹침)
+      // 왼손 → z 레이어: 오른손이 그리기·선택 자세일 때만 갱신 (그 외엔 고정 → 줌 시작 동작과 안 겹침)
       if (depthHand && depthPriority && !zooming) {
-        d.smoothDepth = lerp(d.smoothDepth, depthHand[0].y, EMA_ALPHA);
-        const t = invLerp(DEPTH_Y[0], DEPTH_Y[1], d.smoothDepth); // 0=위, 1=아래
-        d.zLayer = snap(lerp(WORLD_Z[0], WORLD_Z[1], t));
+        // 클러치: 왼손이 다 펴져 있을 때만 z 조절, 그 외(주먹 등) = z 고정. 다시 펴면 그 손 높이를 현재 z에 다시 맞춤 → 여러 번 끊어서 길게 이동
+        const handY = depthHand[0].y;
+        const rawT = (y: number) => (y - DEPTH_Y[0]) / (DEPTH_Y[1] - DEPTH_Y[0]); // 0=위, 1=아래 (클램프 안 함)
+        if (!depthWorld || !isGeometricOpen(depthWorld)) {
+          d.depthClutch = true;
+        } else {
+          if (d.depthClutch) {
+            d.depthClutch = false;
+            d.smoothDepth = handY;
+            d.depthOffset = invLerp(WORLD_Z[0], WORLD_Z[1], d.zLayer) - rawT(handY);
+          }
+          d.smoothDepth = lerp(d.smoothDepth, handY, EMA_ALPHA);
+          const t = clamp(rawT(d.smoothDepth) + d.depthOffset, 0, 1);
+          d.zLayer = snap(lerp(WORLD_Z[0], WORLD_Z[1], t));
+        }
       }
 
       let cursor: Vec3 | null = null;
@@ -1255,7 +1269,7 @@ export default function HandTracker(props: Props) {
         const hold = i === drawIdx ? d.rightPose : d.leftPose;
         const tu = `t${hold.thumbRatio.toFixed(2)} s${hold.straightness.toFixed(2)}`;
         if (i !== drawIdx) {
-          const role = orbit ? 'ORBIT' : `z=${d.zLayer.toFixed(2)}${depthPriority ? '' : '🔒'}`;
+          const role = orbit ? 'ORBIT' : `z=${d.zLayer.toFixed(2)}${d.depthClutch ? ' HOLD' : ''}`;
           return `${role} ${curl} ${tu}`;
         }
         return `${curl} p${pinchRatio(hands[i]).toFixed(2)} ${tu}`;

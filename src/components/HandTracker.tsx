@@ -873,6 +873,8 @@ export default function HandTracker(props: Props) {
       emitted: 0,
       /** 잠긴 화면 축 기준 각도 (TEST 채점용, 월드 부호 미적용) */
       viewDeg: 0,
+      /** 회전 중 오른손이 마지막으로 보인 시각 */
+      seenAt: 0,
     },
     panDrag: newDrag(),
     orbitDrag: newDrag(),
@@ -1025,7 +1027,8 @@ export default function HandTracker(props: Props) {
       const rightPose = d.rightPose.stable;
 
       // ── ✌️ → 주먹 = 선택 확정 ──
-      if (rightPose === 'select') d.lastSelectAt = now;
+      // 회전 중 옆으로 세운 손이 ✌️로 오인되면 확정 주먹이 선택으로 번짐 → 회전 중엔 기록 안 함
+      if (rightPose === 'select' && !d.rot.active) d.lastSelectAt = now;
       if (rightPose === 'fist' && d.prevRightStable !== 'fist' && now - d.lastSelectAt < SELECT_FIST_WINDOW_MS) {
         d.selectFires += 1;
         if (!d.test.active) {
@@ -1036,14 +1039,20 @@ export default function HandTracker(props: Props) {
       }
       d.prevRightStable = rightPose;
 
-      // ── 움켜쥐기 → 회전 (축 잠금, 1:1, 놓으면 15° 스냅) ──
+      // ── 움켜쥐기 → 회전 (축 잠금, 1:1, 주먹 쥐면 15° 스냅 확정) ──
+      // 한번 들어가면 주먹 전까지 유지: 손을 옆으로 세우면 움켜쥐기 인식이 자주 풀려서 자세로 유지 판정하면 끊김
       const r = d.rot;
       // 테스트 중엔 각도 계산만 하고 구조물엔 적용 안 함
       const emitRot = (e: ObjectRotateEvent) => !d.test.active && propsRef.current.onObjectRotate?.(e);
       // 줌 중엔 회전 안 함 (양손 펼침 = 줌이 우선)
-      if (rightPose === 'grab' && drawWorld && !d.zoom.active) {
+      if (r.active && drawWorld) r.seenAt = now;
+      const rotStart = !r.active && rightPose === 'grab' && !!drawWorld && !d.zoom.active;
+      // 주먹 = 확정. 손이 화면 밖으로 오래 나가도 확정 (안 그러면 회전 모드에 갇힘)
+      const rotHold = r.active && rightPose !== 'fist' && now - r.seenAt < HANDS_LOST_RESET_MS;
+      if ((rotStart || rotHold) && drawWorld) {
         const qNow = handQuat(drawWorld);
         if (!r.active) {
+          r.seenAt = now;
           r.active = true;
           r.q0.copy(qNow);
           r.qSmooth.copy(qNow);
@@ -1077,10 +1086,12 @@ export default function HandTracker(props: Props) {
             if (onDetent ? target !== r.out : Math.abs(target - r.out) > ROT_DEADZONE_DEG) r.out = target;
           }
         }
-      } else if (r.active) {
+      } else if (r.active && !rotHold) {
         r.active = false;
         const final = r.world ? snapDeg(r.out, ROT_SNAP_DEG) : 0;
         emitRot({ phase: 'end', axis: r.world?.axis ?? null, deg: final });
+        // 확정한 주먹이 ✌️→주먹 선택으로 이어지지 않게
+        d.lastSelectAt = 0;
         lastHint = r.world
           ? `회전 확정: ${r.world.axis.toUpperCase()}축 ${final >= 0 ? '+' : ''}${final}°`
           : '회전 취소 (축 판정 전에 놓음)';
@@ -1096,6 +1107,7 @@ export default function HandTracker(props: Props) {
       // 오른손이 조준(draw·select) 자세면 줌·카메라 회전 진입 금지 (조준 중 화면이 움직이면 안 됨)
       const depthPriority = rightPose === 'draw' || rightPose === 'select';
       const bothOpen =
+        !d.rot.active &&
         !depthPriority && !!drawHand && !!depthHand && isOpen(drawIdx) && isOpen(depthIdx);
       if (bothOpen) {
         z.offSince = 0;
@@ -1240,11 +1252,11 @@ export default function HandTracker(props: Props) {
           grab: 'rotate',
           fist: 'fist',
         };
-        mode = byPose[rightPose];
+        mode = d.rot.active ? 'rotate' : byPose[rightPose];
       }
 
       // ── 카메라 드래그: 오른손 3손가락 = 팬, 왼손 3손가락 = 오빗 (동시 가능, 테스트 중엔 안 움직임) ──
-      if (rightPose === 'pan' && drawHand && !zooming) {
+      if (rightPose === 'pan' && drawHand && !zooming && !d.rot.active) {
         const m = stepDrag(d.panDrag, drawHand);
         if (m) d.panTravel += Math.hypot(m[0], m[1]);
         if (m && !d.test.active) pushCameraPan(m[0], m[1]);

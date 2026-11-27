@@ -240,12 +240,154 @@ function oneEuroStep(f: OneEuro2 | null, raw: Vec2, now: number): OneEuro2 {
 const dist = (a: NormalizedLandmark, b: NormalizedLandmark) => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** 엄지·검지 거리를 손 크기로 정규화 → 카메라 거리와 무관한 핀치 비율 */
+// ── 손 커서로 화면 UI 클릭 ──
+const UI_CLICKABLE =
+  'button, a[href], input, select, textarea, label, summary, [role="button"], [role="tab"], [role="checkbox"], [role="menuitem"], [onclick]';
+const UI_HOVER_CLASS = 'hand-ui-hover';
+let uiStyleInjected = false;
+function ensureUiHoverStyle() {
+  if (uiStyleInjected || typeof document === 'undefined') return;
+  uiStyleInjected = true;
+  const st = document.createElement('style');
+  st.textContent = `.${UI_HOVER_CLASS}{outline:2px solid #00f3ff !important;outline-offset:2px;box-shadow:0 0 12px #00f3ff88 !important;}`;
+  document.head.appendChild(st);
+}
+/** 커서(씬 캔버스 기준 0~1) → 화면 픽셀 */
+function cursorToClient(pos: Vec2): [number, number] {
+  const c = document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null;
+  const r = c?.getBoundingClientRect() ?? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  return [r.left + pos[0] * r.width, r.top + pos[1] * r.height];
+}
+/** 커서 아래 클릭 가능한 UI 요소 (3D 캔버스·빈 영역이면 null) */
+function uiTargetAt(pos: Vec2): HTMLElement | null {
+  const [x, y] = cursorToClient(pos);
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!el || el.tagName === 'CANVAS') return null;
+  const t = el.closest(UI_CLICKABLE) as HTMLElement | null;
+  if (!t || (t as HTMLButtonElement).disabled) return null;
+  return t;
+}
+/** 화면 최상단 커서 (UI 위에서도 안 가려짐). 3D 링은 캔버스 안이라 DOM UI에 가려짐 */
+let topCursorEl: HTMLDivElement | null = null;
+function updateTopCursor(pos: Vec2 | null, pinching: boolean, overUi: boolean) {
+  if (!pos || !overUi) {
+    if (topCursorEl) topCursorEl.style.display = 'none';
+    return;
+  }
+  if (!topCursorEl) {
+    topCursorEl = document.createElement('div');
+    Object.assign(topCursorEl.style, {
+      position: 'fixed', left: '0', top: '0', zIndex: '2147483647', pointerEvents: 'none',
+      borderRadius: '50%', boxSizing: 'border-box', transform: 'translate(-50%,-50%)',
+    });
+    document.body.appendChild(topCursorEl);
+  }
+  const [x, y] = cursorToClient(pos);
+  const r = pinching ? 20 : 32;
+  Object.assign(topCursorEl.style, {
+    display: 'block', left: `${x}px`, top: `${y}px`, width: `${r}px`, height: `${r}px`,
+    border: `3px solid ${pinching ? '#ff1e42' : '#00f3ff'}`,
+    background: pinching ? 'rgba(255,30,66,0.35)' : 'rgba(0,243,255,0.15)',
+    boxShadow: `0 0 10px ${pinching ? '#ff1e42' : '#00f3ff'}`,
+  });
+}
+function isOverUi(pos: Vec2): boolean {
+  const [x, y] = cursorToClient(pos);
+  const el = document.elementFromPoint(x, y);
+  return !!el && !(el.tagName === 'CANVAS' && el.hasAttribute('data-engine'));
+}
+/** 왼손 위아래 이동 = 스크롤 배율 (손 이동량 대비 화면 높이 배수). 음수로 바꾸면 방향 반대 */
+const LEFT_SCROLL_GAIN = 2.5;
+/** 커서 아래 스크롤 가능한 UI 컨테이너 (3D 캔버스면 null) */
+function scrollableAt(pos: Vec2): HTMLElement | null {
+  const [x, y] = cursorToClient(pos);
+  let el = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!el || el.tagName === 'CANVAS') return null;
+  for (; el && el !== document.body; el = el.parentElement) {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1) return el;
+  }
+  return document.scrollingElement && document.scrollingElement.scrollHeight > window.innerHeight
+    ? (document.scrollingElement as HTMLElement)
+    : null;
+}
+
+/** 네이티브 <select>는 합성 클릭으로 안 열림 → 손으로 고를 수 있는 옵션 목록을 대신 띄움 */
+let handSelectEl: HTMLDivElement | null = null;
+function closeHandSelect() {
+  handSelectEl?.remove();
+  handSelectEl = null;
+  window.removeEventListener('pointerdown', onHandSelectOutside, true);
+}
+function onHandSelectOutside(e: PointerEvent) {
+  if (handSelectEl && !handSelectEl.contains(e.target as Node)) closeHandSelect();
+}
+function setSelectValue(sel: HTMLSelectElement, value: string) {
+  // React 제어 컴포넌트도 onChange가 불리도록 네이티브 setter 사용
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(sel, value);
+  sel.dispatchEvent(new Event('input', { bubbles: true }));
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function openHandSelect(sel: HTMLSelectElement) {
+  closeHandSelect();
+  const r = sel.getBoundingClientRect();
+  const box = document.createElement('div');
+  const below = window.innerHeight - r.bottom;
+  Object.assign(box.style, {
+    position: 'fixed', left: `${r.left}px`, minWidth: `${Math.max(r.width, 160)}px`,
+    maxHeight: `${Math.max(below, r.top) - 12}px`, overflowY: 'auto', zIndex: '2147483646',
+    background: 'rgba(6,14,24,0.97)', border: '1px solid #00f3ff', borderRadius: '6px',
+    boxShadow: '0 0 16px #00f3ff55', padding: '4px', display: 'flex', flexDirection: 'column', gap: '2px',
+  });
+  if (below >= r.top) box.style.top = `${r.bottom + 4}px`;
+  else box.style.bottom = `${window.innerHeight - r.top + 4}px`;
+  for (const opt of Array.from(sel.options)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = opt.text;
+    b.disabled = opt.disabled;
+    const on = opt.value === sel.value;
+    Object.assign(b.style, {
+      textAlign: 'left', padding: '10px 12px', fontSize: '15px', cursor: 'pointer', border: 'none', borderRadius: '4px',
+      color: on ? '#00131a' : '#cfefff', background: on ? '#00f3ff' : 'transparent',
+    });
+    b.addEventListener('click', () => {
+      setSelectValue(sel, opt.value);
+      closeHandSelect();
+    });
+    box.appendChild(b);
+  }
+  document.body.appendChild(box);
+  handSelectEl = box;
+  // 이번 클릭 이벤트가 끝난 뒤부터 바깥 클릭 감지
+  setTimeout(() => window.addEventListener('pointerdown', onHandSelectOutside, true), 0);
+}
+
+function fireUi(el: HTMLElement, type: string, pos: Vec2) {
+  const [clientX, clientY] = cursorToClient(pos);
+  const init = { bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0, buttons: type.endsWith('down') ? 1 : 0 };
+  el.dispatchEvent(
+    type.startsWith('pointer') ? new PointerEvent(type, { ...init, pointerId: 99, pointerType: 'mouse', isPrimary: true }) : new MouseEvent(type, init),
+  );
+}
+
 function pinchRatio(lm: NormalizedLandmark[]) {
   const size = dist(lm[0], lm[9]) || 1e-6;
   return dist(lm[4], lm[8]) / size;
 }
 
 const dist3 = (a: Landmark, b: Landmark) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+/** 엄지·검지 손끝이 "닿았다"고 보는 실제 거리 (미터). 손끝 랜드마크 사이 ~2.5cm = 맞닿음 */
+const PINCH_TOUCH_M = 0.025;
+/**
+ * 핀치 비율 (3D 월드 좌표 기준): 손끝 실제 거리를 PINCH_ON 척도로 환산.
+ * 2D 비율은 손이 비스듬하면 손바닥 길이가 줄어 보여서 판정이 틀림 → 각도와 무관한 미터 거리 사용.
+ * 2.5cm 이하 = 닿음(PINCH_ON), 5cm 이상 = 뗌(PINCH_OFF)
+ */
+function pinchRatioWorld(w: Landmark[]) {
+  return (dist3(w[4], w[8]) / PINCH_TOUCH_M) * PINCH_ON;
+}
 
 /**
  * 손가락이 접혔는지 (3D 월드 좌표, 미터): 끝마디가 PIP 관절보다 손목에 가까우면 접힘.
@@ -917,6 +1059,11 @@ export default function HandTracker(props: Props) {
     pinchPos: null as Vec2 | null,
     /** 핀치 확정 후 놓기 전까지 (마우스 버튼 눌림) */
     pointerDown: false,
+    /** 핀치로 누르고 있는 화면 UI 요소 (있으면 씬 대신 UI 클릭) */
+    uiPress: null as HTMLElement | null,
+    uiHover: null as HTMLElement | null,
+    /** 왼손 스크롤 드래그 추적 */
+    scrollDrag: newDrag(),
     /** 핀치 확정 순간의 실제 커서 (드래그 이동량 기준) */
     pointerOrigin: null as Vec2 | null,
     lastPointer: null as Vec2 | null,
@@ -988,6 +1135,8 @@ export default function HandTracker(props: Props) {
     return () => {
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('keydown', onKey);
+      updateTopCursor(null, false, false);
+      closeHandSelect();
     };
   }, [breakChain]);
 
@@ -1287,7 +1436,7 @@ export default function HandTracker(props: Props) {
         const indexCurled = !!drawWorld && isCurled(drawWorld, 8, 6);
 
         // 핀치 (히스테리시스 + 유지시간 확인). 선택·카메라 이동·움켜쥐기 모드에선 핀치 안 함
-        const ratio = pinchRatio(drawHand);
+        const ratio = drawWorld ? pinchRatioWorld(drawWorld) : pinchRatio(drawHand);
         if (d.prevPinchRatio >= PINCH_OFF && ratio < PINCH_OFF) d.closeStart = now;
         d.prevPinchRatio = ratio;
         if (!d.pinching) {
@@ -1322,7 +1471,15 @@ export default function HandTracker(props: Props) {
           d.lastPinchAt = now;
           d.selectFires += 1;
           const p = propsRef.current;
-          if (p.onPointer) {
+          const uiPos = d.pinchPos ?? snapped;
+          const ui = uiTargetAt(uiPos);
+          if (ui) {
+            // 화면 UI 위에서 핀치 = 그 UI 클릭 (씬엔 전달 안 함)
+            d.uiPress = ui;
+            fireUi(ui, 'pointerdown', uiPos);
+            fireUi(ui, 'mousedown', uiPos);
+            lastHint = 'UI 누름';
+          } else if (p.onPointer) {
             d.pointerDown = true;
             d.pointerOrigin = snapped;
             d.lastPointer = d.pinchPos ?? snapped;
@@ -1362,6 +1519,35 @@ export default function HandTracker(props: Props) {
         d.fistSince = 0;
       }
 
+      // 화면 UI hover 표시 (핀치 중엔 누른 요소 유지)
+      {
+        const hov = d.uiPress ?? (cursor && !zooming ? uiTargetAt(cursor) : null);
+        if (hov !== d.uiHover) {
+          d.uiHover?.classList.remove(UI_HOVER_CLASS);
+          if (hov) {
+            ensureUiHoverStyle();
+            hov.classList.add(UI_HOVER_CLASS);
+          }
+          d.uiHover = hov;
+        }
+        // 커서가 DOM UI 위면 최상단 커서로 그림 (누가 덮든 커서가 위)
+        const tp = !zooming ? cursor : null;
+        updateTopCursor(tp, d.pinching, !!tp && (!!d.uiPress || isOverUi(tp)));
+      }
+      // UI 누른 핀치가 풀리면 → up + click
+      if (d.uiPress && !d.pinching) {
+        const el = d.uiPress;
+        d.uiPress = null;
+        const pos = d.lastPointer ?? cursor ?? [0.5, 0.5];
+        fireUi(el, 'pointerup', pos);
+        fireUi(el, 'mouseup', pos);
+        if (el.isConnected) {
+          if (el.matches('input:not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]), textarea, select')) el.focus();
+          if (el instanceof HTMLSelectElement) openHandSelect(el);
+          else el.click();
+        }
+        lastHint = 'UI 클릭';
+      }
       // 핀치가 어떤 이유로든 풀리면 (손 펴기·주먹·줌·손 사라짐) 버튼 up
       if (d.pointerDown && !d.pinching) {
         d.pointerDown = false;
@@ -1410,6 +1596,17 @@ export default function HandTracker(props: Props) {
         if (m && !d.test.active) pushCameraOrbit(m[0] * ORBIT_YAW_PER_UNIT, m[1] * ORBIT_PITCH_PER_UNIT);
       } else d.orbitDrag = newDrag();
 
+      // ── 왼손 펼치고 위아래 = UI 스크롤 (주먹 등 다른 자세 = 스크롤 종료): 오른손 커서가 스크롤 가능한 UI 위일 때만 (줌·카메라·회전 중엔 안 함) ──
+      const scrollTarget =
+        !zooming && !d.camMode && !d.rot.active && !!depthHand && !!cursor && d.leftPose.stable === 'open'
+          ? scrollableAt(cursor)
+          : null;
+      if (scrollTarget && depthHand) {
+        const m = stepDrag(d.scrollDrag, depthHand);
+        // 손 올리면 내용도 위로 (잡고 끄는 방향)
+        if (m) scrollTarget.scrollBy({ top: -m[1] * window.innerHeight * LEFT_SCROLL_GAIN });
+      } else d.scrollDrag = newDrag();
+
       // ── 제스처 테스트 채점 ──
       if (d.test.active || testWasActive) {
         const snap: PoseSnapshot = {
@@ -1454,7 +1651,7 @@ export default function HandTracker(props: Props) {
           const role = orbit ? 'ORBIT' : 'LEFT';
           return `${role} ${curl} ${tu}`;
         }
-        return `${curl} p${pinchRatio(hands[i]).toFixed(2)} ${tu}`;
+        return `${curl} ${drawWorld ? `${Math.round(dist3(drawWorld[4], drawWorld[8]) * 1000)}mm` : `p${pinchRatio(hands[i]).toFixed(2)}`} ${tu}`;
       });
       pushInfo({
         cursor,

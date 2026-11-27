@@ -12,7 +12,7 @@ import {
   CameraControlState,
   SolidPrimitive,
 } from '../types/cad';
-import { getKdsLoadRange, MATERIAL_CATALOG } from '../utils/buildingEstimator';
+import { MATERIAL_CATALOG } from '../utils/buildingEstimator';
 import {
   computePolygonAreaSqm,
   getFloorColor,
@@ -27,23 +27,25 @@ interface Props {
   onUpdateSitePolygon?: (nextPolygon: [number, number][]) => void;
 }
 
-interface HoveredFloorTooltip {
+interface HoveredTooltipState {
   x: number;
   y: number;
   floorIndex: number;
   title: string;
   areaText: string;
-  heightText: string;
-  roomsText: string;
+  physicsLine1: string;
+  physicsLine2: string;
+  dcrBadge?: { text: string; tone: 'safe' | 'caution' | 'unsafe' };
 }
 
 const WHITE_SAFE = new THREE.Color('#ffffff');
-const WARN_AMBER = new THREE.Color('#fb923c');
-const DANGER_RED = new THREE.Color('#ef4444');
+const PALE_WARM = new THREE.Color('#fef3c7');
+const WARN_AMBER = new THREE.Color('#f97316');
+const DANGER_RED = new THREE.Color('#dc2626');
 const FIXED_SLATE = new THREE.Color('#475569');
 const UP_VEC = new THREE.Vector3(0, 1, 0);
 
-// ---------- 지붕-벽체 밀봉용 정규화 삼각 지오메트리 (단위 큐브 [-0.5, 0.5] 기준) ----------
+// ---------- 지붕-벽체 밀봉용 정규화 삼각 지오메트리 ----------
 let cachedGableGeo: THREE.ExtrudeGeometry | null = null;
 let cachedWedgeGeo: THREE.ExtrudeGeometry | null = null;
 
@@ -135,15 +137,35 @@ function StudioEnvironment() {
   return null;
 }
 
-function computeWhiteToRedColor(ratio: number): THREE.Color {
-  const clamped = THREE.MathUtils.clamp(ratio, 0, 1.3);
-  if (clamped <= 0.65) {
-    return WHITE_SAFE.clone().lerp(new THREE.Color('#fef3c7'), clamped / 0.65);
+/** 실제 KDS 응력비(DCR = Demand / φCapacity)를 화이트 → 아이보리 → 오렌지 → 레드로 매핑 */
+function computeDcrHeatmapColor(dcr: number): THREE.Color {
+  const clamped = THREE.MathUtils.clamp(dcr, 0, 1.25);
+  if (clamped <= 0.55) {
+    return WHITE_SAFE.clone().lerp(PALE_WARM, clamped / 0.55);
   }
-  if (clamped <= 1.0) {
-    return new THREE.Color('#fef3c7').lerp(WARN_AMBER, (clamped - 0.65) / 0.35);
+  if (clamped <= 0.85) {
+    return PALE_WARM.clone().lerp(WARN_AMBER, (clamped - 0.55) / 0.3);
   }
-  return WARN_AMBER.clone().lerp(DANGER_RED, Math.min(1, (clamped - 1.0) / 0.3));
+  return WARN_AMBER.clone().lerp(DANGER_RED, Math.min(1, (clamped - 0.85) / 0.25));
+}
+
+function isPrimaryLoadBearing(role?: SolidPrimitive['partRole']): boolean {
+  return (
+    role === 'structural_column' ||
+    role === 'structural_beam' ||
+    role === 'structural_footing' ||
+    role === 'core' ||
+    role === 'slab'
+  );
+}
+
+function isNonStructuralDecor(role?: SolidPrimitive['partRole']): boolean {
+  return (
+    role === 'garden' ||
+    role === 'furniture' ||
+    role === 'sculpture' ||
+    role === 'site_boundary'
+  );
 }
 
 function computeBeamTransform(p1: THREE.Vector3, p2: THREE.Vector3) {
@@ -171,14 +193,15 @@ function SolidMeshView({
   xrayUnitMode,
   pipeXrayMode,
   interiorCutawayMode,
-  heatmapRatio,
+  structuralFrameMode,
+  isHeatmapActive,
   isSelected,
   isFloorSelected,
   isFloorHovered,
   isParamHighlighted,
   onSelect,
-  onHoverFloor,
-  onLeaveFloor,
+  onHoverSolid,
+  onLeaveSolid,
 }: {
   solid: SolidPrimitive;
   defaultMaterial: CadMaterial;
@@ -186,20 +209,24 @@ function SolidMeshView({
   xrayUnitMode: boolean;
   pipeXrayMode: boolean;
   interiorCutawayMode: boolean;
-  heatmapRatio: number | null;
+  structuralFrameMode: boolean;
+  isHeatmapActive: boolean;
   isSelected: boolean;
   isFloorSelected: boolean;
   isFloorHovered: boolean;
   isParamHighlighted: boolean;
   onSelect?: () => void;
-  onHoverFloor?: (clientX: number, clientY: number) => void;
-  onLeaveFloor?: () => void;
+  onHoverSolid?: (solid: SolidPrimitive, clientX: number, clientY: number) => void;
+  onLeaveSolid?: () => void;
 }) {
   const matKey = solid.material ?? defaultMaterial ?? 'stucco';
   const pbr = getPbrMaterialBundle(matKey);
+  const primaryStructural = isPrimaryLoadBearing(solid.partRole);
+  const nonStructural = isNonStructuralDecor(solid.partRole);
 
   const floorTint =
     typeof solid.floorIndex === 'number' &&
+    !primaryStructural &&
     solid.partRole !== 'interior_wall' &&
     solid.partRole !== 'interior_floor' &&
     solid.partRole !== 'furniture' &&
@@ -214,10 +241,14 @@ function SolidMeshView({
 
   const effectiveColor =
     matKey === 'wood' || matKey === 'steel' || matKey === 'concrete'
-      ? '#ffffff'
+      ? solid.partRole === 'structural_column' ||
+        solid.partRole === 'structural_beam' ||
+        solid.partRole === 'structural_footing'
+        ? rawTint
+        : '#ffffff'
       : rawTint;
 
-  // 0. 실내 투시 뷰 (지붕 + 지붕 마감벽 + 남/동측 전면 외벽 숨김)
+  // 0. 실내 투시 뷰 (지붕·마감벽 + 남/동측 외벽 오픈)
   if (interiorCutawayMode) {
     if (
       solid.partRole === 'roof' ||
@@ -234,7 +265,95 @@ function SolidMeshView({
     }
   }
 
-  // 1. 수도·전기 배관 투시 모드
+  // 1. 구조 골조 전용 투시 뷰 (RC/철골/중목 기둥·보·기초·슬래브만 실체로 강조, 비구조 외피는 고스트화)
+  if (structuralFrameMode) {
+    if (solid.partRole === 'furniture' || solid.partRole === 'interior_floor') {
+      return null;
+    }
+    if (!primaryStructural && solid.partRole !== 'basement') {
+      if (solid.partRole === 'garden') {
+        return (
+          <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
+            <mesh>
+              <SolidShapeGeometry shape={solid.shape} />
+              <meshStandardMaterial color="#86efac" transparent opacity={0.22} depthWrite={false} />
+            </mesh>
+          </group>
+        );
+      }
+      return (
+        <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
+          <mesh>
+            <SolidShapeGeometry shape={solid.shape} />
+            <meshStandardMaterial
+              color="#cbd5e1"
+              roughness={0.35}
+              transparent
+              opacity={0.07}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh scale={[1.001, 1.001, 1.001]}>
+            <SolidShapeGeometry shape={solid.shape} />
+            <meshBasicMaterial color="#94a3b8" wireframe transparent opacity={0.14} />
+          </mesh>
+        </group>
+      );
+    }
+
+    // 실제 주구조 골조 부재(기초·기둥·보·코어·슬래브) 선명 렌더링
+    return (
+      <group
+        position={solid.position}
+        scale={solid.scale}
+        rotation={solid.rotation ?? [0, 0, 0]}
+        onClick={(e) => {
+          if (onSelect) {
+            e.stopPropagation();
+            onSelect();
+          }
+        }}
+        onPointerMove={(e) => {
+          if (onHoverSolid) {
+            e.stopPropagation();
+            onHoverSolid(solid, e.clientX, e.clientY);
+          }
+        }}
+        onPointerOut={() => onLeaveSolid?.()}
+      >
+        <mesh castShadow receiveShadow>
+          <SolidShapeGeometry shape={solid.shape} />
+          <meshStandardMaterial
+            map={pbr.map}
+            bumpMap={pbr.bumpMap}
+            bumpScale={pbr.bumpScale}
+            color={effectiveColor}
+            metalness={pbr.metalness}
+            roughness={pbr.roughness}
+            transparent={solid.partRole === 'slab'}
+            opacity={solid.partRole === 'slab' ? 0.42 : 0.98}
+          />
+        </mesh>
+        <mesh scale={[1.006, 1.006, 1.006]}>
+          <SolidShapeGeometry shape={solid.shape} />
+          <meshBasicMaterial
+            color={
+              solid.partRole === 'structural_footing'
+                ? '#0f172a'
+                : solid.partRole === 'structural_column' || solid.partRole === 'structural_beam'
+                ? '#0284c7'
+                : '#475569'
+            }
+            wireframe
+            transparent
+            opacity={0.55}
+          />
+        </mesh>
+      </group>
+    );
+  }
+
+  // 2. 수도·전기 배관 투시 모드
   if (pipeXrayMode && solid.partRole !== 'garden') {
     return (
       <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
@@ -256,9 +375,59 @@ function SolidMeshView({
     );
   }
 
-  // 2. 설계하중 히트맵 모드
-  if (heatmapRatio !== null && solid.partRole !== 'garden' && solid.partRole !== 'sculpture') {
-    const heatColor = computeWhiteToRedColor(heatmapRatio);
+  // 3. 실제 KDS 물리 DCR 기반 하중 경로 히트맵 (정원·가구·조형물 제외, 골조 강조)
+  if (isHeatmapActive) {
+    if (nonStructural) {
+      // 정원·가구 등은 하중을 받지 않으므로 붉게 물들이지 않고 배경 톤으로만 유지
+      if (solid.partRole === 'furniture') return null;
+      return (
+        <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
+          <mesh>
+            <SolidShapeGeometry shape={solid.shape} />
+            <meshStandardMaterial
+              color={rawTint}
+              roughness={0.8}
+              transparent
+              opacity={0.35}
+              depthWrite={false}
+            />
+          </mesh>
+        </group>
+      );
+    }
+
+    const actualDcr = typeof solid.dcr === 'number' ? solid.dcr : 0.15;
+    const heatColor = computeDcrHeatmapColor(actualDcr);
+
+    // 비내력 외벽/내벽/지붕은 반투명화해 내부 기둥·보·기초의 실제 하중 전달 경로가 한눈에 보이게 처리
+    if (!primaryStructural) {
+      return (
+        <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
+          <mesh>
+            <SolidShapeGeometry shape={solid.shape} />
+            <meshStandardMaterial
+              color={heatColor}
+              roughness={0.5}
+              transparent
+              opacity={0.12}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh scale={[1.002, 1.002, 1.002]}>
+            <SolidShapeGeometry shape={solid.shape} />
+            <meshBasicMaterial color="#94a3b8" wireframe transparent opacity={0.14} />
+          </mesh>
+        </group>
+      );
+    }
+
+    // 실제 하중을 지지하는 주구조 골조 (기초·기둥·보·코어·슬래브)
+    const isFrameBar =
+      solid.partRole === 'structural_column' ||
+      solid.partRole === 'structural_beam' ||
+      solid.partRole === 'structural_footing' ||
+      solid.partRole === 'core';
+
     return (
       <group
         position={solid.position}
@@ -270,28 +439,40 @@ function SolidMeshView({
             onSelect();
           }
         }}
+        onPointerMove={(e) => {
+          if (onHoverSolid) {
+            e.stopPropagation();
+            onHoverSolid(solid, e.clientX, e.clientY);
+          }
+        }}
+        onPointerOut={() => onLeaveSolid?.()}
       >
         <mesh>
           <SolidShapeGeometry shape={solid.shape} />
           <meshStandardMaterial
             color={heatColor}
             emissive={heatColor}
-            emissiveIntensity={heatmapRatio > 0.7 ? 0.25 : 0.08}
-            roughness={0.4}
-            transparent
-            opacity={solid.partRole === 'core' || solid.id.includes('_pier_') ? 0.88 : 0.42}
-            depthWrite={solid.partRole === 'core' || solid.id.includes('_pier_')}
+            emissiveIntensity={actualDcr > 0.8 ? 0.38 : actualDcr > 0.55 ? 0.16 : 0.04}
+            roughness={0.35}
+            transparent={!isFrameBar}
+            opacity={isFrameBar ? 0.96 : 0.45}
+            depthWrite={isFrameBar}
           />
         </mesh>
-        <mesh scale={[1.003, 1.003, 1.003]}>
+        <mesh scale={[1.005, 1.005, 1.005]}>
           <SolidShapeGeometry shape={solid.shape} />
-          <meshBasicMaterial color="#64748b" wireframe transparent opacity={0.3} />
+          <meshBasicMaterial
+            color={actualDcr > 1.0 ? '#991b1b' : '#475569'}
+            wireframe
+            transparent
+            opacity={isFrameBar ? 0.45 : 0.22}
+          />
         </mesh>
       </group>
     );
   }
 
-  // 3. 방 평면도(TYPE-A 등) 선택 시 전체 건물 내 방 구역 투시
+  // 4. 방 평면도(TYPE-A 등) 선택 시 전체 건물 내 방 구역 투시
   if (xrayUnitMode) {
     const isRoofOrSculpture =
       solid.partRole === 'roof' ||
@@ -314,12 +495,12 @@ function SolidMeshView({
           }
         }}
         onPointerMove={(e) => {
-          if (onHoverFloor) {
+          if (onHoverSolid) {
             e.stopPropagation();
-            onHoverFloor(e.clientX, e.clientY);
+            onHoverSolid(solid, e.clientX, e.clientY);
           }
         }}
-        onPointerOut={() => onLeaveFloor?.()}
+        onPointerOut={() => onLeaveSolid?.()}
       >
         <mesh>
           <SolidShapeGeometry shape={solid.shape} />
@@ -360,12 +541,12 @@ function SolidMeshView({
         }
       }}
       onPointerMove={(e) => {
-        if (onHoverFloor) {
+        if (onHoverSolid) {
           e.stopPropagation();
-          onHoverFloor(e.clientX, e.clientY);
+          onHoverSolid(solid, e.clientX, e.clientY);
         }
       }}
-      onPointerOut={() => onLeaveFloor?.()}
+      onPointerOut={() => onLeaveSolid?.()}
     >
       <mesh castShadow receiveShadow>
         <SolidShapeGeometry shape={solid.shape} />
@@ -396,11 +577,14 @@ function SolidMeshView({
           metalness={pbr.metalness}
           roughness={pbr.roughness}
           transparent={Boolean(
-            pbr.transparent || solid.partRole === 'basement' || isBackExteriorInCutaway
+            pbr.transparent ||
+              solid.partRole === 'basement' ||
+              solid.partRole === 'structural_footing' ||
+              isBackExteriorInCutaway
           )}
           opacity={
-            solid.partRole === 'basement'
-              ? 0.5
+            solid.partRole === 'basement' || solid.partRole === 'structural_footing'
+              ? 0.55
               : isBackExteriorInCutaway
               ? 0.45
               : pbr.opacity ?? 1
@@ -458,7 +642,6 @@ function SiteBoundaryEditor({
 
   return (
     <group>
-      {/* 드래그 중 부드러운 XZ 평면 포인터 추적용 투명 플레인 */}
       {draggingIdx !== null && (
         <mesh
           rotation={[-Math.PI / 2, 0, 0]}
@@ -478,7 +661,6 @@ function SiteBoundaryEditor({
         </mesh>
       )}
 
-      {/* 각 꼭짓점 드래그 핸들 (마우스 드래그 및 제스처 핀치 대상) */}
       {polygon2D.map(([vx, vz], idx) => {
         const isActive = draggingIdx === idx || hoveredIdx === idx;
         return (
@@ -523,7 +705,6 @@ function SiteBoundaryEditor({
         );
       })}
 
-      {/* 변 중앙 '+' 핸들 (클릭 시 꼭짓점 추가, 최대 12개) */}
       {polygon2D.length < 12 &&
         polygon2D.map(([x1, z1], idx) => {
           const [x2, z2] = polygon2D[(idx + 1) % polygon2D.length];
@@ -553,7 +734,6 @@ function SiteBoundaryEditor({
           );
         })}
 
-      {/* 드래그 중 실시간 대지면적 표시 */}
       {draggingIdx !== null && (
         <Html position={[polygon2D[draggingIdx][0], 0.45, polygon2D[draggingIdx][1]]} center>
           <div className="pointer-events-none px-2 py-1 rounded-lg bg-slate-900/95 text-white font-mono text-[11px] font-bold whitespace-nowrap shadow-lg border border-amber-400">
@@ -671,16 +851,16 @@ function StaticStructure({
   structure,
   hoveredFloorIndex,
   onSelectPart,
-  onHoverFloor,
-  onLeaveFloor,
+  onHoverSolid,
+  onLeaveSolid,
   onUpdateSitePolygon,
   onDraggingSiteChange,
 }: {
   structure: StructureState;
   hoveredFloorIndex: number | null;
   onSelectPart: (partId: string | null) => void;
-  onHoverFloor: (floorIndex: number, clientX: number, clientY: number) => void;
-  onLeaveFloor: () => void;
+  onHoverSolid: (solid: SolidPrimitive, clientX: number, clientY: number) => void;
+  onLeaveSolid: () => void;
   onUpdateSitePolygon?: (nextPolygon: [number, number][]) => void;
   onDraggingSiteChange: (dragging: boolean) => void;
 }) {
@@ -699,58 +879,11 @@ function StaticStructure({
   const isHeatmap = Boolean(structure.isLoadHeatmapActive && spec);
   const isPipeXray = Boolean(structure.showMepPipes);
   const isInteriorCutaway = structure.viewMode === 'interior_cutaway';
+  const isStructuralFrame = structure.viewMode === 'structural_frame';
   const isSiteEditMode = Boolean(structure.isSiteEditMode && spec);
-  const kdsRange = spec ? getKdsLoadRange(spec.usageType) : null;
   const vizKey = structure.activeSpecViz?.paramKey;
   const glassPbr = getPbrMaterialBundle('glass');
   const steelPbr = getPbrMaterialBundle('steel');
-
-  const getPhysicalStressRatio = (solid: SolidPrimitive): number | null => {
-    if (!isHeatmap || !spec || !kdsRange) return null;
-    if (
-      solid.partRole === 'garden' ||
-      solid.partRole === 'sculpture' ||
-      solid.partRole === 'site_boundary'
-    ) {
-      return null;
-    }
-
-    const floors = Math.max(1, spec.floors);
-    const fIdx =
-      typeof solid.floorIndex === 'number' && solid.floorIndex >= 1 && solid.floorIndex <= floors
-        ? solid.floorIndex
-        : 1;
-    const floorLoad = spec.floorLoadsKn?.[fIdx] ?? kdsRange.legalBaseKn;
-
-    const isColumnLike = solid.partRole === 'core' || solid.id.includes('_pier_');
-    if (isColumnLike) {
-      let cumulativeLoad = 0;
-      for (let f = fIdx; f <= floors; f++) {
-        cumulativeLoad += spec.floorLoadsKn?.[f] ?? kdsRange.legalBaseKn;
-      }
-      const columnConcentration = 1 + (floors - fIdx) * 0.22;
-      return ((cumulativeLoad / floors) * columnConcentration) / (kdsRange.designCapacityKn * 0.85);
-    }
-
-    if (solid.partRole === 'slab') {
-      return (floorLoad / kdsRange.designCapacityKn) * 0.9;
-    }
-
-    return (floorLoad / kdsRange.designCapacityKn) * 0.35;
-  };
-
-  const getColumnBeamHeatRatio = (midY: number): number | null => {
-    if (!isHeatmap || !spec || !kdsRange) return null;
-    const totalH = Math.max(1.0, spec.heightMeters / 3.2);
-    const floors = Math.max(1, spec.floors);
-    const fIdx = Math.min(floors, Math.max(1, Math.ceil((Math.max(0.05, midY) / totalH) * floors)));
-    let cumulativeLoad = 0;
-    for (let f = fIdx; f <= floors; f++) {
-      cumulativeLoad += spec.floorLoadsKn?.[f] ?? kdsRange.legalBaseKn;
-    }
-    const columnConcentration = 1 + (floors - fIdx) * 0.25;
-    return ((cumulativeLoad / floors) * columnConcentration) / (kdsRange.designCapacityKn * 0.82);
-  };
 
   const dimGuides = useMemo(() => {
     if (!spec) return null;
@@ -796,13 +929,16 @@ function StaticStructure({
             xrayUnitMode={Boolean(selectedUnitType)}
             pipeXrayMode={isPipeXray}
             interiorCutawayMode={isInteriorCutaway}
-            heatmapRatio={getPhysicalStressRatio(solid)}
+            structuralFrameMode={isStructuralFrame}
+            isHeatmapActive={isHeatmap}
             isSelected={structure.selectedPartId === solid.id}
             isFloorSelected={
               typeof structure.selectedFloorIndex === 'number' &&
               solid.floorIndex === structure.selectedFloorIndex
             }
             isFloorHovered={
+              !isHeatmap &&
+              !isStructuralFrame &&
               typeof solid.floorIndex === 'number' &&
               solid.floorIndex !== 0 &&
               hoveredFloorIndex === solid.floorIndex
@@ -811,18 +947,19 @@ function StaticStructure({
             onSelect={() => {
               if (!isSiteEditMode) onSelectPart(solid.id);
             }}
-            onHoverFloor={(cx, cy) => {
-              if (typeof solid.floorIndex === 'number' && solid.floorIndex !== 0) {
-                onHoverFloor(solid.floorIndex, cx, cy);
+            onHoverSolid={(s, cx, cy) => {
+              if (typeof s.floorIndex === 'number' && s.floorIndex !== 0) {
+                onHoverSolid(s, cx, cy);
               }
             }}
-            onLeaveFloor={onLeaveFloor}
+            onLeaveSolid={onLeaveSolid}
           />
         );
       })}
 
-      {/* 외벽 로이 복층 유리 창호 */}
+      {/* 외벽 로이 복층 유리 창호 (히트맵 및 구조 골조 전용 뷰에서는 반투명/숨김) */}
       {!isHeatmap &&
+        !isStructuralFrame &&
         (spec?.exteriorWindows ?? [])
           .filter((win) => !(isInteriorCutaway && (win.wall === 'S' || win.wall === 'E')))
           .map((win) => (
@@ -861,6 +998,7 @@ function StaticStructure({
       {/* 방 평면도 선택 시 전체 건물 내 해당 방 위치 3D 가시화 */}
       {selectedUnitType &&
         !isPipeXray &&
+        !isStructuralFrame &&
         selectedUnitType.placements.map((pl, idx) => (
           <group key={`unit_pl_${idx}`} position={pl.position}>
             <mesh scale={pl.scale}>
@@ -933,16 +1071,15 @@ function StaticStructure({
         </group>
       )}
 
-      {/* 구조 조인트 노드 & 수직 강재 기둥 */}
+      {/* 구조 절점 노드 & 기둥 부재 (실제 beam.dcr 반영) */}
       {structure.nodes.map((node) => {
         const isGrounded = node.isFixed;
-        const heatRatio = getColumnBeamHeatRatio(node.position[1]);
-        const nodeColor =
-          heatRatio !== null
-            ? computeWhiteToRedColor(heatRatio)
-            : isGrounded
-            ? FIXED_SLATE
-            : '#64748b';
+        const baseDcr = spec?.structuralReport?.foundationDcr ?? 0.25;
+        const nodeColor = isHeatmap
+          ? computeDcrHeatmapColor(baseDcr)
+          : isGrounded
+          ? FIXED_SLATE
+          : '#64748b';
 
         return (
           <mesh key={node.id} position={node.position}>
@@ -964,26 +1101,27 @@ function StaticStructure({
         const p1 = new THREE.Vector3(...n1.position);
         const p2 = new THREE.Vector3(...n2.position);
         const { mid, length, quat } = computeBeamTransform(p1, p2);
-        const heatRatio = getColumnBeamHeatRatio(mid.y);
+        const actualDcr = typeof beam.dcr === 'number' ? beam.dcr : beam.stress;
 
         const matKey = beam.material ?? structure.activeMaterial ?? 'steel';
         const beamPbr = matKey === 'steel' ? steelPbr : getPbrMaterialBundle(matKey);
-        const finalColor =
-          heatRatio !== null ? computeWhiteToRedColor(heatRatio) : new THREE.Color('#ffffff');
-        const radius = heatRatio !== null ? (beam.radius ?? 0.034) * 1.45 : beam.radius ?? 0.032;
+        const finalColor = isHeatmap
+          ? computeDcrHeatmapColor(actualDcr)
+          : new THREE.Color('#ffffff');
+        const radius = isHeatmap ? (beam.radius ?? 0.032) * 1.45 : beam.radius ?? 0.03;
 
         return (
           <mesh key={beam.id} position={mid} quaternion={quat} scale={[1, length, 1]} castShadow>
             <cylinderGeometry args={[radius, radius, 1, 12]} />
             <meshStandardMaterial
-              map={beamPbr.map}
-              bumpMap={beamPbr.bumpMap}
+              map={isHeatmap ? null : beamPbr.map}
+              bumpMap={isHeatmap ? null : beamPbr.bumpMap}
               bumpScale={beamPbr.bumpScale}
               color={finalColor}
-              emissive={heatRatio !== null && heatRatio > 0.7 ? finalColor : '#000000'}
-              emissiveIntensity={heatRatio !== null && heatRatio > 0.7 ? 0.3 : 0}
-              metalness={heatRatio !== null ? 0.2 : beamPbr.metalness}
-              roughness={heatRatio !== null ? 0.35 : beamPbr.roughness}
+              emissive={isHeatmap && actualDcr > 0.78 ? finalColor : '#000000'}
+              emissiveIntensity={isHeatmap && actualDcr > 0.78 ? 0.35 : 0}
+              metalness={isHeatmap ? 0.2 : beamPbr.metalness}
+              roughness={isHeatmap ? 0.35 : beamPbr.roughness}
             />
           </mesh>
         );
@@ -1057,7 +1195,7 @@ function DynamicPhysicsStructure({
       mesh.position.copy(mid);
       mesh.quaternion.copy(quat);
       mesh.scale.set(1, length, 1);
-      latestStressRef.current[beam.id] = 0.25;
+      latestStressRef.current[beam.id] = beam.dcr ?? 0.25;
     });
 
     const now = state.clock.elapsedTime;
@@ -1089,7 +1227,8 @@ function DynamicPhysicsStructure({
             xrayUnitMode={false}
             pipeXrayMode={false}
             interiorCutawayMode={false}
-            heatmapRatio={null}
+            structuralFrameMode={false}
+            isHeatmapActive={false}
             isSelected={false}
             isFloorSelected={false}
             isFloorHovered={false}
@@ -1147,36 +1286,58 @@ export default function SceneCanvas({
   onSelectPart,
   onUpdateSitePolygon,
 }: Props) {
-  const [hoveredTooltip, setHoveredTooltip] = useState<HoveredFloorTooltip | null>(null);
+  const [hoveredTooltip, setHoveredTooltip] = useState<HoveredTooltipState | null>(null);
   const [isDraggingSite, setIsDraggingSite] = useState(false);
   const simKey = `${structure.solids?.length ?? 0}-${structure.nodes.length}-${structure.beams.length}`;
+  const isSenior = Boolean(structure.isSeniorMode);
 
-  const handleHoverFloor = (floorIndex: number, clientX: number, clientY: number) => {
+  const handleHoverSolid = (solid: SolidPrimitive, clientX: number, clientY: number) => {
     const spec = structure.buildingSpec;
     if (!spec) return;
 
+    const floorIndex = solid.floorIndex ?? 1;
+    const report = spec.structuralReport;
     const avgFloorArea = Number(
       (spec.totalFloorAreaSqm / Math.max(1, spec.floors)).toFixed(1)
     );
-    const floorHeightM = Number(
-      (spec.heightMeters / Math.max(1, spec.floors)).toFixed(2)
-    );
-    const roomsList =
-      spec.unitTypes?.[0]?.rooms
-        .filter((r) => r.liveLoadKn < 3.0)
-        .map((r) => r.name)
-        .slice(0, 3)
-        .join(' · ') || '거실 · 주방 · 침실';
+
+    const makeBadge = (dcr?: number): HoveredTooltipState['dcrBadge'] => {
+      if (typeof dcr !== 'number') return undefined;
+      const pct = Math.round(dcr * 100);
+      if (dcr > 1.0) return { text: `위험 · 응력비 ${pct}% (초과)`, tone: 'unsafe' };
+      if (dcr > 0.78) return { text: `주의 · 응력비 ${pct}%`, tone: 'caution' };
+      return { text: `안전 · 응력비 ${pct}%`, tone: 'safe' };
+    };
+
+    // 기둥·보·기초·코어처럼 개별 공학 데이터가 붙은 구조 부재 호버 시 상세 역학 정보 우선 표시
+    if (solid.stressLabel) {
+      setHoveredTooltip({
+        x: clientX,
+        y: clientY,
+        floorIndex,
+        title: solid.groupName || `${floorIndex}층 구조 부재`,
+        areaText: report ? `${report.system.nameKo} · ${report.system.codeRef}` : 'KDS 구조 골조',
+        physicsLine1: solid.stressLabel,
+        physicsLine2: report
+          ? `건물 총 중량 ${report.totalGravityMassTon.toLocaleString()}톤 · 기초 지반압 ${report.soilBearingPressureKpa}kPa`
+          : '',
+        dcrBadge: makeBadge(solid.dcr),
+      });
+      return;
+    }
 
     if (floorIndex < 0) {
       setHoveredTooltip({
         x: clientX,
         y: clientY,
         floorIndex,
-        title: `지하층 (B1~B${spec.undergroundFloors})`,
+        title: `지하·기초부 (B1~B${Math.max(1, spec.undergroundFloors)})`,
         areaText: `지하 연면적 ${spec.undergroundAreaSqm.toLocaleString()} ㎡`,
-        heightText: `지하 ${spec.undergroundFloors}개층`,
-        roomsText: '지하 주차장 · 기계·전기실',
+        physicsLine1: report
+          ? `기초 지반접지압 ${report.soilBearingPressureKpa}kPa / 허용 ${report.allowableSoilKpa}kPa`
+          : '철근콘크리트 기초 구조',
+        physicsLine2: '지하 주차·기계실 및 RC 내진 기초',
+        dcrBadge: makeBadge(report?.foundationDcr),
       });
       return;
     }
@@ -1186,23 +1347,31 @@ export default function SceneCanvas({
         x: clientX,
         y: clientY,
         floorIndex,
-        title: `지붕·옥상층 (RF · 루프탑 ${spec.rooftops}개소)`,
-        areaText: `건축면적 약 ${spec.buildingAreaSqm.toLocaleString()} ㎡`,
-        heightText: `최고 높이 ${spec.heightMeters} m`,
-        roomsText: '밀봉 지붕 구조 · 처마 · 루프탑',
+        title: `지붕·옥상층 (RF · ${spec.roofStyle ?? 'flat'})`,
+        areaText: `건축면적 약 ${spec.buildingAreaSqm.toLocaleString()} ㎡ · 최고 높이 ${spec.heightMeters}m`,
+        physicsLine1: '지붕-벽체 밀봉 마감 및 방수·단열 구조',
+        physicsLine2: `지붕 마감재: ${(spec.roofMaterial ?? 'steel').toUpperCase()}`,
+        dcrBadge: makeBadge(solid.dcr),
       });
       return;
     }
 
-    const loadKn = spec.floorLoadsKn?.[floorIndex] ?? 2.0;
+    const fp = report?.floors.find((f) => f.floor === floorIndex);
     setHoveredTooltip({
       x: clientX,
       y: clientY,
       floorIndex,
       title: `지상 ${floorIndex}층 (${floorIndex}F)`,
-      areaText: `층 바닥면적 ${avgFloorArea.toLocaleString()} ㎡`,
-      heightText: `층고 ${floorHeightM} m · 활하중 ${loadKn.toFixed(1)} kN/㎡`,
-      roomsText: roomsList,
+      areaText: `층 바닥면적 약 ${avgFloorArea.toLocaleString()} ㎡`,
+      physicsLine1: fp
+        ? `자중 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2} → 계수하중 ${fp.factoredLoadKnM2} kN/㎡`
+        : `활하중 ${(spec.floorLoadsKn?.[floorIndex] ?? 2.0).toFixed(1)} kN/㎡`,
+      physicsLine2: fp
+        ? `기둥 축하중 ${fp.columnAxialDemandKn}kN · 보 처짐 ${fp.beamDeflectionMm}/${fp.allowableDeflectionMm}mm`
+        : 'KDS 41 12 00 구조 검토 완료',
+      dcrBadge: fp
+        ? makeBadge(Math.max(fp.columnDcr, fp.beamFlexureDcr, fp.beamDeflectionDcr))
+        : undefined,
     });
   };
 
@@ -1276,8 +1445,8 @@ export default function SceneCanvas({
             structure={structure}
             hoveredFloorIndex={hoveredTooltip?.floorIndex ?? null}
             onSelectPart={onSelectPart}
-            onHoverFloor={handleHoverFloor}
-            onLeaveFloor={() => setHoveredTooltip(null)}
+            onHoverSolid={handleHoverSolid}
+            onLeaveSolid={() => setHoveredTooltip(null)}
             onUpdateSitePolygon={onUpdateSitePolygon}
             onDraggingSiteChange={setIsDraggingSite}
           />
@@ -1286,33 +1455,74 @@ export default function SceneCanvas({
         <CameraController control={structure.cameraControl} disabled={isDraggingSite} />
       </Canvas>
 
-      {/* 대지 경계 편집 모드 안내 배너 */}
+      {/* 상태 안내 배너 (대지 편집 / 구조 골조 투시 / 물리 하중 히트맵) */}
       {structure.isSiteEditMode && (
-        <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-sky-700/95 text-white text-xs font-bold shadow-lg border border-sky-300">
-          대지 경계 자유 편집 ON · 파란 핀(P1~P{structure.buildingSpec?.sitePolygon?.length ?? 4}) 드래그 · 초록점 클릭(꼭짓점 추가) · 핀 더블클릭(삭제)
+        <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-sky-700/95 text-white text-xs sm:text-sm font-bold shadow-lg border border-sky-300">
+          대지 경계 편집 중 · 파란 핀 드래그(모양 변경) · 초록점 클릭(꼭짓점 추가) · 핀 더블클릭(삭제)
         </div>
       )}
 
+      {!structure.isSiteEditMode && structure.viewMode === 'structural_frame' && (
+        <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-slate-900/92 text-white text-xs sm:text-sm font-bold shadow-lg border border-sky-400">
+          구조 골조 투시 ON · {structure.buildingSpec?.structuralReport?.system.nameKo ?? '주구조'} (기초 · 기둥 · 거더 보 · 내진 코어)
+        </div>
+      )}
+
+      {!structure.isSiteEditMode && structure.isLoadHeatmapActive && (
+        <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-2xl bg-white/95 text-slate-900 text-xs font-bold shadow-lg border-2 border-slate-300 flex items-center gap-3">
+          <span>물리 하중 경로 (KDS DCR):</span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded-full bg-white border border-slate-400 inline-block" /> 안전(&lt;55%)
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded-full bg-orange-500 inline-block" /> 주의(78%)
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded-full bg-red-600 inline-block" /> 위험(&gt;100%)
+          </span>
+        </div>
+      )}
+
+      {/* 물리 하중·처짐·DCR 툴팁 (시니어 모드일 때 큰 글씨·고대비) */}
       {hoveredTooltip && !structure.isSiteEditMode && (
         <div
-          className="pointer-events-none fixed z-50 bg-white/95 backdrop-blur-md border border-sky-400 rounded-xl px-3 py-2 shadow-xl text-xs text-slate-800 space-y-0.5"
+          className={`pointer-events-none fixed z-50 bg-white/98 backdrop-blur-md border-2 border-slate-800 rounded-xl px-3.5 py-2.5 shadow-2xl text-slate-900 space-y-1 ${
+            isSenior ? 'max-w-[360px] text-sm' : 'max-w-[300px] text-xs'
+          }`}
           style={{
-            left: Math.min(window.innerWidth - 240, hoveredTooltip.x + 14),
+            left: Math.min(window.innerWidth - (isSenior ? 375 : 315), hoveredTooltip.x + 16),
             top: Math.max(12, hoveredTooltip.y - 12),
           }}
         >
-          <div className="flex items-center gap-1.5">
-            <span
-              className="w-2.5 h-2.5 rounded-sm border border-slate-400"
-              style={{ backgroundColor: getFloorColor(hoveredTooltip.floorIndex) }}
-            />
-            <span className="font-bold text-slate-900">{hoveredTooltip.title}</span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                className="w-3 h-3 rounded-sm border border-slate-500 shrink-0"
+                style={{ backgroundColor: getFloorColor(hoveredTooltip.floorIndex) }}
+              />
+              <span className="font-extrabold truncate">{hoveredTooltip.title}</span>
+            </div>
+            {hoveredTooltip.dcrBadge && (
+              <span
+                className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-extrabold shrink-0 ${
+                  hoveredTooltip.dcrBadge.tone === 'unsafe'
+                    ? 'bg-red-600 text-white'
+                    : hoveredTooltip.dcrBadge.tone === 'caution'
+                    ? 'bg-amber-500 text-white'
+                    : 'bg-emerald-600 text-white'
+                }`}
+              >
+                {hoveredTooltip.dcrBadge.text}
+              </span>
+            )}
           </div>
-          <div className="font-mono text-[11px] font-bold text-sky-700">
-            {hoveredTooltip.areaText}
-          </div>
-          <div className="text-[10.5px] text-slate-600">{hoveredTooltip.heightText}</div>
-          <div className="text-[10px] text-slate-500">{hoveredTooltip.roomsText}</div>
+          <div className="font-mono font-bold text-sky-800">{hoveredTooltip.areaText}</div>
+          <div className="text-slate-700 leading-snug">{hoveredTooltip.physicsLine1}</div>
+          {hoveredTooltip.physicsLine2 && (
+            <div className="text-slate-500 text-[11px] leading-snug">
+              {hoveredTooltip.physicsLine2}
+            </div>
+          )}
         </div>
       )}
     </div>

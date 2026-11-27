@@ -4,7 +4,9 @@ import {
   BuildingTemplateOption,
   CadMaterial,
   DesignCategory,
+  ElementMaterialSpec,
   ExteriorWindow3D,
+  GlazingSpec,
   InteriorTheme,
   MepPipe3D,
   NodePoint,
@@ -12,11 +14,18 @@ import {
   RoofStyle,
   SiteShape,
   SolidPrimitive,
+  StructuralSystemId,
   UnitDesignType,
   UnitPlacement3D,
   UnitRoomZone,
 } from '../types/cad';
 import { getKdsLoadRange } from './buildingEstimator';
+import {
+  calculateRealisticBudget,
+  resolveSafeStructuralSystem,
+  runStructuralAnalysis,
+  STRUCTURAL_SYSTEM_DB,
+} from './structuralPhysics';
 
 export type { BuildingTemplateOption };
 
@@ -30,12 +39,14 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
     {
       id: 'L-courtyard',
       name: 'L자 중정 갤러리 하우스',
-      subtitle: '1층 중정 데크와 2층 캔틸레버 매스가 직교 교차하는 모던 주택',
+      subtitle: 'RC 라멘조 기반 1층 중정 데크와 2층 캔틸레버 매스가 교차하는 모던 주택',
       concept: 'L자 중정 갤러리 모던 하우스',
+      structuralSystem: 'rc_frame',
+      glazingSpec: 'double_lowe',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.24,
-      windowWallRatio: 0.58,
+      windowWallRatio: 0.56,
       primaryMaterial: 'stucco',
       accentMaterial: 'wood',
       roofMaterial: 'wood',
@@ -49,18 +60,21 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       gardenMultiplier: 1.15,
       hasCantilever: true,
       hasPorchDeck: true,
-      structureBadge: 'L자 교차 중정 구조',
+      structureBadge: 'RC 라멘조 · L자 교차 중정',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC 라멘조', '1F 스타코', '2F 적삼목'],
     },
     {
       id: 'U-terrace',
       name: 'ㄷ자 아트리움 테라스 하우스',
-      subtitle: '중앙 선큰 정원을 양쪽 윙이 감싸고 상층부가 셋백된 3면 채광 주택',
+      subtitle: '중목 집성재 골조와 선큰 정원이 어우러진 3면 채광 친환경 주택',
       concept: 'ㄷ자 아트리움 중정 테라스 하우스',
+      structuralSystem: 'heavy_timber',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'shed',
       roofPitchDeg: 15,
       overhangScale: 0.22,
-      windowWallRatio: 0.62,
+      windowWallRatio: 0.58,
       primaryMaterial: 'wood',
       accentMaterial: 'stucco',
       roofMaterial: 'steel',
@@ -73,18 +87,21 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       openPlanRatio: 1.1,
       gardenMultiplier: 1.28,
       hasPorchDeck: true,
-      structureBadge: 'ㄷ자 아트리움 윙 구조',
+      structureBadge: '중목 집성재조 · ㄷ자 아트리움',
       roofBadge: '모던 경사지붕',
+      materialTags: ['중목 집성재', '1F 적삼목', '삼중 로이창'],
     },
     {
       id: 'bridge-cantilever',
       name: '필로티 캔틸레버 브릿지 하우스',
-      subtitle: '1층 콘크리트 코어 위로 2층 매스가 과감히 돌출된 하이엔드 주택',
+      subtitle: 'H-Beam 철골 라멘조로 2층 매스를 과감히 돌출시킨 장스팬 모던 주택',
       concept: '필로티 캔틸레버 브릿지 모던 하우스',
+      structuralSystem: 'steel_frame',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'butterfly',
       roofPitchDeg: 18,
       overhangScale: 0.2,
-      windowWallRatio: 0.68,
+      windowWallRatio: 0.72,
       primaryMaterial: 'concrete',
       accentMaterial: 'steel',
       roofMaterial: 'steel',
@@ -97,14 +114,17 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       openPlanRatio: 1.24,
       gardenMultiplier: 1.1,
       hasCantilever: true,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
+      structureBadge: 'H-Beam 철골조 · 필로티 캔틸레버',
       roofBadge: '나비형 역경사지붕',
+      materialTags: ['H-Beam 철골', '커튼월 72%', '노출콘크리트'],
     },
     {
       id: 'split-gable',
       name: '듀얼 스플릿 박공 하우스',
-      subtitle: '높이가 다른 두 경사 지붕 사이에 고측창 채광 틈을 둔 북유럽풍 주택',
+      subtitle: '중목 골조 위에 엇갈린 이중 경사 지붕과 고측창 채광 틈을 둔 북유럽풍 주택',
       concept: '듀얼 스플릿 박공 채광 하우스',
+      structuralSystem: 'heavy_timber',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'split-gable',
       roofPitchDeg: 22,
       overhangScale: 0.2,
@@ -120,41 +140,47 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#c48f5a',
       openPlanRatio: 1.15,
       gardenMultiplier: 1.15,
-      structureBadge: '고측창 이중 박공 구조',
+      structureBadge: '중목 집성재조 · 고측창 이중 박공',
       roofBadge: '비대칭 스플릿 지붕',
+      materialTags: ['중목 집성재', '고측창', '징크 지붕'],
     },
     {
       id: 'atrium-ring',
       name: '중앙 채광 아트리움 순환 하우스',
-      subtitle: '건물 중심의 수직 중정 보이드 주위로 거실·서재·침실이 순환하는 주택',
+      subtitle: 'RC+철골 복합조 중앙에 수직 보이드 중정을 둔 갤러리형 순환 주택',
       concept: '중앙 채광 아트리움 순환형 갤러리 하우스',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'gable',
       roofPitchDeg: 24,
       overhangScale: 0.22,
       windowWallRatio: 0.6,
       primaryMaterial: 'stucco',
-      accentMaterial: 'glass',
+      accentMaterial: 'steel',
       roofMaterial: 'steel',
       wallColor: '#f8fafc',
-      upperWallColor: '#e0f2fe',
+      upperWallColor: '#cbd5e1',
       roofColor: '#475569',
       interiorTheme: 'minimal-gallery',
       interiorWallColor: '#f8fafc',
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.28,
       gardenMultiplier: 1.22,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
+      structureBadge: 'RC+철골 복합조 · 중앙 보이드',
       roofBadge: '박공 지붕',
+      materialTags: ['RC+철골', '스타코', '아트리움'],
     },
     {
       id: 'stepped-wing',
       name: '스텝 테라스 가든 하우스',
-      subtitle: '상층부로 갈수록 계단식 후퇴를 두어 층별 야외 데크를 확보한 주택',
+      subtitle: 'RC 라멘조 단차 구조로 층별 전용 야외 데크를 안정적으로 확보한 주택',
       concept: '계단식 셋백 테라스 가든 하우스',
+      structuralSystem: 'rc_frame',
+      glazingSpec: 'double_lowe',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.26,
-      windowWallRatio: 0.64,
+      windowWallRatio: 0.6,
       primaryMaterial: 'concrete',
       accentMaterial: 'wood',
       roofMaterial: 'wood',
@@ -167,60 +193,69 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       openPlanRatio: 1.14,
       gardenMultiplier: 1.2,
       hasPorchDeck: true,
-      structureBadge: '층별 셋백 테라스 구조',
+      structureBadge: 'RC 라멘조 · 층별 셋백 테라스',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC 라멘조', '노출콘크리트', '우드 데크'],
     },
     {
       id: 'twin-pavilion',
       name: '스카이브릿지 트윈 파빌리온',
-      subtitle: '공용동과 침실동을 좌·우로 분리하고 유리 브릿지로 연결한 주택',
+      subtitle: 'H-Beam 철골조 좌·우 분리 동을 삼중 로이 커튼월 브릿지로 연결한 주택',
       concept: '스카이브릿지 트윈 파빌리온 하우스',
+      structuralSystem: 'steel_frame',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'butterfly',
       roofPitchDeg: 16,
       overhangScale: 0.2,
-      windowWallRatio: 0.72,
+      windowWallRatio: 0.74,
       primaryMaterial: 'steel',
-      accentMaterial: 'glass',
+      accentMaterial: 'concrete',
       roofMaterial: 'steel',
       wallColor: '#cbd5e1',
-      upperWallColor: '#e0f2fe',
+      upperWallColor: '#94a3b8',
       roofColor: '#334155',
       interiorTheme: 'minimal-gallery',
       interiorWallColor: '#f8fafc',
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.22,
       gardenMultiplier: 1.18,
-      structureBadge: '스카이브릿지 트윈동 구조',
+      structureBadge: 'H-Beam 철골조 · 트윈동 브릿지',
       roofBadge: '나비형 역경사지붕',
+      materialTags: ['H-Beam 철골', '커튼월 74%', '징크 패널'],
     },
     {
       id: 'mono-loft',
       name: '모노 경사 하이실링 로프트',
-      subtitle: '한 방향으로 높게 솟은 경사 지붕 아래 복층급 개방 거실을 둔 주택',
+      subtitle: '철골 장스팬 경사 지붕 아래 복층급 개방 거실과 대형 통창을 둔 주택',
       concept: '모노 단경사 하이실링 로프트 하우스',
+      structuralSystem: 'steel_frame',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'shed',
       roofPitchDeg: 21,
       overhangScale: 0.24,
       windowWallRatio: 0.76,
       primaryMaterial: 'concrete',
-      accentMaterial: 'glass',
+      accentMaterial: 'steel',
       roofMaterial: 'steel',
       wallColor: '#d1d5db',
-      upperWallColor: '#e2e8f0',
+      upperWallColor: '#94a3b8',
       roofColor: '#1f2937',
       interiorTheme: 'industrial-loft',
       interiorWallColor: '#f1f5f9',
       interiorFloorColor: '#94a3b8',
       openPlanRatio: 1.34,
       gardenMultiplier: 1.05,
-      structureBadge: '단경사 하이실링 로프트 구조',
+      structureBadge: 'H-Beam 철골조 · 하이실링 로프트',
       roofBadge: '모던 경사지붕',
+      materialTags: ['H-Beam 철골', '커튼월 76%', '노출콘크리트'],
     },
     {
       id: 'courtyard-hanok',
       name: '모던 한옥 처마 중정 하우스',
-      subtitle: '깊게 내민 처마 지붕과 남측 목재 툇마루 데크로 한국적 비례미를 구현한 주택',
+      subtitle: '중목 집성재 기둥·보와 깊은 처마, 남측 툇마루 데크를 결합한 현대 한옥',
       concept: '모던 한옥 깊은 처마 중정 하우스',
+      structuralSystem: 'heavy_timber',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'hip-eaves',
       roofPitchDeg: 22,
       overhangScale: 0.36,
@@ -237,14 +272,17 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       openPlanRatio: 1.08,
       gardenMultiplier: 1.32,
       hasPorchDeck: true,
-      structureBadge: '깊은 처마·툇마루 중정 구조',
+      structureBadge: '중목 집성재조 · 깊은 처마·툇마루',
       roofBadge: '깊은 처마 모임지붕',
+      materialTags: ['중목 집성재', '스타코', '깊은 처마'],
     },
     {
       id: 'stacked-cube',
       name: '직교 적층 스컬프처 큐브 하우스',
-      subtitle: '서로 다른 비율의 상·하층 볼륨을 비대칭 적층해 조각적 입면을 만든 주택',
+      subtitle: 'RC+철골 복합 골조로 비대칭 볼륨을 안정적으로 적층한 조각적 주택',
       concept: '비대칭 직교 적층 스컬프처 큐브 하우스',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.16,
@@ -261,20 +299,23 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       openPlanRatio: 1.22,
       gardenMultiplier: 1.08,
       hasCantilever: true,
-      structureBadge: '비대칭 회전 적층 매스 구조',
+      structureBadge: 'RC+철골 복합조 · 비대칭 적층',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC+철골', '스타코', '징크 스틸'],
     },
   ],
   공동주택: [
     {
       id: 'U-terrace',
       name: 'ㄷ자 중정 스텝 레지던스',
-      subtitle: '중앙 커뮤니티 정원과 테라스형 세대가 결합된 중저층 아트 주거',
+      subtitle: 'RC 라멘조 중앙 커뮤니티 정원과 테라스형 세대가 결합된 중저층 주거',
       concept: 'ㄷ자 중정 커뮤니티 테라스 레지던스',
+      structuralSystem: 'rc_frame',
+      glazingSpec: 'double_lowe',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.2,
-      windowWallRatio: 0.58,
+      windowWallRatio: 0.56,
       primaryMaterial: 'stucco',
       accentMaterial: 'wood',
       roofMaterial: 'concrete',
@@ -285,20 +326,23 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#c89b6e',
       openPlanRatio: 1.0,
       gardenMultiplier: 1.2,
-      structureBadge: 'ㄷ자 아트리움 윙 구조',
+      structureBadge: 'RC 라멘조 · ㄷ자 아트리움',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC 라멘조', '스타코', '이중 로이창'],
     },
     {
       id: 'twin-pavilion',
       name: '스카이 브릿지 트윈 타워',
-      subtitle: '두 개의 주거 동을 공중 스카이 라운지로 연결한 랜드마크 주거',
+      subtitle: 'RC+철골 복합조 두 주거 동을 공중 스카이 라운지로 연결한 공동주택',
       concept: '스카이 브릿지 트윈 아트리움 공동주택',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'butterfly',
       roofPitchDeg: 14,
       overhangScale: 0.18,
-      windowWallRatio: 0.66,
+      windowWallRatio: 0.68,
       primaryMaterial: 'concrete',
-      accentMaterial: 'glass',
+      accentMaterial: 'steel',
       roofMaterial: 'steel',
       wallColor: '#cbd5e1',
       roofColor: '#334155',
@@ -307,20 +351,23 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.15,
       gardenMultiplier: 1.1,
-      structureBadge: '스카이브릿지 트윈동 구조',
+      structureBadge: 'RC+철골 복합조 · 트윈동',
       roofBadge: '나비형 역경사지붕',
+      materialTags: ['RC+철골', '커튼월 68%', '콘크리트'],
     },
     {
       id: 'stepped-wing',
       name: '계단식 테라스 가든 아파트',
-      subtitle: '전 세대 남향 테라스와 옥상 공원을 갖춘 계단형 공동주택',
+      subtitle: 'RC 라멘조 전 세대 남향 테라스와 옥상 공원을 갖춘 계단형 공동주택',
       concept: '계단식 테라스 가든 공동주택',
+      structuralSystem: 'rc_frame',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'shed',
       roofPitchDeg: 12,
       overhangScale: 0.2,
-      windowWallRatio: 0.6,
-      primaryMaterial: 'wood',
-      accentMaterial: 'stucco',
+      windowWallRatio: 0.58,
+      primaryMaterial: 'concrete',
+      accentMaterial: 'wood',
       roofMaterial: 'steel',
       wallColor: '#d4a373',
       roofColor: '#475569',
@@ -329,18 +376,21 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#d6b48c',
       openPlanRatio: 1.08,
       gardenMultiplier: 1.25,
-      structureBadge: '계단식 셋백 테라스 구조',
+      structureBadge: 'RC 라멘조 · 계단식 셋백',
       roofBadge: '모던 경사지붕',
+      materialTags: ['RC 라멘조', '삼중 로이창', '우드 포인트'],
     },
     {
       id: 'bridge-cantilever',
       name: '포디움 캔틸레버 테라스 빌라',
-      subtitle: '저층부 커뮤니티 로비 위로 주거 매스가 돌출된 입체 공동주택',
+      subtitle: 'RC+철골 저층부 커뮤니티 로비 위로 주거 매스가 돌출된 공동주택',
       concept: '포디움 캔틸레버 테라스 빌라',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'double_lowe',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.22,
-      windowWallRatio: 0.62,
+      windowWallRatio: 0.6,
       primaryMaterial: 'concrete',
       accentMaterial: 'wood',
       roofMaterial: 'concrete',
@@ -351,14 +401,17 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#c48f5a',
       openPlanRatio: 1.1,
       gardenMultiplier: 1.05,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
+      structureBadge: 'RC+철골 · 필로티 캔틸레버',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC+철골', '노출콘크리트', '우드'],
     },
     {
       id: 'atrium-ring',
       name: '중정 아트리움 코리빙 하우스',
-      subtitle: '중앙 채광 아트리움을 둘러싼 공유 라운지형 공동주택',
+      subtitle: 'RC 라멘조 중앙 채광 아트리움을 둘러싼 공유 라운지형 공동주택',
       concept: '중정 아트리움 코리빙 레지던스',
+      structuralSystem: 'rc_frame',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'split-gable',
       roofPitchDeg: 18,
       overhangScale: 0.18,
@@ -373,22 +426,25 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#94a3b8',
       openPlanRatio: 1.2,
       gardenMultiplier: 1.15,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
+      structureBadge: 'RC 라멘조 · 중앙 보이드',
       roofBadge: '비대칭 스플릿 지붕',
+      materialTags: ['RC 라멘조', '스타코', '징크 스틸'],
     },
   ],
   '업무·상업시설': [
     {
       id: 'twin-pavilion',
       name: '아트리움 트윈 오피스 파빌리온',
-      subtitle: '저층부 오픈 플라자와 상층부 브릿지 오피스가 결합된 상업 빌딩',
+      subtitle: 'H-Beam 철골조 오픈 플라자와 브릿지 오피스가 결합된 상업 빌딩',
       concept: '아트리움 트윈 오피스·리테일 파빌리온',
+      structuralSystem: 'steel_frame',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'shed',
       roofPitchDeg: 12,
       overhangScale: 0.2,
       windowWallRatio: 0.76,
       primaryMaterial: 'steel',
-      accentMaterial: 'glass',
+      accentMaterial: 'concrete',
       roofMaterial: 'steel',
       wallColor: '#cbd5e1',
       roofColor: '#1e293b',
@@ -397,14 +453,17 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#94a3b8',
       openPlanRatio: 1.25,
       gardenMultiplier: 1.0,
-      structureBadge: '스카이브릿지 트윈동 구조',
+      structureBadge: 'H-Beam 철골조 · 트윈동',
       roofBadge: '모던 경사지붕',
+      materialTags: ['H-Beam 철골', '커튼월 76%', '징크'],
     },
     {
       id: 'stepped-wing',
       name: '스텝 테라스 크리에이티브 사옥',
-      subtitle: '층별 야외 라운지와 전면 커튼월을 갖춘 현대적 업무시설',
+      subtitle: 'RC+철골 복합조 층별 야외 라운지와 커튼월을 갖춘 현대적 업무시설',
       concept: '스텝 테라스 크리에이티브 사옥',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.22,
@@ -419,18 +478,21 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#c89b6e',
       openPlanRatio: 1.2,
       gardenMultiplier: 1.15,
-      structureBadge: '계단식 셋백 테라스 구조',
+      structureBadge: 'RC+철골 복합조 · 셋백 사옥',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC+철골', '커튼월 72%', '콘크리트'],
     },
     {
       id: 'L-courtyard',
       name: 'L자 스트리트 갤러리 상가',
-      subtitle: '보행자 중정 광장을 품은 복합 근린생활·오피스 건축물',
+      subtitle: 'RC 라멘조 보행자 중정 광장을 품은 복합 근린생활·오피스 건축물',
       concept: 'L자 스트리트 중정 상업시설',
+      structuralSystem: 'rc_frame',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'split-gable',
       roofPitchDeg: 16,
       overhangScale: 0.18,
-      windowWallRatio: 0.68,
+      windowWallRatio: 0.64,
       primaryMaterial: 'stucco',
       accentMaterial: 'steel',
       roofMaterial: 'steel',
@@ -441,14 +503,17 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.22,
       gardenMultiplier: 1.1,
-      structureBadge: 'L자 교차 중정 구조',
+      structureBadge: 'RC 라멘조 · L자 중정',
       roofBadge: '비대칭 스플릿 지붕',
+      materialTags: ['RC 라멘조', '스타코', '징크 스틸'],
     },
     {
       id: 'bridge-cantilever',
       name: '캔틸레버 랜드마크 스튜디오 사옥',
-      subtitle: '1층 리테일 코어 위로 상부 오피스 매스가 돌출된 상징적 사옥',
+      subtitle: 'H-Beam 철골조 1층 리테일 위로 오피스 매스가 돌출된 상징적 사옥',
       concept: '캔틸레버 랜드마크 스튜디오 사옥',
+      structuralSystem: 'steel_frame',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'butterfly',
       roofPitchDeg: 14,
       overhangScale: 0.22,
@@ -463,44 +528,50 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#8d99ae',
       openPlanRatio: 1.28,
       gardenMultiplier: 1.0,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
+      structureBadge: 'H-Beam 철골조 · 캔틸레버',
       roofBadge: '나비형 역경사지붕',
+      materialTags: ['H-Beam 철골', '커튼월 74%', '우드'],
     },
     {
       id: 'atrium-ring',
       name: '보이드 아트리움 테크 허브',
-      subtitle: '중앙 천창 아트리움을 중심으로 협업 라운지가 배치된 업무시설',
+      subtitle: 'RC+철골 복합조 중앙 천창 아트리움 중심의 협업 라운지 업무시설',
       concept: '보이드 아트리움 테크 허브',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'gable',
       roofPitchDeg: 18,
       overhangScale: 0.2,
-      windowWallRatio: 0.75,
-      primaryMaterial: 'glass',
-      accentMaterial: 'concrete',
+      windowWallRatio: 0.74,
+      primaryMaterial: 'concrete',
+      accentMaterial: 'steel',
       roofMaterial: 'steel',
-      wallColor: '#e0f2fe',
+      wallColor: '#e2e8f0',
       roofColor: '#475569',
       interiorTheme: 'minimal-gallery',
       interiorWallColor: '#f8fafc',
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.3,
       gardenMultiplier: 1.1,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
+      structureBadge: 'RC+철골 복합조 · 아트리움',
       roofBadge: '박공 지붕',
+      materialTags: ['RC+철골', '커튼월 74%', '콘크리트'],
     },
   ],
   복합문화시설: [
     {
       id: 'stepped-wing',
       name: '캔틸레버 아트 뮤지엄',
-      subtitle: '역동적인 캔틸레버 전시관과 옥상 조각 공원을 품은 미술관',
+      subtitle: 'RC+철골 복합조 캔틸레버 전시관과 옥상 조각 공원을 품은 미술관',
       concept: '캔틸레버 아트 뮤지엄 & 조각 공원',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'butterfly',
       roofPitchDeg: 16,
       overhangScale: 0.24,
-      windowWallRatio: 0.66,
+      windowWallRatio: 0.68,
       primaryMaterial: 'concrete',
-      accentMaterial: 'glass',
+      accentMaterial: 'steel',
       roofMaterial: 'steel',
       wallColor: '#e2e8f0',
       roofColor: '#334155',
@@ -509,18 +580,21 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.3,
       gardenMultiplier: 1.2,
-      structureBadge: '계단식 셋백 테라스 구조',
+      structureBadge: 'RC+철골 복합조 · 셋백 전시관',
       roofBadge: '나비형 역경사지붕',
+      materialTags: ['RC+철골', '노출콘크리트', '커튼월'],
     },
     {
       id: 'U-terrace',
       name: 'ㄷ자 야외 원형극장 문화센터',
-      subtitle: '중앙 야외 공연 마당을 둘러싼 전시·도서관 복합 문화공간',
+      subtitle: '중목·RC 복합조 야외 공연 마당을 둘러싼 전시·도서관 문화공간',
       concept: 'ㄷ자 야외 공연 마당 복합문화센터',
+      structuralSystem: 'heavy_timber',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'shed',
       roofPitchDeg: 14,
       overhangScale: 0.22,
-      windowWallRatio: 0.62,
+      windowWallRatio: 0.6,
       primaryMaterial: 'wood',
       accentMaterial: 'stucco',
       roofMaterial: 'wood',
@@ -531,20 +605,23 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#c89b6e',
       openPlanRatio: 1.22,
       gardenMultiplier: 1.3,
-      structureBadge: 'ㄷ자 아트리움 윙 구조',
+      structureBadge: '중목 집성재조 · ㄷ자 극장',
       roofBadge: '모던 경사지붕',
+      materialTags: ['중목 집성재', '우드 루버', '삼중 로이창'],
     },
     {
       id: 'twin-pavilion',
       name: '브릿지 갤러리 파빌리온',
-      subtitle: '수공간과 공중 전시 브릿지가 어우러진 현대 건축 파빌리온',
+      subtitle: 'H-Beam 철골조 수공간과 공중 전시 브릿지가 어우러진 문화 파빌리온',
       concept: '브릿지 갤러리 문화 파빌리온',
+      structuralSystem: 'steel_frame',
+      glazingSpec: 'curtain_wall',
       roofStyle: 'split-gable',
       roofPitchDeg: 18,
       overhangScale: 0.22,
       windowWallRatio: 0.72,
       primaryMaterial: 'steel',
-      accentMaterial: 'glass',
+      accentMaterial: 'concrete',
       roofMaterial: 'steel',
       wallColor: '#cbd5e1',
       roofColor: '#1e293b',
@@ -553,18 +630,21 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.28,
       gardenMultiplier: 1.15,
-      structureBadge: '스카이브릿지 트윈동 구조',
+      structureBadge: 'H-Beam 철골조 · 트윈 브릿지',
       roofBadge: '비대칭 스플릿 지붕',
+      materialTags: ['H-Beam 철골', '커튼월 72%', '징크'],
     },
     {
       id: 'bridge-cantilever',
       name: '플로팅 매스 현대미술관',
-      subtitle: '야외 조각 플라자 상공에 거대한 전시 매스가 떠 있는 미술관',
+      subtitle: 'RC+철골 복합조 조각 플라자 상공에 대형 전시 매스가 떠 있는 미술관',
       concept: '플로팅 매스 현대미술관',
+      structuralSystem: 'hybrid_rc_steel',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'flat-overhang',
       roofPitchDeg: 0,
       overhangScale: 0.28,
-      windowWallRatio: 0.64,
+      windowWallRatio: 0.62,
       primaryMaterial: 'stucco',
       accentMaterial: 'concrete',
       roofMaterial: 'concrete',
@@ -575,20 +655,23 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#cbd5e1',
       openPlanRatio: 1.3,
       gardenMultiplier: 1.2,
-      structureBadge: '필로티 캔틸레버 브릿지 구조',
+      structureBadge: 'RC+철골 · 플로팅 캔틸레버',
       roofBadge: '캔틸레버 처마 평지붕',
+      materialTags: ['RC+철골', '스타코', '노출콘크리트'],
     },
     {
       id: 'atrium-ring',
       name: '로툰다 채광 도서관·문화원',
-      subtitle: '중앙 천창 아트리움을 따라 서가와 갤러리가 이어지는 문화시설',
+      subtitle: '중목 집성재 중앙 천창 아트리움을 따라 서가와 갤러리가 이어지는 문화원',
       concept: '로툰다 채광 도서관·문화원',
+      structuralSystem: 'heavy_timber',
+      glazingSpec: 'triple_lowe',
       roofStyle: 'gable',
       roofPitchDeg: 20,
       overhangScale: 0.22,
-      windowWallRatio: 0.65,
+      windowWallRatio: 0.62,
       primaryMaterial: 'wood',
-      accentMaterial: 'glass',
+      accentMaterial: 'stucco',
       roofMaterial: 'steel',
       wallColor: '#c89b6e',
       roofColor: '#475569',
@@ -597,8 +680,9 @@ export const BUILDING_TEMPLATES_BY_CATEGORY: Record<
       interiorFloorColor: '#d6b48c',
       openPlanRatio: 1.25,
       gardenMultiplier: 1.15,
-      structureBadge: '중앙 채광 아트리움 순환 구조',
+      structureBadge: '중목 집성재조 · 채광 아트리움',
       roofBadge: '박공 지붕',
+      materialTags: ['중목 집성재', '삼중 로이창', '징크 지붕'],
     },
   ],
 };
@@ -629,7 +713,7 @@ export function createDefaultSitePolygon(
   if (siteShape === 'circle') {
     const r = Math.sqrt(areaUnits / Math.PI);
     const pts: [number, number][] = [];
-    const segs = 10; // 드래그 조작이 용이한 10각형 원형 폴리곤
+    const segs = 10;
     for (let i = 0; i < segs; i++) {
       const a = (i / segs) * Math.PI * 2;
       pts.push([Number((Math.cos(a) * r).toFixed(3)), Number((Math.sin(a) * r).toFixed(3))]);
@@ -711,7 +795,6 @@ export function computePolygonCentroid(poly: [number, number][]): [number, numbe
   return [cx / (3 * signedArea), cz / (3 * signedArea)];
 }
 
-/** 동일 면적 유지 옵션이 켜졌을 때 드래그한 폴리곤을 중심 기준으로 비율 보정 */
 export function rescalePolygonToArea(
   poly: [number, number][],
   targetAreaSqm: number
@@ -776,7 +859,6 @@ function isRectStrictlyInsidePolygon(
   for (const [qx, qz] of corners) {
     if (!isPointInPolygon(qx, qz, poly)) return false;
   }
-  // 오목 다각형에서도 변이 파고들지 않도록 사각형 4변과 대지 폴리곤 변 교차 검사
   for (let r = 0; r < 4; r++) {
     const [ax, az] = corners[r];
     const [bx, bz] = corners[(r + 1) % 4];
@@ -789,7 +871,6 @@ function isRectStrictlyInsidePolygon(
   return true;
 }
 
-/** 자유형 대지 폴리곤 내부에서 건물이 깨지지 않고 안정적으로 들어가는 최적 위치·크기 계산 */
 export function computeSafeBuildingFootprintInPolygon(
   poly: [number, number][],
   targetFootprintUnits: number,
@@ -825,7 +906,11 @@ export function computeSafeBuildingFootprintInPolygon(
     candidates.push([centX, centZ]);
   }
 
-  const aspectCandidates = [preferredAspect, 1.0, Number((1 / Math.max(0.5, preferredAspect)).toFixed(2))];
+  const aspectCandidates = [
+    preferredAspect,
+    1.0,
+    Number((1 / Math.max(0.5, preferredAspect)).toFixed(2)),
+  ];
   const maxSpan = Math.max(maxX - minX, maxZ - minZ, 1.2);
 
   let best = {
@@ -846,7 +931,6 @@ export function computeSafeBuildingFootprintInPolygon(
       let hi = capScale;
       let bestScale = 0;
 
-      // 8회 이진 탐색으로 폴리곤 내부 최대 허용 비율 고속 탐색
       for (let iter = 0; iter < 8; iter++) {
         const mid = (lo + hi) * 0.5;
         const w = targetW * mid;
@@ -935,12 +1019,36 @@ export function getDefaultSpecForCategory(
 
   const baseSiteArea =
     category === '단독주택'
-      ? 450
+      ? 420
       : category === '공동주택'
       ? 1400
       : category === '업무·상업시설'
       ? 1200
       : 1600;
+
+  const floors =
+    category === '단독주택' ? 2 : category === '복합문화시설' ? 3 : 4;
+  const structuralSystem: StructuralSystemId =
+    tplObj.structuralSystem ??
+    resolveSafeStructuralSystem({
+      usageType: category,
+      floors,
+      windowWallRatio: tplObj.windowWallRatio ?? 0.56,
+      primaryMaterial: tplObj.primaryMaterial,
+    });
+
+  const elementMaterials: ElementMaterialSpec = {
+    structuralSystem,
+    foundationMaterial: floors >= 3 ? 'rc_mat' : 'rc_footing',
+    exteriorCladding:
+      tplObj.primaryMaterial === 'glass' ? 'concrete' : tplObj.primaryMaterial,
+    upperCladding:
+      tplObj.accentMaterial === 'glass' ? 'steel' : tplObj.accentMaterial,
+    roofMaterial: tplObj.roofMaterial ?? 'steel',
+    glazingSpec: (tplObj.glazingSpec ?? 'double_lowe') as GlazingSpec,
+    insulationSpec:
+      structuralSystem === 'steel_frame' ? 'mineral_wool_150' : 'eps_150',
+  };
 
   const baseCommon = {
     projectName: `AirForge ${tplObj.name}`,
@@ -948,12 +1056,14 @@ export function getDefaultSpecForCategory(
     templateId: tplObj.id,
     selectedTemplateName: tplObj.name,
     dynamicTemplates: tplList,
+    structuralSystem,
+    elementMaterials,
     roofStyle: tplObj.roofStyle,
     roofPitchDeg: tplObj.roofPitchDeg ?? 18,
     overhangScale: tplObj.overhangScale ?? 0.22,
     windowWallRatio: tplObj.windowWallRatio ?? 0.56,
-    accentMaterial: tplObj.accentMaterial,
-    roofMaterial: tplObj.roofMaterial ?? 'steel',
+    accentMaterial: elementMaterials.upperCladding,
+    roofMaterial: elementMaterials.roofMaterial,
     interiorTheme: tplObj.interiorTheme,
     interiorWallColor: tplObj.interiorWallColor,
     interiorFloorColor: tplObj.interiorFloorColor,
@@ -969,11 +1079,11 @@ export function getDefaultSpecForCategory(
       ...baseCommon,
       useHouseholds: true,
       siteAreaSqm: baseSiteArea,
-      buildingAreaSqm: 190,
-      totalFloorAreaSqm: 380,
-      undergroundFloors: 1,
-      undergroundAreaSqm: 150,
-      heightMeters: 7.4,
+      buildingAreaSqm: 110,
+      totalFloorAreaSqm: 200,
+      undergroundFloors: 0,
+      undergroundAreaSqm: 0,
+      heightMeters: 7.2,
       floors: 2,
       households: 1,
       unitTypeCount: 2,
@@ -1168,7 +1278,12 @@ export function generateDynamicRoomLayout(params: {
     };
   }
 
-  if (areaSqm < 48 || effectiveLayout === 'bridge-cantilever' || effectiveLayout === 'stacked-cube' || openPlanRatio > 1.2) {
+  if (
+    areaSqm < 48 ||
+    effectiveLayout === 'bridge-cantilever' ||
+    effectiveLayout === 'stacked-cube' ||
+    openPlanRatio > 1.2
+  ) {
     return {
       planLayout: effectiveLayout,
       efficiencyPct: 91,
@@ -1225,6 +1340,63 @@ export function getRoomsForTemplate(
 
 const UNIT_TYPE_PALETTE = ['#0284c7', '#d97706', '#7c3aed', '#0d9488', '#db2777'];
 
+/** 구조 시스템별 3D 골조 시각 물성 (RC 콘크리트 / H-Beam 스틸 / 중목 집성재) */
+function getStructuralFrameStyle(
+  sys: StructuralSystemId,
+  floor: number
+): {
+  colMat: CadMaterial;
+  colColor: string;
+  colSize: number;
+  beamH: number;
+  beamW: number;
+} {
+  if (sys === 'steel_frame') {
+    return {
+      colMat: 'steel',
+      colColor: '#334155',
+      colSize: 0.085,
+      beamH: 0.1,
+      beamW: 0.075,
+    };
+  }
+  if (sys === 'heavy_timber') {
+    return {
+      colMat: 'wood',
+      colColor: '#8d5b34',
+      colSize: 0.095,
+      beamH: 0.11,
+      beamW: 0.085,
+    };
+  }
+  if (sys === 'hybrid_rc_steel') {
+    if (floor === 1) {
+      return {
+        colMat: 'concrete',
+        colColor: '#94a3b8',
+        colSize: 0.115,
+        beamH: 0.12,
+        beamW: 0.1,
+      };
+    }
+    return {
+      colMat: 'steel',
+      colColor: '#334155',
+      colSize: 0.085,
+      beamH: 0.1,
+      beamW: 0.075,
+    };
+  }
+  // rc_frame
+  return {
+    colMat: 'concrete',
+    colColor: '#94a3b8',
+    colSize: 0.115,
+    beamH: 0.12,
+    beamW: 0.1,
+  };
+}
+
 export function generateWatertightArchitecture(
   rawSpec: BuildingSpec,
   baseMaterial: CadMaterial = 'stucco'
@@ -1238,10 +1410,7 @@ export function generateWatertightArchitecture(
   const roofStyle: RoofStyle = rawSpec.roofStyle ?? 'flat-overhang';
   const roofPitchDeg = rawSpec.roofPitchDeg ?? (roofStyle === 'flat-overhang' ? 0 : 22);
   const overhangScale = rawSpec.overhangScale ?? (roofStyle === 'hip-eaves' ? 0.36 : 0.22);
-  const windowWallRatio = Math.max(0.24, Math.min(0.84, rawSpec.windowWallRatio ?? 0.56));
-  const accentMaterial: CadMaterial = rawSpec.accentMaterial ?? 'wood';
-  const roofMaterial: CadMaterial =
-    rawSpec.roofMaterial ?? (accentMaterial === 'wood' ? 'wood' : 'steel');
+  const windowWallRatio = Math.max(0.24, Math.min(0.82, rawSpec.windowWallRatio ?? 0.56));
   const interiorTheme: InteriorTheme = rawSpec.interiorTheme ?? 'warm-wood';
   const interiorWallColor = rawSpec.interiorWallColor ?? '#faf7f2';
   const interiorFloorColor = rawSpec.interiorFloorColor ?? '#c89b6e';
@@ -1249,9 +1418,62 @@ export function generateWatertightArchitecture(
   const floors = Math.max(1, Math.min(15, Math.round(rawSpec.floors || 1)));
   const undergroundFloors = Math.max(0, Math.min(5, Math.round(rawSpec.undergroundFloors || 0)));
 
-  // 1. 자유형 대지 폴리곤 확정 및 실제 대지면적 계산
+  // 0. 안전한 주구조 시스템 및 부위별 자재 명세 확정 (유리 단독·무골조 원천 차단)
+  const resolvedSystem: StructuralSystemId = resolveSafeStructuralSystem({
+    usageType: rawSpec.usageType,
+    floors,
+    windowWallRatio,
+    primaryMaterial: rawSpec.elementMaterials?.exteriorCladding ?? baseMaterial,
+    requestedSystem: rawSpec.elementMaterials?.structuralSystem ?? rawSpec.structuralSystem,
+  });
+
+  const rawExteriorMat = rawSpec.elementMaterials?.exteriorCladding ?? baseMaterial;
+  const safeFloor1Cladding: CadMaterial =
+    rawExteriorMat === 'glass' || rawExteriorMat === 'hologram'
+      ? resolvedSystem === 'steel_frame'
+        ? 'steel'
+        : 'concrete'
+      : rawExteriorMat;
+
+  const rawUpperMat =
+    rawSpec.elementMaterials?.upperCladding ?? rawSpec.accentMaterial ?? 'wood';
+  const safeUpperCladding: CadMaterial =
+    rawUpperMat === 'glass' || rawUpperMat === 'hologram' ? 'steel' : rawUpperMat;
+
+  const rawRoofMat =
+    rawSpec.elementMaterials?.roofMaterial ??
+    rawSpec.roofMaterial ??
+    (safeUpperCladding === 'wood' ? 'wood' : 'steel');
+  const safeRoofMaterial: CadMaterial =
+    rawRoofMat === 'glass' || rawRoofMat === 'hologram' ? 'steel' : rawRoofMat;
+
+  const glazingSpec: GlazingSpec =
+    rawSpec.elementMaterials?.glazingSpec ??
+    (windowWallRatio >= 0.65
+      ? 'curtain_wall'
+      : floors >= 3
+      ? 'triple_lowe'
+      : 'double_lowe');
+
+  const elementMaterials: ElementMaterialSpec = {
+    structuralSystem: resolvedSystem,
+    foundationMaterial:
+      rawSpec.elementMaterials?.foundationMaterial ??
+      (floors >= 3 || resolvedSystem === 'hybrid_rc_steel' ? 'rc_mat' : 'rc_footing'),
+    exteriorCladding: safeFloor1Cladding,
+    upperCladding: safeUpperCladding,
+    roofMaterial: safeRoofMaterial,
+    glazingSpec,
+    insulationSpec:
+      rawSpec.elementMaterials?.insulationSpec ??
+      (resolvedSystem === 'steel_frame' || resolvedSystem === 'hybrid_rc_steel'
+        ? 'mineral_wool_150'
+        : 'eps_150'),
+  };
+
+  // 1. 자유형 대지 폴리곤 확정 및 안전 건축 영역 계산
   const siteInfo = getSiteBoundaryPoints(
-    rawSpec.siteAreaSqm || 450,
+    rawSpec.siteAreaSqm || 420,
     siteShape,
     rawSpec.sitePolygon
   );
@@ -1281,7 +1503,6 @@ export function generateWatertightArchitecture(
   );
   const targetFootprintUnits = requestedFootprintSqm / (SCALE_DIV * SCALE_DIV);
 
-  // 자유형 대지 경계 내부에 절대 깨지지 않고 안전하게 수납되는 건물 베이스 좌표/치수 산출
   const safeBox = computeSafeBuildingFootprintInPolygon(
     polygon2D,
     targetFootprintUnits,
@@ -1292,6 +1513,23 @@ export function generateWatertightArchitecture(
   const bldgOffsetX = safeBox.cx;
   const bldgOffsetZ = safeBox.cz;
   const actualFootprintSqm = Math.round(bldgW * bldgD * SCALE_DIV * SCALE_DIV);
+
+  // 2. KDS 물리 구조역학 해석 + QTO 현실 예산 선행 계산
+  const prelimSpecForPhysics: BuildingSpec = {
+    ...rawSpec,
+    siteAreaSqm: effectiveSiteSqm,
+    buildingAreaSqm: actualFootprintSqm,
+    floors,
+    windowWallRatio,
+    structuralSystem: resolvedSystem,
+    elementMaterials,
+  };
+  const structuralReport = runStructuralAnalysis(prelimSpecForPhysics, elementMaterials);
+  const budgetReport = calculateRealisticBudget(
+    prelimSpecForPhysics,
+    elementMaterials,
+    structuralReport
+  );
 
   const totalHeightUnits = Number(
     Math.max(0.95, Math.min(12.0, (rawSpec.heightMeters || 7.2) / SCALE_DIV)).toFixed(3)
@@ -1313,7 +1551,29 @@ export function generateWatertightArchitecture(
     Math.round(rawSpec.totalFloorAreaSqm / Math.max(1, useHouseholds ? activeHouseholds : floors))
   );
 
-  // 2. 지하층 볼륨 (안전 영역 내부 밀착)
+  // 3. 실제 철근콘크리트 기초 구조 생성 (매트기초 또는 기둥별 독립기초)
+  const footingStressLabel = `기초 지반압 ${structuralReport.soilBearingPressureKpa}kPa / 허용 ${structuralReport.allowableSoilKpa}kPa (DCR ${(
+    structuralReport.foundationDcr * 100
+  ).toFixed(0)}%)`;
+
+  if (elementMaterials.foundationMaterial === 'rc_mat') {
+    solids.push({
+      id: 'struct_foundation_mat',
+      groupName: `RC 매트기초(온통기초) · ${structuralReport.soilBearingPressureKpa}kPa`,
+      partRole: 'structural_footing',
+      shape: 'box',
+      position: [bldgOffsetX, -0.09, bldgOffsetZ],
+      scale: [Number((bldgW + 0.18).toFixed(3)), 0.18, Number((bldgD + 0.18).toFixed(3))],
+      color: '#64748b',
+      material: 'concrete',
+      isFixed: true,
+      floorIndex: -1,
+      dcr: structuralReport.foundationDcr,
+      stressLabel: footingStressLabel,
+    });
+  }
+
+  // 지하층 볼륨 (있을 경우 기초 아래 밀착)
   if (undergroundFloors > 0 && rawSpec.undergroundAreaSqm > 0) {
     const ugRatio = Math.min(
       1.0,
@@ -1322,19 +1582,21 @@ export function generateWatertightArchitecture(
     const ugH = Number((0.42 * undergroundFloors).toFixed(3));
     solids.push({
       id: 'arch_basement_main',
-      groupName: `지하층 (B1~B${undergroundFloors}, ${rawSpec.undergroundAreaSqm}㎡)`,
+      groupName: `지하층 RC 골조 (B1~B${undergroundFloors}, ${rawSpec.undergroundAreaSqm}㎡)`,
       partRole: 'basement',
       shape: 'box',
-      position: [bldgOffsetX, -ugH * 0.5, bldgOffsetZ],
+      position: [bldgOffsetX, -ugH * 0.5 - 0.12, bldgOffsetZ],
       scale: [Number((bldgW * ugRatio).toFixed(3)), ugH, Number((bldgD * ugRatio).toFixed(3))],
       color: '#94a3b8',
       material: 'concrete',
       isFixed: true,
       floorIndex: -1,
+      dcr: structuralReport.foundationDcr,
+      stressLabel: footingStressLabel,
     });
   }
 
-  // 3. 자유형 대지 경계 내부 잔여 공간 자동 탐색 정원 배치 (경계 밖 돌출 차단)
+  // 4. 자유형 대지 경계 내부 잔여 공간 자동 정원 배치
   const gardenReqSqm = Math.max(0, rawSpec.gardenAreaSqm || 0);
   const gardenUnitsReq = gardenReqSqm / (SCALE_DIV * SCALE_DIV);
   if (gardenUnitsReq > 0.05) {
@@ -1383,7 +1645,6 @@ export function generateWatertightArchitecture(
     let placedUnits = 0;
     for (const patch of candidatePatches) {
       if (placedUnits >= gardenUnitsReq) break;
-      // 폴리곤 내부에 안전하게 들어가는 최대 스케일 탐색
       for (const s of [1.15, 0.9, 0.68, 0.48]) {
         const pw = Number((patch.w * s).toFixed(3));
         const pd = Number((patch.d * s).toFixed(3));
@@ -1411,17 +1672,21 @@ export function generateWatertightArchitecture(
     }
   }
 
-  // 4. 10종 아키타입별 층별 매스·외피·창호 비율(windowWallRatio)·실내 벽체·가구 생성
-  const slabThick = 0.07;
-  const extWallThick = 0.09;
+  // 5. 층별 실제 구조 골조(기둥 그리드 + X/Z축 거더 보 + 슬래브) + 외벽·창호·실내 조립
+  const slabThick = 0.075;
+  const extWallThick = 0.085;
   const intWallThick = 0.045;
   let topFloorW = bldgW;
   let topFloorD = bldgD;
   let topFloorCx = bldgOffsetX;
   let topFloorCz = bldgOffsetZ;
-  let topFloorMat: CadMaterial = baseMaterial;
+  let topFloorMat: CadMaterial = safeFloor1Cladding;
   let topFloorColor = rawSpec.customWallColor ?? getFloorColor(1);
   let firstFloorIndoorRooms: UnitRoomZone[] = [];
+
+  const gridCountX = Math.max(2, Math.min(4, structuralReport.columnGridCountX));
+  const gridCountZ = Math.max(2, Math.min(4, structuralReport.columnGridCountZ));
+  const sysMeta = STRUCTURAL_SYSTEM_DB[resolvedSystem];
 
   for (let f = 1; f <= floors; f++) {
     const floorBaseY = (f - 1) * floorH;
@@ -1429,20 +1694,45 @@ export function generateWatertightArchitecture(
     const clearWallH = Math.max(0.28, floorH - slabThick);
     const wallCenterY = floorBaseY + slabThick + clearWallH * 0.5;
 
-    const floorMat: CadMaterial = f === 1 ? baseMaterial : accentMaterial;
+    const fp =
+      structuralReport.floors.find((r) => r.floor === f) ??
+      structuralReport.floors[0];
+    const colDcr = fp?.columnDcr ?? 0.3;
+    const beamDcr = fp ? Math.max(fp.beamFlexureDcr, fp.beamDeflectionDcr) : 0.3;
+    const slabDcr = fp?.slabDcr ?? 0.25;
+    const nonBearingWallDcr = Number((slabDcr * 0.25).toFixed(3));
+
+    const colStressLabel = fp
+      ? `${f}F ${structuralReport.columnSectionLabel} · 축하중 ${fp.columnAxialDemandKn}kN / 설계강도 ${fp.columnCapacityKn}kN (DCR ${(
+          fp.columnDcr * 100
+        ).toFixed(0)}%)`
+      : `${f}F 수직 기둥`;
+    const beamStressLabel = fp
+      ? `${f}F ${structuralReport.beamSectionLabel} · 모멘트 ${fp.beamMomentKnM}/${fp.beamCapacityKnM}kN·m · 처짐 ${fp.beamDeflectionMm}/${fp.allowableDeflectionMm}mm (DCR ${(
+          beamDcr * 100
+        ).toFixed(0)}%)`
+      : `${f}F 수평 보`;
+    const slabStressLabel = fp
+      ? `${f}F 슬래브 · 고정 ${fp.deadLoadKnM2} + 활하중 ${fp.liveLoadKnM2} → 계수하중 ${fp.factoredLoadKnM2}kN/㎡ (DCR ${(
+          fp.slabDcr * 100
+        ).toFixed(0)}%)`
+      : `${f}F 슬래브`;
+
+    const frameStyle = getStructuralFrameStyle(resolvedSystem, f);
+    const floorMat: CadMaterial = f === 1 ? safeFloor1Cladding : safeUpperCladding;
     const floorColor =
       f === 1
         ? rawSpec.customWallColor ?? getFloorColor(1)
         : rawSpec.customUpperWallColor ??
-          (accentMaterial === 'wood'
+          (safeUpperCladding === 'wood'
             ? '#c89b6e'
-            : accentMaterial === 'steel'
+            : safeUpperCladding === 'steel'
             ? '#94a3b8'
-            : accentMaterial === 'concrete'
+            : safeUpperCladding === 'concrete'
             ? '#cbd5e1'
             : getFloorColor(f));
 
-    // 10종 아키타입별 층별 구조 변형 (단, 대지 경계 밖으로 나가지 않도록 안전 범위 클램핑)
+    // 10종 아키타입별 층별 구조 변형
     let stepFactorX = 1.0;
     let stepFactorZ = 1.0;
     let stepShiftX = 0;
@@ -1467,9 +1757,9 @@ export function generateWatertightArchitecture(
       stepShiftX = (f % 2 === 0 ? 1 : -1) * Math.min(0.14, (f - 1) * 0.07);
     } else if (templateId === 'bridge-cantilever') {
       if (f === 1) {
-        stepFactorX = 0.6;
-        stepFactorZ = 0.78;
-        stepShiftX = -bldgW * 0.14;
+        stepFactorX = 0.62;
+        stepFactorZ = 0.8;
+        stepShiftX = -bldgW * 0.13;
       } else {
         stepFactorX = 1.02;
         stepFactorZ = 0.96;
@@ -1489,7 +1779,7 @@ export function generateWatertightArchitecture(
       stepFactorZ = f === 1 ? 0.96 : 0.86;
       stepShiftX = f > 1 ? bldgW * 0.07 : 0;
     } else if (templateId === 'courtyard-hanok') {
-      stepFactorX = f === 1 ? 1.0 : 0.8;
+      stepFactorX = f === 1 ? 1.0 : 0.82;
       stepFactorZ = f === 1 ? 0.92 : 0.84;
       stepShiftZ = f > 1 ? -bldgD * 0.04 : 0;
     } else if (templateId === 'stacked-cube') {
@@ -1509,7 +1799,6 @@ export function generateWatertightArchitecture(
     let cx = Number((bldgOffsetX + stepShiftX).toFixed(3));
     let cz = Number((bldgOffsetZ + stepShiftZ).toFixed(3));
 
-    // 대지 경계를 변형했을 때 상층부 오프셋이 폴리곤을 넘지 않도록 자동 안전 보정
     if (!isRectStrictlyInsidePolygon(cx, cz, curW, curD, polygon2D, 0.06)) {
       cx = bldgOffsetX;
       cz = bldgOffsetZ;
@@ -1526,18 +1815,112 @@ export function generateWatertightArchitecture(
       topFloorColor = floorColor;
     }
 
-    // 층 바닥 구조 슬래브
+    const minX = cx - curW * 0.5;
+    const maxX = cx + curW * 0.5;
+    const minZ = cz - curD * 0.5;
+    const maxZ = cz + curD * 0.5;
+
+    // 5-A. 실제 주구조 골조: 수직 기둥 그리드 + 상부 X/Z축 횡보 거더 (+ 1층 독립기초)
+    const insetX = frameStyle.colSize * 0.55;
+    const insetZ = frameStyle.colSize * 0.55;
+    const xs: number[] = [];
+    const zs: number[] = [];
+    for (let ix = 0; ix < gridCountX; ix++) {
+      const t = gridCountX === 1 ? 0.5 : ix / (gridCountX - 1);
+      xs.push(Number((minX + insetX + (curW - insetX * 2) * t).toFixed(3)));
+    }
+    for (let iz = 0; iz < gridCountZ; iz++) {
+      const t = gridCountZ === 1 ? 0.5 : iz / (gridCountZ - 1);
+      zs.push(Number((minZ + insetZ + (curD - insetZ * 2) * t).toFixed(3)));
+    }
+
+    xs.forEach((colX, ix) => {
+      zs.forEach((colZ, iz) => {
+        // 1층 독립기초판 (매트기초가 아닐 때 각 기둥 하부에 실제 콘크리트 패드 배치)
+        if (f === 1 && elementMaterials.foundationMaterial === 'rc_footing') {
+          solids.push({
+            id: `struct_footing_${ix}_${iz}`,
+            groupName: `독립기초 패드 (${ix + 1}-${iz + 1})`,
+            partRole: 'structural_footing',
+            shape: 'box',
+            position: [colX, -0.09, colZ],
+            scale: [0.34, 0.18, 0.34],
+            color: '#64748b',
+            material: 'concrete',
+            isFixed: true,
+            floorIndex: -1,
+            dcr: structuralReport.foundationDcr,
+            stressLabel: footingStressLabel,
+          });
+        }
+
+        // 수직 주구조 기둥 (RC / H-Beam 스틸 / 중목 집성재)
+        solids.push({
+          id: `struct_col_f${f}_${ix}_${iz}`,
+          groupName: `${f}층 주구조 기둥 (${sysMeta.nameKo})`,
+          partRole: 'structural_column',
+          shape: 'box',
+          position: [colX, Number(wallCenterY.toFixed(3)), colZ],
+          scale: [frameStyle.colSize, Number(clearWallH.toFixed(3)), frameStyle.colSize],
+          color: frameStyle.colColor,
+          material: frameStyle.colMat,
+          isFixed: true,
+          floorIndex: f,
+          dcr: colDcr,
+          stressLabel: colStressLabel,
+        });
+      });
+    });
+
+    // 층 상부 수평 거더 보 (X방향 및 Z방향으로 모든 기둥 머리를 강접합)
+    const beamY = Number((floorTopY - frameStyle.beamH * 0.5).toFixed(3));
+    zs.forEach((colZ, iz) => {
+      solids.push({
+        id: `struct_beamX_f${f}_${iz}`,
+        groupName: `${f}층 주구조 X축 거더 보`,
+        partRole: 'structural_beam',
+        shape: 'box',
+        position: [cx, beamY, colZ],
+        scale: [Number((curW - insetX * 0.8).toFixed(3)), frameStyle.beamH, frameStyle.beamW],
+        color: frameStyle.colColor,
+        material: frameStyle.colMat,
+        isFixed: true,
+        floorIndex: f,
+        dcr: beamDcr,
+        stressLabel: beamStressLabel,
+      });
+    });
+    xs.forEach((colX, ix) => {
+      solids.push({
+        id: `struct_beamZ_f${f}_${ix}`,
+        groupName: `${f}층 주구조 Z축 거더 보`,
+        partRole: 'structural_beam',
+        shape: 'box',
+        position: [colX, beamY, cz],
+        scale: [frameStyle.beamW, frameStyle.beamH, Number((curD - insetZ * 0.8).toFixed(3))],
+        color: frameStyle.colColor,
+        material: frameStyle.colMat,
+        isFixed: true,
+        floorIndex: f,
+        dcr: beamDcr,
+        stressLabel: beamStressLabel,
+      });
+    });
+
+    // 5-B. 층 바닥 구조 슬래브 (실제 슬래브 DCR 부착)
     solids.push({
       id: `floor_${f}_slab`,
-      groupName: `${f}층 바닥 슬래브 (${floorMat.toUpperCase()})`,
+      groupName: `${f}층 바닥 구조 슬래브`,
       partRole: 'slab',
       shape: 'box',
       position: [cx, Number((floorBaseY + slabThick * 0.5).toFixed(3)), cz],
       scale: [curW, slabThick, curD],
       color: floorColor,
-      material: floorMat,
+      material: resolvedSystem === 'heavy_timber' ? 'wood' : 'concrete',
       isFixed: true,
       floorIndex: f,
+      dcr: slabDcr,
+      stressLabel: slabStressLabel,
     });
 
     // 실내 마감 바닥판
@@ -1557,21 +1940,27 @@ export function generateWatertightArchitecture(
       material: floorFinishMat,
       isFixed: true,
       floorIndex: f,
+      dcr: slabDcr,
     });
 
-    // 아키타입 특화 서브 구조 (스카이브릿지 / 중앙 아트리움 / 필로티 데크 / 한옥 툇마루)
+    // 아키타입 특화 서브 구조
     if (templateId === 'twin-pavilion' && f >= 2) {
       solids.push({
         id: `floor_${f}_sky_bridge`,
-        groupName: `${f}층 글라스 스카이브릿지`,
+        groupName: `${f}층 철골 글라스 스카이브릿지`,
         partRole: 'unit_divider',
         shape: 'box',
         position: [cx, Number(wallCenterY.toFixed(3)), cz],
-        scale: [Number((curW * 0.24).toFixed(3)), Number((clearWallH * 0.92).toFixed(3)), Number((curD * 0.62).toFixed(3))],
+        scale: [
+          Number((curW * 0.24).toFixed(3)),
+          Number((clearWallH * 0.9).toFixed(3)),
+          Number((curD * 0.62).toFixed(3)),
+        ],
         color: '#bae6fd',
         material: 'glass',
         isFixed: true,
         floorIndex: f,
+        dcr: beamDcr,
       });
     } else if (templateId === 'atrium-ring') {
       solids.push({
@@ -1580,7 +1969,11 @@ export function generateWatertightArchitecture(
         partRole: 'unit_divider',
         shape: 'box',
         position: [cx, Number(wallCenterY.toFixed(3)), cz],
-        scale: [Number((curW * 0.26).toFixed(3)), Number((clearWallH * 0.96).toFixed(3)), Number((curD * 0.28).toFixed(3))],
+        scale: [
+          Number((curW * 0.26).toFixed(3)),
+          Number((clearWallH * 0.94).toFixed(3)),
+          Number((curD * 0.28).toFixed(3)),
+        ],
         color: '#bae6fd',
         material: 'glass',
         isFixed: true,
@@ -1614,29 +2007,23 @@ export function generateWatertightArchitecture(
       });
     }
 
-    // 창호 비율(windowWallRatio)에 따른 동적 외벽·창틀 계산 (전면 통창 ~ 펀치드 윈도우)
+    // 5-C. 불투명 외벽 스팬드럴(허리벽·인방벽) + 창호 개구부 (구조 기둥 사이를 채우는 커튼월/조적 외피)
     const sillRatio = Math.max(0.08, 0.34 - windowWallRatio * 0.3);
-    const headerRatio = Math.max(0.1, 0.26 - windowWallRatio * 0.16);
+    const headerRatio = Math.max(0.11, 0.26 - windowWallRatio * 0.15);
     const sillH = Number((clearWallH * sillRatio).toFixed(3));
     const headerH = Number((clearWallH * headerRatio).toFixed(3));
     const winH = Number(Math.max(0.12, clearWallH - sillH - headerH).toFixed(3));
     const winMidY = Number((floorBaseY + slabThick + sillH + winH * 0.5).toFixed(3));
 
-    const pierWidthFrac = Math.max(0.055, (1 - windowWallRatio) * 0.34);
+    const pierWidthFrac = Math.max(0.06, (1 - windowWallRatio) * 0.34);
     const winSpanFrac = Math.max(0.18, (1 - pierWidthFrac * 3) * 0.5);
 
-    const minX = cx - curW * 0.5;
-    const maxX = cx + curW * 0.5;
-    const minZ = cz - curD * 0.5;
-    const maxZ = cz + curD * 0.5;
-
-    // 남·북 외벽 + 창호
     (['S', 'N'] as const).forEach((dir) => {
       const wallZ = dir === 'S' ? maxZ - extWallThick * 0.5 : minZ + extWallThick * 0.5;
       solids.push(
         {
           id: `floor_${f}_ext_${dir}_sill`,
-          groupName: `${f}층 ${dir === 'S' ? '남측' : '북측'} 외벽`,
+          groupName: `${f}층 ${dir === 'S' ? '남측' : '북측'} 외벽 스팬드럴`,
           partRole: 'exterior_wall',
           shape: 'box',
           position: [cx, Number((floorBaseY + slabThick + sillH * 0.5).toFixed(3)), Number(wallZ.toFixed(3))],
@@ -1645,10 +2032,11 @@ export function generateWatertightArchitecture(
           material: floorMat,
           isFixed: true,
           floorIndex: f,
+          dcr: nonBearingWallDcr,
         },
         {
           id: `floor_${f}_ext_${dir}_header`,
-          groupName: `${f}층 ${dir === 'S' ? '남측' : '북측'} 상부 외벽`,
+          groupName: `${f}층 ${dir === 'S' ? '남측' : '북측'} 상부 인방벽`,
           partRole: 'exterior_wall',
           shape: 'box',
           position: [cx, Number((floorTopY - headerH * 0.5).toFixed(3)), Number(wallZ.toFixed(3))],
@@ -1657,6 +2045,7 @@ export function generateWatertightArchitecture(
           material: floorMat,
           isFixed: true,
           floorIndex: f,
+          dcr: nonBearingWallDcr,
         }
       );
 
@@ -1664,7 +2053,7 @@ export function generateWatertightArchitecture(
       [-cornerOffset, 0, cornerOffset].forEach((offsetRatio, pIdx) => {
         solids.push({
           id: `floor_${f}_ext_${dir}_pier_${pIdx}`,
-          groupName: `${f}층 ${dir === 'S' ? '남측' : '북측'} 구조 기둥벽`,
+          groupName: `${f}층 ${dir === 'S' ? '남측' : '북측'} 외벽 멀리언·벽체`,
           partRole: 'exterior_wall',
           shape: 'box',
           position: [Number((cx + curW * offsetRatio).toFixed(3)), winMidY, Number(wallZ.toFixed(3))],
@@ -1673,6 +2062,7 @@ export function generateWatertightArchitecture(
           material: floorMat,
           isFixed: true,
           floorIndex: f,
+          dcr: Number((colDcr * 0.45).toFixed(3)),
         });
       });
 
@@ -1689,7 +2079,6 @@ export function generateWatertightArchitecture(
       });
     });
 
-    // 동·서 외벽 + 창호
     (['E', 'W'] as const).forEach((dir) => {
       const wallX = dir === 'E' ? maxX - extWallThick * 0.5 : minX + extWallThick * 0.5;
       const innerD = Math.max(0.4, curD - extWallThick * 2);
@@ -1697,7 +2086,7 @@ export function generateWatertightArchitecture(
       solids.push(
         {
           id: `floor_${f}_ext_${dir}_sill`,
-          groupName: `${f}층 ${dir === 'E' ? '동측' : '서측'} 외벽`,
+          groupName: `${f}층 ${dir === 'E' ? '동측' : '서측'} 외벽 스팬드럴`,
           partRole: 'exterior_wall',
           shape: 'box',
           position: [Number(wallX.toFixed(3)), Number((floorBaseY + slabThick + sillH * 0.5).toFixed(3)), cz],
@@ -1706,10 +2095,11 @@ export function generateWatertightArchitecture(
           material: floorMat,
           isFixed: true,
           floorIndex: f,
+          dcr: nonBearingWallDcr,
         },
         {
           id: `floor_${f}_ext_${dir}_header`,
-          groupName: `${f}층 ${dir === 'E' ? '동측' : '서측'} 상부 외벽`,
+          groupName: `${f}층 ${dir === 'E' ? '동측' : '서측'} 상부 인방벽`,
           partRole: 'exterior_wall',
           shape: 'box',
           position: [Number(wallX.toFixed(3)), Number((floorTopY - headerH * 0.5).toFixed(3)), cz],
@@ -1718,6 +2108,7 @@ export function generateWatertightArchitecture(
           material: floorMat,
           isFixed: true,
           floorIndex: f,
+          dcr: nonBearingWallDcr,
         }
       );
 
@@ -1725,7 +2116,7 @@ export function generateWatertightArchitecture(
       [-cornerOffset, 0, cornerOffset].forEach((offsetRatio, pIdx) => {
         solids.push({
           id: `floor_${f}_ext_${dir}_pier_${pIdx}`,
-          groupName: `${f}층 ${dir === 'E' ? '동측' : '서측'} 구조 기둥벽`,
+          groupName: `${f}층 ${dir === 'E' ? '동측' : '서측'} 외벽 멀리언·벽체`,
           partRole: 'exterior_wall',
           shape: 'box',
           position: [Number(wallX.toFixed(3)), winMidY, Number((cz + innerD * offsetRatio).toFixed(3))],
@@ -1734,6 +2125,7 @@ export function generateWatertightArchitecture(
           material: floorMat,
           isFixed: true,
           floorIndex: f,
+          dcr: Number((colDcr * 0.45).toFixed(3)),
         });
       });
 
@@ -1750,6 +2142,7 @@ export function generateWatertightArchitecture(
       });
     });
 
+    // 5-D. 실내 내벽 및 가구 배치
     const startX = minX + extWallThick;
     const startZ = minZ + extWallThick;
 
@@ -1788,11 +2181,12 @@ export function generateWatertightArchitecture(
             Number(wallCenterY.toFixed(3)),
             Number((rz + rd * 0.45).toFixed(3)),
           ],
-          scale: [intWallThick, Number((clearWallH * 0.94).toFixed(3)), Number((rd * 0.84).toFixed(3))],
+          scale: [intWallThick, Number((clearWallH * 0.92).toFixed(3)), Number((rd * 0.84).toFixed(3))],
           color: interiorWallColor,
           material: intWallMat,
           isFixed: true,
           floorIndex: f,
+          dcr: nonBearingWallDcr,
         });
       }
 
@@ -1807,11 +2201,12 @@ export function generateWatertightArchitecture(
             Number(wallCenterY.toFixed(3)),
             Number((rz + rd).toFixed(3)),
           ],
-          scale: [Number((rw * 0.84).toFixed(3)), Number((clearWallH * 0.94).toFixed(3)), intWallThick],
+          scale: [Number((rw * 0.84).toFixed(3)), Number((clearWallH * 0.92).toFixed(3)), intWallThick],
           color: interiorWallColor,
           material: intWallMat,
           isFixed: true,
           floorIndex: f,
+          dcr: nonBearingWallDcr,
         });
       }
 
@@ -1888,17 +2283,18 @@ export function generateWatertightArchitecture(
       }
     });
 
+    // 5-E. 코너 물리 노드·부재 동기화 (실제 계산된 columnDcr / axialLoadKn 주입)
     const corners: [number, number, number][] = [
-      [minX + 0.04, floorTopY, minZ + 0.04],
-      [maxX - 0.04, floorTopY, minZ + 0.04],
-      [maxX - 0.04, floorTopY, maxZ - 0.04],
-      [minX + 0.04, floorTopY, maxZ - 0.04],
+      [minX + insetX, floorTopY, minZ + insetZ],
+      [maxX - insetX, floorTopY, minZ + insetZ],
+      [maxX - insetX, floorTopY, maxZ - insetZ],
+      [minX + insetX, floorTopY, maxZ - insetZ],
     ];
     corners.forEach((pos, idx) => {
       const curId = `n_${f}_${idx}`;
       nodes.push({
         id: curId,
-        groupName: `${f}층 기둥 코어`,
+        groupName: `${f}층 기둥 절점`,
         position: [Number(pos[0].toFixed(3)), Number(pos[1].toFixed(3)), Number(pos[2].toFixed(3))],
         isFixed: false,
         role: 'primary',
@@ -1914,30 +2310,38 @@ export function generateWatertightArchitecture(
         });
         beams.push({
           id: `col_${f}_${idx}`,
-          groupName: `${f}층 수직 기둥`,
+          groupName: `${f}층 주구조 기둥`,
           startNodeId: baseId,
           endNodeId: curId,
-          stress: 0.25,
-          radius: 0.034,
-          material: 'steel',
+          stress: Number(Math.min(1, colDcr).toFixed(3)),
+          dcr: colDcr,
+          axialLoadKn: fp?.columnAxialDemandKn,
+          capacityKn: fp?.columnCapacityKn,
+          deflectionMm: fp?.beamDeflectionMm,
+          radius: 0.032,
+          material: frameStyle.colMat,
           role: 'primary',
         });
       } else {
         beams.push({
           id: `col_${f}_${idx}`,
-          groupName: `${f}층 수직 기둥`,
+          groupName: `${f}층 주구조 기둥`,
           startNodeId: `n_${f - 1}_${idx}`,
           endNodeId: curId,
-          stress: 0.2,
-          radius: 0.032,
-          material: 'steel',
+          stress: Number(Math.min(1, colDcr).toFixed(3)),
+          dcr: colDcr,
+          axialLoadKn: fp?.columnAxialDemandKn,
+          capacityKn: fp?.columnCapacityKn,
+          deflectionMm: fp?.beamDeflectionMm,
+          radius: 0.03,
+          material: frameStyle.colMat,
           role: 'primary',
         });
       }
     });
   }
 
-  // 5. 지붕-벽체 틈새 0mm 완전 밀봉 3D 지붕 엔진 (gable_wall / wedge_wall / 고측창)
+  // 6. 지붕-벽체 틈새 0mm 완전 밀봉 3D 지붕 엔진
   const topY = floors * floorH;
   const roofColor = rawSpec.customRoofColor ?? '#3f3f46';
   const roofT = 0.08;
@@ -1950,12 +2354,13 @@ export function generateWatertightArchitecture(
   const innerDepth = Math.max(0.3, topFloorD - extWallThick * 2);
   const ov = Math.max(0.08, Math.min(0.42, overhangScale));
   const pitchRad = (Math.max(8, Math.min(36, roofPitchDeg || 20)) * Math.PI) / 180;
+  const topFloorPhysics = structuralReport.floors[structuralReport.floors.length - 1];
+  const roofDcr = Number(((topFloorPhysics?.slabDcr ?? 0.22) * 0.72).toFixed(3));
 
   if (roofStyle === 'gable' || roofStyle === 'hip-eaves') {
     const eaveOv = roofStyle === 'hip-eaves' ? ov * 1.35 : ov;
     const rise = halfW * Math.tan(pitchRad);
 
-    // 전·후면 삼각 박공 마감벽 (지붕과 벽체 사이 삼각 빈틈 완전 밀봉)
     [southWallZ, northWallZ].forEach((wz, idx) => {
       solids.push({
         id: `roof_gable_infill_${idx}`,
@@ -1968,10 +2373,10 @@ export function generateWatertightArchitecture(
         material: topFloorMat,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       });
     });
 
-    // 깊은 처마 모임/한옥형일 경우 하부 목재 처마 반자(soffit) 추가
     if (roofStyle === 'hip-eaves') {
       solids.push({
         id: 'roof_hanok_eave_soffit',
@@ -1988,13 +2393,13 @@ export function generateWatertightArchitecture(
         material: 'wood',
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       });
     }
 
     const run = halfW + eaveOv;
     const slopeLen = Number((run / Math.cos(pitchRad) + 0.04).toFixed(3));
     const underY = topY + (halfW - eaveOv) * 0.5 * Math.tan(pitchRad);
-
     const leftMidX = topFloorCx - run * 0.5;
     const rightMidX = topFloorCx + run * 0.5;
 
@@ -2012,9 +2417,10 @@ export function generateWatertightArchitecture(
         scale: [slopeLen, roofT, Number((topFloorD + eaveOv * 2).toFixed(3))],
         rotation: [0, 0, pitchRad],
         color: roofColor,
-        material: roofMaterial,
+        material: safeRoofMaterial,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       },
       {
         id: 'arch_roof_gable_right',
@@ -2029,9 +2435,10 @@ export function generateWatertightArchitecture(
         scale: [slopeLen, roofT, Number((topFloorD + eaveOv * 2).toFixed(3))],
         rotation: [0, 0, -pitchRad],
         color: roofColor,
-        material: roofMaterial,
+        material: safeRoofMaterial,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       },
       {
         id: 'arch_roof_ridge_beam',
@@ -2044,12 +2451,12 @@ export function generateWatertightArchitecture(
         material: 'wood',
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       }
     );
   } else if (roofStyle === 'shed') {
     const rise = topFloorW * Math.tan(pitchRad);
 
-    // 전·후면 직각삼각 경사 마감벽(wedge_wall) + 동측 고벽체 밀봉
     [southWallZ, northWallZ].forEach((wz, idx) => {
       solids.push({
         id: `roof_shed_wedge_${idx}`,
@@ -2062,6 +2469,7 @@ export function generateWatertightArchitecture(
         material: topFloorMat,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       });
     });
 
@@ -2076,6 +2484,7 @@ export function generateWatertightArchitecture(
       material: topFloorMat,
       isFixed: true,
       floorIndex: 99,
+      dcr: roofDcr,
     });
 
     const spanW = Number(((topFloorW + ov * 2) / Math.cos(pitchRad)).toFixed(3));
@@ -2093,14 +2502,14 @@ export function generateWatertightArchitecture(
       scale: [spanW, roofT, Number((topFloorD + ov * 2).toFixed(3))],
       rotation: [0, 0, pitchRad],
       color: roofColor,
-      material: roofMaterial,
+      material: safeRoofMaterial,
       isFixed: true,
       floorIndex: 99,
+      dcr: roofDcr,
     });
   } else if (roofStyle === 'butterfly') {
     const rise = halfW * Math.tan(pitchRad);
 
-    // 좌·우 날개 전·후면 wedge_wall + 동·서 외벽 상부 밀봉
     [southWallZ, northWallZ].forEach((wz, idx) => {
       solids.push(
         {
@@ -2115,6 +2524,7 @@ export function generateWatertightArchitecture(
           material: topFloorMat,
           isFixed: true,
           floorIndex: 99,
+          dcr: roofDcr,
         },
         {
           id: `roof_bf_wedge_R_${idx}`,
@@ -2127,6 +2537,7 @@ export function generateWatertightArchitecture(
           material: topFloorMat,
           isFixed: true,
           floorIndex: 99,
+          dcr: roofDcr,
         }
       );
     });
@@ -2143,12 +2554,13 @@ export function generateWatertightArchitecture(
         material: topFloorMat,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       });
     });
 
     const run = halfW + ov;
     const slopeLen = Number((run / Math.cos(pitchRad) + 0.03).toFixed(3));
-    const underY = topY + (run * 0.5) * Math.tan(pitchRad);
+    const underY = topY + run * 0.5 * Math.tan(pitchRad);
 
     solids.push(
       {
@@ -2164,9 +2576,10 @@ export function generateWatertightArchitecture(
         scale: [slopeLen, roofT, Number((topFloorD + ov * 2).toFixed(3))],
         rotation: [0, 0, -pitchRad],
         color: roofColor,
-        material: roofMaterial,
+        material: safeRoofMaterial,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       },
       {
         id: 'arch_roof_butterfly_right',
@@ -2181,9 +2594,10 @@ export function generateWatertightArchitecture(
         scale: [slopeLen, roofT, Number((topFloorD + ov * 2).toFixed(3))],
         rotation: [0, 0, pitchRad],
         color: roofColor,
-        material: roofMaterial,
+        material: safeRoofMaterial,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       },
       {
         id: 'arch_roof_bf_valley',
@@ -2196,6 +2610,7 @@ export function generateWatertightArchitecture(
         material: 'steel',
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       }
     );
   } else if (roofStyle === 'split-gable') {
@@ -2203,7 +2618,6 @@ export function generateWatertightArchitecture(
     const riseL = halfW * Math.tan(pitchRad);
     const riseR = halfW * Math.tan(pitchRad * 0.85);
 
-    // 좌측 단차 하부벽 + 삼각 마감벽 + 중앙 고측창 채광 유리 + 우측 삼각 마감벽 (빈틈 0mm)
     solids.push({
       id: 'roof_split_west_collar',
       groupName: '서측 스플릿 상부벽',
@@ -2215,6 +2629,7 @@ export function generateWatertightArchitecture(
       material: topFloorMat,
       isFixed: true,
       floorIndex: 99,
+      dcr: roofDcr,
     });
 
     [southWallZ, northWallZ].forEach((wz, idx) => {
@@ -2230,6 +2645,7 @@ export function generateWatertightArchitecture(
           material: topFloorMat,
           isFixed: true,
           floorIndex: 99,
+          dcr: roofDcr,
         },
         {
           id: `roof_split_L_wedge_${idx}`,
@@ -2242,6 +2658,7 @@ export function generateWatertightArchitecture(
           material: topFloorMat,
           isFixed: true,
           floorIndex: 99,
+          dcr: roofDcr,
         },
         {
           id: `roof_split_R_wedge_${idx}`,
@@ -2255,11 +2672,11 @@ export function generateWatertightArchitecture(
           material: topFloorMat,
           isFixed: true,
           floorIndex: 99,
+          dcr: roofDcr,
         }
       );
     });
 
-    // 중앙 고측창 유리 밀봉벽 (좌·우 지붕 사이 단차를 채광창으로 밀봉)
     const stepGapH = Math.max(0.08, clerestoryH + riseL - riseR);
     solids.push({
       id: 'roof_split_clerestory_glass',
@@ -2297,9 +2714,10 @@ export function generateWatertightArchitecture(
         scale: [slopeLenL, roofT, Number((topFloorD + ov * 2).toFixed(3))],
         rotation: [0, 0, pitchRad],
         color: roofColor,
-        material: roofMaterial,
+        material: safeRoofMaterial,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       },
       {
         id: 'arch_roof_split_right',
@@ -2317,10 +2735,10 @@ export function generateWatertightArchitecture(
         material: 'wood',
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       }
     );
   } else {
-    // 캔틸레버 처마 평지붕 (완전 밀착 슬래브 + 유리 난간)
     const rW = Number((topFloorW + ov * 1.6).toFixed(3));
     const rD = Number((topFloorD + ov * 1.6).toFixed(3));
     solids.push(
@@ -2332,9 +2750,10 @@ export function generateWatertightArchitecture(
         position: [topFloorCx, Number((topY + 0.05).toFixed(3)), topFloorCz],
         scale: [rW, 0.1, rD],
         color: rawSpec.customRoofColor ?? '#c89b6e',
-        material: roofMaterial,
+        material: safeRoofMaterial,
         isFixed: true,
         floorIndex: 99,
+        dcr: roofDcr,
       },
       {
         id: 'roof_glass_balustrade_s',
@@ -2351,25 +2770,35 @@ export function generateWatertightArchitecture(
     );
   }
 
-  // 6. 승강기 & 직통계단 수직 코어
+  // 7. 내진 수직 코어 (계단/승강기 전단벽 코어)
   const coreCount = Math.max(1, (rawSpec.elevators || 0) + (rawSpec.stairs || 1));
+  const baseFloorPhysics = structuralReport.floors[0];
   for (let k = 0; k < Math.min(3, coreCount); k++) {
     const kx = topFloorCx + topFloorW * 0.22 - k * 0.38;
     solids.push({
       id: `arch_core_${k}`,
-      groupName: k === 0 && rawSpec.elevators > 0 ? '엘리베이터·계단 코어' : `직통계단 코어 #${k + 1}`,
+      groupName:
+        k === 0 && rawSpec.elevators > 0
+          ? 'RC 내진 승강기·계단 코어'
+          : `RC 내진 직통계단 코어 #${k + 1}`,
       partRole: 'core',
       shape: 'box',
-      position: [Number(kx.toFixed(3)), Number((topY * 0.5).toFixed(3)), Number((topFloorCz - topFloorD * 0.2).toFixed(3))],
+      position: [
+        Number(kx.toFixed(3)),
+        Number((topY * 0.5).toFixed(3)),
+        Number((topFloorCz - topFloorD * 0.2).toFixed(3)),
+      ],
       scale: [0.3, Number(topY.toFixed(3)), 0.3],
       color: '#cbd5e1',
       material: 'concrete',
       isFixed: true,
       floorIndex: 1,
+      dcr: baseFloorPhysics?.columnDcr ?? 0.3,
+      stressLabel: `내진 코어 전단벽 · 기둥계수하중 ${baseFloorPhysics?.columnAxialDemandKn ?? 0}kN 지지`,
     });
   }
 
-  // 7. 수도·전기 배관 라우팅
+  // 8. 수도·전기 배관 라우팅
   const basePipeY = undergroundFloors > 0 ? -0.35 * undergroundFloors : 0.08;
   const waterX = bldgOffsetX - bldgW * 0.1;
   const waterZ = bldgOffsetZ + bldgD * 0.16;
@@ -2425,7 +2854,7 @@ export function generateWatertightArchitecture(
     });
   }
 
-  // 8. 방(세대) 디자인 유형 생성
+  // 9. 방(세대) 디자인 유형 생성
   const unitTypes: UnitDesignType[] = [];
   const kds = getKdsLoadRange(rawSpec.usageType);
   const typeCount = useHouseholds
@@ -2481,7 +2910,11 @@ export function generateWatertightArchitecture(
         placements.push({
           floor: fNum,
           position: [Number(px.toFixed(3)), Number(py.toFixed(3)), Number(pz.toFixed(3))],
-          scale: [Number((uw * 0.92).toFixed(3)), Number(uh.toFixed(3)), Number((ud * 0.92).toFixed(3))],
+          scale: [
+            Number((uw * 0.92).toFixed(3)),
+            Number(uh.toFixed(3)),
+            Number((ud * 0.92).toFixed(3)),
+          ],
         });
       }
 
@@ -2512,12 +2945,16 @@ export function generateWatertightArchitecture(
     spec: {
       ...rawSpec,
       templateId,
+      structuralSystem: resolvedSystem,
+      elementMaterials,
+      structuralReport,
+      budgetReport,
       roofStyle,
       roofPitchDeg,
       overhangScale,
       windowWallRatio,
-      accentMaterial,
-      roofMaterial,
+      accentMaterial: safeUpperCladding,
+      roofMaterial: safeRoofMaterial,
       interiorTheme,
       interiorWallColor,
       interiorFloorColor,

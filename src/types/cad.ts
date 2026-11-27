@@ -1,3 +1,23 @@
+import type {
+  StructuralSystemId,
+  ElementMaterialSpec,
+  StructuralMaterialProps,
+  FloorPhysicsResult,
+  StructuralAnalysisReport,
+  QtoBudgetLine,
+  RealisticBudgetReport,
+} from '../utils/structuralPhysics';
+
+export type {
+  StructuralSystemId,
+  ElementMaterialSpec,
+  StructuralMaterialProps,
+  FloorPhysicsResult,
+  StructuralAnalysisReport,
+  QtoBudgetLine,
+  RealisticBudgetReport,
+};
+
 export type CadTool = 'draw' | 'erase' | 'move' | 'deform' | 'spray' | 'select';
 
 export type CadMaterial =
@@ -44,17 +64,32 @@ export type InteriorTheme =
   | 'industrial-loft'
   | 'japandi';
 
-export type StudioViewMode = 'exterior' | 'interior_cutaway';
+export type GlazingSpec = 'double_lowe' | 'triple_lowe' | 'curtain_wall';
+
+export type InsulationSpec = 'eps_150' | 'pf_board_120' | 'mineral_wool_150';
+
+/**
+ * exterior: 일반 외관 뷰
+ * interior_cutaway: 지붕·전면 외벽 오픈 실내 투시 뷰
+ * structural_frame: 외장재 투명화 후 실제 RC/H-Beam/중목 기둥·보·기초 골조 집중 뷰
+ */
+export type StudioViewMode = 'exterior' | 'interior_cutaway' | 'structural_frame';
 
 export type SiteShape = 'rectangle' | 'triangle' | 'circle' | 'trapezoid' | 'custom';
 
-/** Vision AI가 참조 사진에서 추출하는 정밀 건축 DNA */
+/** Vision AI가 참조 사진에서 추출하는 정밀 건축·구조·자재 DNA */
 export interface ArchitecturalDna {
   massingStyle: BuildingTemplateId;
   roofStyle: RoofStyle;
   roofPitchDeg: number; // 지붕 경사각 (0 ~ 38도)
   overhangScale: number; // 처마 돌출 비율 (0.06 ~ 0.42)
-  windowWallRatio: number; // 외벽 대비 창호 비율 (0.25 ~ 0.85)
+  windowWallRatio: number; // 외벽 대비 창호 비율 (0.22 ~ 0.86)
+  /** 사진의 유리 비중·경간·층수에 따라 강제 결정되는 안전한 주 구조체 */
+  structuralSystem?: StructuralSystemId;
+  glazingSpec?: GlazingSpec;
+  insulationSpec?: InsulationSpec;
+  /** 사진에서 판별된 실제 사용 자재 내역 (예: ["H-Beam SS275 철골 기둥·보", "삼중 로이 커튼월 유리", "적삼목 외장 루버"]) */
+  materialBreakdown?: string[];
   floor1Material: CadMaterial;
   upperMaterial: CadMaterial;
   roofMaterial: CadMaterial;
@@ -80,6 +115,8 @@ export interface BuildingTemplateOption {
   roofPitchDeg?: number;
   overhangScale?: number;
   windowWallRatio?: number;
+  structuralSystem?: StructuralSystemId;
+  glazingSpec?: GlazingSpec;
   primaryMaterial: CadMaterial;
   accentMaterial: CadMaterial;
   roofMaterial?: CadMaterial;
@@ -95,6 +132,7 @@ export interface BuildingTemplateOption {
   hasPorchDeck?: boolean;
   structureBadge: string;
   roofBadge: string;
+  materialTags?: string[];
   isPhotoDerived?: boolean;
 }
 
@@ -122,6 +160,11 @@ export interface BeamMember {
   startNodeId: string;
   endNodeId: string;
   stress: number;
+  /** KDS 물리 해석으로 산출된 실제 수요/내력비 (Demand / Capacity Ratio) */
+  dcr?: number;
+  axialLoadKn?: number;
+  capacityKn?: number;
+  deflectionMm?: number;
   color?: string;
   material?: CadMaterial;
   radius?: number;
@@ -133,6 +176,9 @@ export interface SolidPrimitive {
   groupName?: string;
   partRole?:
     | 'slab'
+    | 'structural_column'
+    | 'structural_beam'
+    | 'structural_footing'
     | 'exterior_wall'
     | 'interior_wall'
     | 'interior_floor'
@@ -157,6 +203,9 @@ export interface SolidPrimitive {
   material?: CadMaterial;
   isFixed?: boolean;
   floorIndex?: number;
+  /** 실제 구조역학 해석 결과 (부위별 응력비 및 커서/인스펙터 표시용 공학 근거) */
+  dcr?: number;
+  stressLabel?: string;
 }
 
 export interface DesignCandidate {
@@ -236,6 +285,12 @@ export interface BuildingSpec {
   selectedTemplateName?: string;
   dynamicTemplates?: BuildingTemplateOption[];
   architecturalDna?: ArchitecturalDna;
+  /** 선택된 실제 주 구조 시스템 및 부위별 자재 명세 */
+  structuralSystem?: StructuralSystemId;
+  elementMaterials?: ElementMaterialSpec;
+  /** KDS 물리 해석 결과 및 물량산출(QTO) 기반 현실적 예산 리포트 */
+  structuralReport?: StructuralAnalysisReport;
+  budgetReport?: RealisticBudgetReport;
   roofStyle?: RoofStyle;
   roofPitchDeg?: number;
   overhangScale?: number;
@@ -247,9 +302,7 @@ export interface BuildingSpec {
   interiorFloorColor?: string;
   openPlanRatio?: number;
   siteShape?: SiteShape;
-  /** 자유 변형 대지 경계 2D 꼭짓점 배열 ([x, z] 월드 좌표, 반시계/시계 폐곡선) */
   sitePolygon?: [number, number][];
-  /** true이면 꼭짓점 드래그 시 기존 대지면적(siteAreaSqm)을 유지하도록 비율 보정 */
   lockSiteAreaOnDrag?: boolean;
   useHouseholds?: boolean;
   siteAreaSqm: number;
@@ -299,5 +352,7 @@ export interface StructureState {
   isLoadHeatmapActive?: boolean;
   showMepPipes?: boolean;
   viewMode?: StudioViewMode;
+  /** 시니어·접근성 친화 고대비 큰 글씨 4단계 간편 마법사 모드 */
+  isSeniorMode?: boolean;
   activeSpecViz?: ActiveSpecVisualization | null;
 }

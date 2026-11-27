@@ -123,6 +123,13 @@ function stepDrag(t: DragTrack, lm: NormalizedLandmark[]): [number, number] | nu
 }
 /** 핀치가 이 시간 이상 유지돼야 노드 확정 (주먹 쥐는 도중 엄지·검지가 스치는 오인식 방지) */
 const PINCH_CONFIRM_MS = 200;
+/**
+ * 핀치 손떨림 보정: 엄지·검지를 모으는 동작 자체가 커서를 흔듦 → 모으기 시작하기 직전 위치를 찍음.
+ * 모으기 시작 = 핀치 비율이 PINCH_OFF 아래로 내려간 순간. 그보다 LEAD_MS 앞의 커서를 사용
+ * (단, 핀치 시작보다 MAX_BACK_MS 이상 과거로는 안 감 → 손가락 붙인 채 조준해도 오래된 위치 안 찍힘)
+ */
+const PINCH_LOCK_LEAD_MS = 60;
+const PINCH_LOCK_MAX_BACK_MS = 350;
 const FIST_HOLD_MS = 350;
 const HANDS_LOST_RESET_MS = 1000;
 /**
@@ -816,6 +823,13 @@ export default function HandTracker(props: Props) {
     lastPinchAt: 0,
     pinchSince: 0,
     pinchCommitted: false,
+    /** 최근 커서 기록 (핀치 직전 위치 찾기용, ~0.5초) */
+    cursorHist: [] as { t: number; p: Vec3 }[],
+    /** 엄지·검지가 모이기 시작한 시각 (비율이 PINCH_OFF 아래로 내려간 순간) */
+    closeStart: 0,
+    prevPinchRatio: 1,
+    /** 핀치 중 고정된 찍을 위치 */
+    pinchPos: null as Vec3 | null,
     fistSince: 0,
     lastHandsAt: 0,
     chainLen: 0, // 현재 스트로크 노드 수 (0 = 다음 핀치가 새 스트로크)
@@ -1160,15 +1174,27 @@ export default function HandTracker(props: Props) {
 
         // 핀치 (히스테리시스 + 유지시간 확인). 선택·카메라 이동·움켜쥐기 모드에선 핀치 안 함
         const ratio = pinchRatio(drawHand);
+        if (d.prevPinchRatio >= PINCH_OFF && ratio < PINCH_OFF) d.closeStart = now;
+        d.prevPinchRatio = ratio;
+        if (!d.pinching) {
+          d.cursorHist.push({ t: now, p: snapped });
+          while (d.cursorHist.length && now - d.cursorHist[0].t > 500) d.cursorHist.shift();
+        }
         if (fist || indexCurled || NO_PINCH_POSES.has(rightPose)) {
           d.pinching = false;
         } else if (!d.pinching && ratio < PINCH_ON) {
           d.pinching = true;
           d.pinchSince = now;
           d.pinchCommitted = false;
+          // 모으기 시작 직전 위치로 고정
+          const target = Math.max(d.closeStart - PINCH_LOCK_LEAD_MS, now - PINCH_LOCK_MAX_BACK_MS);
+          const h = d.cursorHist.find((e) => e.t >= target) ?? d.cursorHist[d.cursorHist.length - 1];
+          d.pinchPos = h ? h.p : snapped;
         } else if (d.pinching && ratio > PINCH_OFF) {
           d.pinching = false;
         }
+        if (!d.pinching) d.pinchPos = null;
+        else if (d.pinchPos && cursor) cursor = d.pinchPos; // 핀치 중엔 커서도 고정 표시
 
         if (
           d.pinching &&
@@ -1179,7 +1205,7 @@ export default function HandTracker(props: Props) {
         ) {
           d.pinchCommitted = true;
           d.lastPinchAt = now;
-          lastHint = commitPoint(snapped);
+          lastHint = commitPoint(d.pinchPos ?? snapped);
         }
 
         // 주먹 유지 → 체인 끊기

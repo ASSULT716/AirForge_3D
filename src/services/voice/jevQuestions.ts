@@ -25,6 +25,7 @@ export const INTENTS = [
   'offset_face',
   'scale_part',
   'taper_face',
+  'set_diameter',
   'dig_hole',
   'draw_shape',
   'change_material',
@@ -142,12 +143,13 @@ export function buildQuestions(
       instructions: 'Which action does the user want the editor to perform in `spoken_text`?',
       criteria: {
         rotate: 'Turn the selected structure (돌려, 회전시켜, 뒤집어, 반바퀴).',
-        push_pull: 'Make the selected part longer, taller, thicker, shorter or thinner by pushing or pulling one side. Any sentence with 늘려 or 줄여 is this action, even with a direction such as 위로 (위로 1미터 늘려, 늘려, 높여, 키워, 두껍게, 줄여, 낮춰, 당겨, 밀어, 돌출).',
+        push_pull: 'Make the selected part longer, taller, thicker, shorter or thinner by pushing or pulling one side. Any sentence with 늘려 or 줄여 is this action, even with a direction such as 위로, unless 지름 or 반지름 is said (위로 1미터 늘려, 늘려, 높여, 키워, 두껍게, 줄여, 낮춰, 당겨, 밀어, 돌출).',
         move_part: 'Move the whole selected part to another place without changing its size or shape (옮겨, 이동시켜, 올려, 내려). Not for 늘려 or 줄여.',
         copy_part: 'Make a copy of the selected part (복사, 하나 더, 똑같이 하나 더, 복제).',
         delete_part: 'Remove the selected part (지워, 삭제, 없애, 빼).',
-        scale_part: 'Resize the whole selected part evenly by a factor, said with 배 or 절반, without naming a face. Never when 윗면, 아랫면 or 면 is said (전체 크기, 두 배로 키워, 1.5배, 절반으로 줄여).',
+        scale_part: 'Resize the whole selected part evenly by a factor, said with 배 or 절반, without naming a face. Never when 윗면, 아랫면, 면, 지름 or 반지름 is said (전체 크기, 두 배로 키워, 1.5배, 절반으로 줄여).',
         taper_face: 'Make only one face (면) of a cylinder narrower or wider, like a cone, a funnel or a dish, including when the user only names the face-size action (면 크기, 면 크기 조절, 면만 줄여, 윗면 두 배로, 윗면 절반으로, 아랫면 1.5배, 윗면 줄여, 위를 좁게, 뾰족하게, 원뿔로 만들어, 아래를 벌려, 접시처럼).',
+        set_diameter: 'Set the width of the selected round part (cylinder, cone, ball) to an exact size, said with 지름, 직경 or 반지름, even with 늘려 or 줄여 (지름 5미터로 해줘, 지름 2m로, 반지름 1미터, 직경 3미터, 윗면 지름 1미터로, 지름 50센티로 줄여).',
         dig_hole: 'Hollow out or drill into the selected part, like a cup, a pot or a pipe (파줘, 속 비워, 구멍 내, 뚫어, 컵처럼, 파이프로).',
         draw_shape: 'Start drawing a new flat shape on the floor (사각형 그리기, 네모 그려, 원 그리기, 동그라미, 바닥 그리기).',
         offset_face: 'Draw a smaller face inside a face, leaving a border, usually to cut a window, door or recess (오프셋, 안쪽에 테두리, 창문 틀, 안쪽 면 만들어).',
@@ -268,7 +270,7 @@ export function buildQuestions(
     criteria.not_specified = 'The user says no distance.';
     q.distance = {
       type: 'choice',
-      instructions: 'How far does the user want the part pushed, pulled, moved or copied in `spoken_text`?',
+      instructions: 'Which length does the user say in `spoken_text`: how far to push, pull, move or copy the part, or how wide (지름, 반지름) to make it?',
       criteria,
     };
   }

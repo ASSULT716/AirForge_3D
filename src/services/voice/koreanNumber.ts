@@ -147,8 +147,17 @@ export function extractDistanceCandidates(text: string): DistanceCandidate[] {
     const n = /^\d+$/.test(x[1]) ? parseInt(x[1], 10) : NATIVE_COUNT[x[1]];
     if (n) push(n * GRID_CELL_M, x[0]);
   }
+  // "지름 5로", "반지름 이로" 처럼 단위 없이 말해도 지름·반지름 뒤 숫자는 미터
+  if (out.length === 0) {
+    const x = t.match(/(?:반지름|지름|직경)\s*(?:이|을|를|은|는)?\s*(\d+(?:\.\d+)?|[영일이삼사오육칠팔구십백]+)(?=\s*(?:으로|로|$|만|정도|쯤|요))/);
+    const n = x && (/^\d/.test(x[1]) ? parseFloat(x[1]) : parseKoreanNumber(x[1]));
+    if (x && n) push(n, x[0]);
+  }
   return out;
 }
+
+/** 반지름으로 말했는지 (지름으로 바꿀 때 x2) */
+export const saysRadius = (text: string) => /반\s*지름/.test(text);
 
 /**
  * 거리만 말한 발화인지 ("2미터", "1.5m로", "50센티만") → 미터. 다른 말이 섞여 있으면 null.

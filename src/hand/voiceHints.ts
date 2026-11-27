@@ -92,7 +92,7 @@ export function voiceHints(c: HintContext): VoiceHint[] {
     if (bore && bore.depth < 1) add(h('50센티 더 파줘', '구멍 더 깊게'), h('뚫어', '끝까지 관통 = 파이프'));
     else if (!bore) add(h('1미터 파줘', '안쪽 원 만들고 파기 = 컵'), h('20센티 오프셋', '안쪽 원만 그리기'));
     if (c.editMode !== 'taper') add(h('뾰족하게 만들어', '원뿔로'), h('윗면 절반으로', '원뿔대'));
-    add(h('위로 1미터 늘려', '높이'));
+    add(h('지름 2미터로 해줘', '굵기 정확히'), h('위로 1미터 늘려', '높이'));
   } else if (box) {
     add(h('위로 2미터 늘려', '높이 늘리기'), h('30센티 오프셋', '창문·문 테두리'), h('50센티 줄여', '높이 줄이기'));
   } else if (nodesOnly) {

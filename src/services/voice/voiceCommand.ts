@@ -5,6 +5,7 @@ import {
   extractDistanceCandidates,
   extractScaleCandidates,
   parseLoadKg,
+  saysRadius,
   type AngleCandidate,
   type DistanceCandidate,
   type ScaleCandidate,
@@ -51,12 +52,14 @@ export type VoiceCommand =
   | { type: 'draw'; shape: 'rect' | 'circle' }
   /** 원기둥 한쪽 면 반지름 비율 (0 = 뾰족). null = 면 크기 모드 */
   | { type: 'taper'; end: 'top' | 'bottom'; ratio: number | null }
+  /** 둥근 물체 지름을 정확히 (meters = 지름, 반지름으로 말하면 x2). end = 그 끝면만 (원기둥) */
+  | { type: 'diameter'; meters: number; end: 'top' | 'bottom' | null }
   /** 안쪽 파기 (meters null = 절반 깊이, through = 관통) */
   | { type: 'dig'; meters: number | null; through: boolean }
   | { type: 'undo' };
 
 /** 선택된 구조물이 있어야 하는 명령 (없으면 AI 설계로 넘김) */
-export const NEEDS_SELECTION: ReadonlySet<VoiceCommand['type']> = new Set(['push_pull', 'move', 'copy', 'delete', 'offset', 'scale', 'taper', 'dig']);
+export const NEEDS_SELECTION: ReadonlySet<VoiceCommand['type']> = new Set(['push_pull', 'move', 'copy', 'delete', 'offset', 'scale', 'taper', 'diameter', 'dig']);
 
 /** 값 없이 모드만 바꾸는 명령 ("면 크기", "늘려") → 선택 없어도 모드 전환. copy는 값 없어도 바로 복사라 제외 */
 export function isModeOnly(c: VoiceCommand): boolean {
@@ -159,6 +162,8 @@ export function describeCommand(c: VoiceCommand): string {
       return c.shape === 'rect' ? '사각형 그리기' : '원 그리기';
     case 'taper':
       return `${c.end === 'top' ? '윗면' : '아랫면'} ${c.ratio === null ? '크기' : c.ratio === 0 ? '뾰족하게' : `x${c.ratio}`}`;
+    case 'diameter':
+      return `${c.end === 'top' ? '윗면 ' : c.end === 'bottom' ? '아랫면 ' : ''}지름 ${meterKo(c.meters)}`;
     case 'dig':
       return c.through ? '관통' : c.meters !== null ? `${meterKo(c.meters)} 파기` : '파기';
     case 'undo':
@@ -257,6 +262,8 @@ function buildCommand(
   const dir = () => MOVE_DIRECTION_OPTION[choice(r, 'move_direction') ?? 'not_specified'] ?? null;
   // 후보가 하나뿐이면 Jev가 not_specified를 골라도 그 값 (숫자는 코드가 뽑은 것만 씀)
   const meters = () => distances.find((d) => d.key === choice(r, 'distance'))?.meters ?? (distances.length === 1 ? distances[0].meters : null);
+  // 지름·반지름을 말했는데 늘리기·크기·면 크기로 잡히면 지름으로 보정 (Jev intent가 늘려·줄여에 끌려가는 경우)
+  if ((intent === 'push_pull' || intent === 'scale_part' || intent === 'taper_face') && /지름|직경/.test(text)) intent = 'set_diameter';
   switch (intent) {
     case 'push_pull':
       return { type: 'push_pull', dir: dir(), meters: meters(), shrink: choice(r, 'resize') === 'shrink' };
@@ -282,6 +289,12 @@ function buildCommand(
       const pointed = /뾰족|원뿔|꼭짓점/.test(text);
       const f = scales.find((c) => c.key === choice(r, 'scale_factor'))?.factor ?? (scales.length === 1 ? scales[0].factor : null);
       return { type: 'taper', end, ratio: pointed ? 0 : f };
+    }
+    case 'set_diameter': {
+      const m = meters();
+      if (m === null) return null;
+      const end = choice(r, 'face_end');
+      return { type: 'diameter', meters: saysRadius(text) ? m * 2 : m, end: end === 'top' || end === 'bottom' ? end : null };
     }
     case 'dig_hole':
       return { type: 'dig', meters: meters(), through: /뚫|관통|파이프/.test(text) };

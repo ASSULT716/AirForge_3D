@@ -8,7 +8,7 @@ import { describeSelection, expandSelection, pruneSelection, type PickHit, type 
 import { applySession, startSession, type Axis, type RotateSession } from '../services/handRotate';
 import { NEEDS_SELECTION, describeCommand, isModeOnly, interpretVoice, parseConfirmReply, type VoiceCommand } from '../services/voice/voiceCommand';
 import { applyVoiceCommand } from '../services/voice/applyVoice';
-import { voiceEditOp, voiceLatheOp, voiceOffsetOp } from '../services/voice/applyEditVoice';
+import { voiceDiameterOp, voiceEditOp, voiceLatheOp, voiceOffsetOp } from '../services/voice/applyEditVoice';
 import { parseBareDistance } from '../services/voice/koreanNumber';
 import { DRAW_MODES, applyOp, deleteSelection, describeOp, scaleOp, type EditMode, type EditOp } from '../services/sketchOps';
 import { handStore, hoveredForSelect, useHandState } from './handStore';
@@ -361,6 +361,16 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
       const label = `${selected!.label} ${describeOp(r.op, res.dist, res.through)}`;
       setStructure((p) => ({ ...res.next, isSimulating: p.isSimulating, statusMessage: `음성: ${label}` }));
       return setVoiceFb({ label, tone: 'ok' });
+    }
+    if (cmd.type === 'diameter') {
+      if (s.isSimulating) return setVoiceFb({ label: '시뮬레이션 중엔 편집할 수 없어요', tone: 'warn' });
+      const r = voiceDiameterOp(s, selected!, cmd);
+      if ('error' in r) return setVoiceFb({ label: r.error, tone: 'warn' });
+      const res = commitEdit(s, r.op, r.dist, newSid(), '음성');
+      // 면 크기로 환산한 경우 dist가 비율이라 "2미터"로 고치기 대상에서 뺌
+      if (r.op.kind === 'taper') lastEdit.current = null;
+      if (res.dist === 0) return setVoiceFb({ label: `${describeCommand(cmd)}: 이미 그 크기예요`, tone: 'warn' });
+      return setVoiceFb({ label: `${selected!.label} ${describeCommand(cmd)}`, tone: 'ok' });
     }
     if (cmd.type === 'scale') {
       if (s.isSimulating) return setVoiceFb({ label: '시뮬레이션 중엔 편집할 수 없어요', tone: 'warn' });

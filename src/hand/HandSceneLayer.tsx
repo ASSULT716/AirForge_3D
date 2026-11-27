@@ -41,6 +41,8 @@ import { boreGeometry, latheFaceAt, latheGeometry } from '../services/latheShape
 
 const SELECT_GREEN = '#7dff8a';
 const HOVER_YELLOW = '#ffd54a';
+/** 손 커서 기본 색 (가리킨 것 없음·핀치 안 함) */
+const CURSOR_COLOR = '#000000';
 const UP_VEC = new THREE.Vector3(0, 1, 0);
 /** 손 줌 거리 한계 (m) */
 const ZOOM_MIN_DIST = 1.2;
@@ -158,7 +160,7 @@ function HandCursor({ cursor, hovering }: { cursor: SceneHandCursor; hovering: b
     g.scale.setScalar(pxWorld);
   });
 
-  const color = cursor.pinching ? '#ff1e42' : hovering ? HOVER_YELLOW : SELECT_GREEN;
+  const color = cursor.pinching ? '#ff1e42' : hovering ? HOVER_YELLOW : CURSOR_COLOR;
   const r = cursor.pinching ? CURSOR_RING_PX * 0.65 : CURSOR_RING_PX;
   return (
     <group ref={ref} renderOrder={10}>

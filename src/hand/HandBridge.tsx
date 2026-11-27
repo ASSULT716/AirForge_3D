@@ -137,7 +137,7 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
     }));
   };
 
-  // ✌️ 조준 → 주먹 확정. 이미 선택된 구조물을 다시 고르면 해제 (토글)
+  // 핀치 선택. 이미 선택된 구조물을 다시 고르면 해제 (토글)
   const handleSelect = () => {
     const hovered = hoveredForSelect();
     const sel = hovered && hovered.key === handStore.get().selected?.key ? null : hovered;

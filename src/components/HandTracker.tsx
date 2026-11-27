@@ -378,7 +378,7 @@ const NO_CURSOR_POSES: ReadonlySet<HandPose> = new Set(['pan', 'grab']);
 // ─────────────────────────────────────────────────────────────
 const POSE_LABEL: Record<HandPose, string> = {
   none: '미분류',
-  draw: '그리기',
+  draw: '핀치 선택',
   select: '선택(V)',
   pan: '3손가락',
   fist: '주먹',
@@ -462,7 +462,7 @@ const rotObserve = (s: PoseSnapshot) =>
         : '손 없음'
     : `${AXIS_LABEL[s.rotView]}축 ${Math.round(s.rotViewDeg)}°`;
 const GESTURE_TEST_STEPS: GestureTestStep[] = [
-  { id: 'draw', title: '그리기', how: '오른손 엄지·검지만 펴고 중·약·새끼 접기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, X, X, X] }] }, check: (s) => s.right === 'draw' },
+  { id: 'draw', title: '핀치 선택', how: '오른손 엄지·검지만 펴고 중·약·새끼 접기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, X, X, X] }] }, check: (s) => s.right === 'draw' },
   { id: 'select', title: '선택 커서', how: '오른손 V자 (검지·중지만, 엄지는 접기)', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }] }, check: (s) => s.right === 'select' },
   {
     id: 'select_fist',
@@ -615,7 +615,7 @@ function observedLabel(step: GestureTestStep, s: PoseSnapshot): string {
   if (step.hand === 'both') return s.mode === 'zoom' ? '줌' : `오른 ${s.right ? POSE_LABEL[s.right] : '없음'} / 왼 ${s.left ? POSE_LABEL[s.left] : '없음'}`;
   const p = step.hand === 'right' ? s.right : s.left;
   if (!p) return step.hand === 'right' ? '손 안 보임' : '왼손 안 보임';
-  if (step.hand === 'left' && p === 'pan' && !s.orbit) return '3손가락 (오른손이 그리기 자세라 무시됨)';
+  if (step.hand === 'left' && p === 'pan' && !s.orbit) return '3손가락 (오른손이 핀치 선택 자세라 무시됨)';
   return POSE_LABEL[p];
 }
 
@@ -895,17 +895,6 @@ export default function HandTracker(props: Props) {
     };
   }, [breakChain]);
 
-  // ── 핀치 확정 → App에 도구 동작 위임 ──
-  const commitPoint = useCallback((pos: Vec3): string => {
-    const d = draw.current;
-    const tool = propsRef.current.activeTool;
-    const isNewStroke = d.chainLen === 0;
-    propsRef.current.onPinchAction(tool, pos, isNewStroke);
-    if (tool !== 'draw') return tool;
-    d.chainLen += 1;
-    return isNewStroke ? (pos[1] <= 0 ? '고정 노드에서 시작' : '스트로크 시작') : '빔 연결';
-  }, []);
-
   // ── 카메라 + MediaPipe 루프 ──
   useEffect(() => {
     if (!cameraOn) return;
@@ -976,7 +965,7 @@ export default function HandTracker(props: Props) {
                 position: next.cursor,
                 pinching: next.pinching,
                 chainActive: next.chainLen > 0,
-                selecting: next.mode === 'select',
+                selecting: true, // 그리기 기능 제거 → 커서는 항상 선택용
               }
             : null,
         );
@@ -1203,9 +1192,12 @@ export default function HandTracker(props: Props) {
           now - d.lastPinchAt > PINCH_COOLDOWN_MS &&
           !d.test.active // 테스트 중엔 노드 안 찍음
         ) {
+          // 그리기 기능 제거: 핀치 = 선택 확정 (가리킨 대상 판정은 SceneCanvas가 커서 위치로 함)
           d.pinchCommitted = true;
           d.lastPinchAt = now;
-          lastHint = commitPoint(d.pinchPos ?? snapped);
+          d.selectFires += 1;
+          propsRef.current.onSelect?.();
+          lastHint = '선택 확정';
         }
 
         // 주먹 유지 → 체인 끊기
@@ -1230,9 +1222,9 @@ export default function HandTracker(props: Props) {
       if (zooming) mode = 'zoom';
       else if (drawHand) {
         const byPose: Record<HandPose, UiMode> = {
-          none: 'draw',
-          open: 'draw',
-          draw: depthHand ? 'depth' : 'draw',
+          none: 'idle',
+          open: 'idle',
+          draw: 'select',
           select: 'select',
           pan: 'pan',
           grab: 'rotate',
@@ -1449,7 +1441,7 @@ export default function HandTracker(props: Props) {
       setCamInfo(null);
       setBackend(null);
     };
-  }, [cameraOn, breakChain, commitPoint]);
+  }, [cameraOn, breakChain]);
 
   // ── 음성 인식 ──
   const submitText = useCallback((text: string) => {
@@ -1627,7 +1619,7 @@ export default function HandTracker(props: Props) {
                 : 'X —  Y —  Z —'}
             </span>
             <span className={info.pinching ? 'text-[#ff1e42]' : ''}>
-              {`${info.pinching ? 'PINCH' : info.gesture || '—'} · 체인 ${info.chainLen}`}
+              {info.pinching ? 'PINCH' : info.gesture || '—'}
             </span>
           </div>
         )}

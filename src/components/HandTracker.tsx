@@ -165,6 +165,8 @@ const PINCH_CONFIRM_MS = 200;
 const PINCH_LOCK_LEAD_MS = 60;
 const PINCH_LOCK_MAX_BACK_MS = 350;
 const FIST_HOLD_MS = 350;
+/** 주먹을 편 뒤에도 이 시간 동안 커서 고정 (손가락 펴는 동안 검지 뿌리가 움직여서 커서가 튐) */
+const FIST_RELEASE_GRACE_MS = 150;
 const HANDS_LOST_RESET_MS = 1000;
 /**
  * 기하 주먹 보조 판정: 손끝 4개가 모두 손바닥 중심에서 (손 크기 × 이 값) 이내.
@@ -930,6 +932,8 @@ export default function HandTracker(props: Props) {
     prevRightStable: 'none' as HandPose,
     /** ✌️ 유지 중 마지막 커서. 주먹 쥐는 동안 손끝이 움직여도 조준점 고정 */
     selectCursor: null as Vec2 | null,
+    /** 주먹(또는 주먹으로 접는 중) 커서 고정 유지 시각 */
+    fistFreezeUntil: 0,
     /** 움켜쥐기 회전 세션 */
     rot: {
       active: false,
@@ -1247,11 +1251,16 @@ export default function HandTracker(props: Props) {
           (d.smoothCursor.x[1] - ACTIVE_Y[0]) / (ACTIVE_Y[1] - ACTIVE_Y[0]),
         ];
         let screenPos: Vec2 = [clamp(handScreen[0], 0, 1), clamp(handScreen[1], 0, 1)];
+        // 주먹 = 커서 고정: 원시 기하 주먹·자세 후보·확정 자세 중 하나라도 주먹이면 (+ 편 뒤 잠깐) 이동 누적 안 함
+        const fistNow =
+          (!!drawWorld && isGeometricFist(drawWorld)) || rightPose === 'fist' || d.rightPose.candidate === 'fist';
+        if (fistNow) d.fistFreezeUntil = now + FIST_RELEASE_GRACE_MS;
+        const cursorFrozen = now < d.fistFreezeUntil;
         if (CURSOR_SENSITIVITY < 1) {
           // 손 사라졌다 다시 나타남(오래) → 손 위치로 다시 맞춤
           if (!d.relCursor) d.relCursor = screenPos;
           // 커서가 숨는 자세(카메라 이동·움켜쥐기) 동안엔 멈춰 둠 → 다시 나타날 때 그 자리
-          else if (d.prevHandScreen && !NO_CURSOR_POSES.has(rightPose)) {
+          else if (d.prevHandScreen && !NO_CURSOR_POSES.has(rightPose) && !cursorFrozen) {
             d.relCursor = [
               clamp(d.relCursor[0] + (handScreen[0] - d.prevHandScreen[0]) * CURSOR_SENSITIVITY, 0, 1),
               clamp(d.relCursor[1] + (handScreen[1] - d.prevHandScreen[1]) * CURSOR_SENSITIVITY, 0, 1),

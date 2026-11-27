@@ -31,6 +31,12 @@ export default function App() {
       snap(rawPos[2]),
     ];
 
+    // StrictMode는 업데이터를 두 번 실행함 → ID·연결 시작점은 업데이터 밖에서 미리 고정
+    const fromId = isNewStroke ? null : lastDrawnNodeIdRef.current;
+    const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const newNodeId = `node_${uid()}`;
+    const beamId = `beam_${uid()}`;
+
     setStructure((prev) => {
       if (tool === 'draw') {
         const existing = prev.nodes.find(
@@ -39,7 +45,7 @@ export default function App() {
             0.15
         );
         const targetNode: NodePoint = existing ?? {
-          id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+          id: newNodeId,
           position: pos,
           isFixed: pos[1] <= 0.05,
           role: 'primary',
@@ -48,24 +54,28 @@ export default function App() {
         const nextNodes = existing ? prev.nodes : [...prev.nodes, targetNode];
         const nextBeams = [...prev.beams];
 
+        const duplicate = prev.beams.some(
+          (b) =>
+            (b.startNodeId === fromId && b.endNodeId === targetNode.id) ||
+            (b.startNodeId === targetNode.id && b.endNodeId === fromId)
+        );
         if (
-          !isNewStroke &&
-          lastDrawnNodeIdRef.current &&
-          lastDrawnNodeIdRef.current !== targetNode.id
+          fromId &&
+          fromId !== targetNode.id &&
+          !duplicate &&
+          nextNodes.some((n) => n.id === fromId)
         ) {
-          const prevNode = nextNodes.find((n) => n.id === lastDrawnNodeIdRef.current);
-          if (prevNode) {
-            nextBeams.push({
-              id: `beam_${Date.now()}`,
-              startNodeId: prevNode.id,
-              endNodeId: targetNode.id,
-              stress: 0.2,
-              color: prev.activeColor,
-              material: prev.activeMaterial,
-              role: 'primary',
-            });
-          }
+          nextBeams.push({
+            id: beamId,
+            startNodeId: fromId,
+            endNodeId: targetNode.id,
+            stress: 0.2,
+            color: prev.activeColor,
+            material: prev.activeMaterial,
+            role: 'primary',
+          });
         }
+        // 두 번 실행돼도 같은 값 → 안전
         lastDrawnNodeIdRef.current = targetNode.id;
         return { ...prev, nodes: nextNodes, beams: nextBeams };
       }

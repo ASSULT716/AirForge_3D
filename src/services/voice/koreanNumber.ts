@@ -109,3 +109,82 @@ export function extractAngleCandidates(text: string): AngleCandidate[] {
   }
   return out;
 }
+
+// ── 거리 후보 (늘리기·이동·복사) ──
+export interface DistanceCandidate {
+  /** Jev Choice 옵션 이름 (m_1_5) */
+  key: string;
+  meters: number;
+  phrase: string;
+}
+
+/** 칸 = 그리드 한 칸 (0.25m) */
+const GRID_CELL_M = 0.25;
+const NATIVE_COUNT: Record<string, number> = { 한: 1, 두: 2, 세: 3, 석: 3, 네: 4, 넉: 4, 다섯: 5, 여섯: 6 };
+const METER_UNIT = '(미터|메터|메다|m(?![a-z])|센티미터|센티|센치|cm|밀리미터|밀리|mm)';
+const unitToM = (u: string) => (/^(센티|센치|cm)/.test(u) ? 0.01 : /^(밀리|mm)/.test(u) ? 0.001 : 1);
+
+/**
+ * 텍스트에서 거리 후보를 전부 뽑음 (중복 제거). "2미터", "1.5m", "50센티", "이 미터", "반 미터", "세 칸"
+ */
+export function extractDistanceCandidates(text: string): DistanceCandidate[] {
+  const t = text.replace(/,/g, '').toLowerCase();
+  const out: DistanceCandidate[] = [];
+  const push = (m: number, phrase: string) => {
+    if (!Number.isFinite(m) || m <= 0 || m > 100) return;
+    m = Math.round(m * 1000) / 1000;
+    if (out.some((c) => c.meters === m)) return;
+    out.push({ key: `m_${String(m).replace('.', '_')}`, meters: m, phrase: phrase.trim() });
+  };
+  for (const x of t.matchAll(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${METER_UNIT}`, 'g'))) push(parseFloat(x[1]) * unitToM(x[2]), x[0]);
+  for (const x of t.matchAll(new RegExp(`([영일이삼사오육칠팔구십백]+)\\s*${METER_UNIT}`, 'g'))) {
+    const n = parseKoreanNumber(x[1]);
+    if (n !== null) push(n * unitToM(x[2]), x[0]);
+  }
+  const half = t.match(/반\s*(미터|m(?![a-z]))/);
+  if (half) push(0.5, half[0]);
+  for (const x of t.matchAll(/(\d+|한|두|세|석|네|넉|다섯|여섯)\s*칸/g)) {
+    const n = /^\d+$/.test(x[1]) ? parseInt(x[1], 10) : NATIVE_COUNT[x[1]];
+    if (n) push(n * GRID_CELL_M, x[0]);
+  }
+  return out;
+}
+
+/**
+ * 거리만 말한 발화인지 ("2미터", "1.5m로", "50센티만") → 미터. 다른 말이 섞여 있으면 null.
+ * 드래그 중·직후에 정확한 값 지정용 (스케치업 치수 입력칸). Jev 거치지 않음
+ */
+export function parseBareDistance(text: string): number | null {
+  const c = extractDistanceCandidates(text);
+  if (c.length !== 1) return null;
+  const rest = text
+    .toLowerCase()
+    .replace(c[0].phrase, '')
+    .replace(/(으로|로|만큼|정도|쯤|만|더|요|해줘|해|[\s.!?~])/g, '');
+  return rest === '' ? c[0].meters : null;
+}
+
+// ── 배율 후보 (크기 조절) ──
+export interface ScaleCandidate {
+  key: string;
+  factor: number;
+  phrase: string;
+}
+const NATIVE_TIMES: Record<string, number> = { 두: 2, 세: 3, 네: 4, 다섯: 5 };
+
+/** "2배", "1.5배", "두 배", "절반", "반으로" → 배율 */
+export function extractScaleCandidates(text: string): ScaleCandidate[] {
+  const t = text.replace(/,/g, '');
+  const out: ScaleCandidate[] = [];
+  const push = (f: number, phrase: string) => {
+    if (!Number.isFinite(f) || f <= 0 || f > 10 || f === 1) return;
+    f = Math.round(f * 100) / 100;
+    if (out.some((c) => c.factor === f)) return;
+    out.push({ key: `x_${String(f).replace('.', '_')}`, factor: f, phrase: phrase.trim() });
+  };
+  for (const x of t.matchAll(/(\d+(?:\.\d+)?)\s*배/g)) push(parseFloat(x[1]), x[0]);
+  for (const x of t.matchAll(/(두|세|네|다섯)\s*배/g)) push(NATIVE_TIMES[x[1]], x[0]);
+  const half = t.match(/절반|반\s*(으로|만|크기)/);
+  if (half) push(0.5, half[0]);
+  return out;
+}

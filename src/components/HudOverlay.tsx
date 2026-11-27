@@ -1,4 +1,4 @@
-//(우윤상)아이언맨 HUD + 하중/프리셋 버튼
+//(우윤상)아이언맨 HUD + 초기화 버튼
 import { StructureState, CadTool, CadMaterial, CameraControlState } from '../types/cad';
 
 interface Props {
@@ -15,13 +15,7 @@ interface Props {
   onReset: () => void;
 }
 
-export default function HudOverlay({
-  structure,
-  isReinforcing,
-  onToggleSimulation,
-  onReinforce,
-  onReset,
-}: Props) {
+export default function HudOverlay({ structure, onReset }: Props) {
   const maxStress = Math.round(
     structure.beams.reduce((max, b) => Math.max(max, b.stress), 0) * 100
   );
@@ -31,21 +25,8 @@ export default function HudOverlay({
       <div className="flex justify-between items-start">
         <div className="pointer-events-auto flex flex-wrap gap-2">
           <button
-            onClick={onToggleSimulation}
-            className="px-4 py-2 border border-cyan-400 bg-black/70 hover:bg-cyan-500/20 cursor-pointer"
-          >
-            {structure.isSimulating ? '시뮬레이션 정지' : '중력·하중 테스트'}
-          </button>
-          <button
-            onClick={onReinforce}
-            disabled={isReinforcing}
-            className="px-4 py-2 border border-cyan-400 bg-black/70 hover:bg-cyan-500/20 cursor-pointer disabled:opacity-50"
-          >
-            {isReinforcing ? 'AI 연산 중...' : `AI 구조 보강 (${structure.targetLoadKg}kg)`}
-          </button>
-          <button
             onClick={onReset}
-            className="px-3 py-2 border border-red-400/60 text-red-300 bg-black/70 hover:bg-red-500/20 cursor-pointer"
+            className="px-3.5 py-2 bg-white/95 hover:bg-rose-50 border border-slate-300 text-slate-700 hover:text-rose-700 font-bold text-xs rounded-xl shadow-sm cursor-pointer transition"
           >
             초기화
           </button>

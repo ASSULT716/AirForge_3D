@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { CadTool } from '../types/cad';
 import { createHandDetector, type HandDetector, type HandFrame } from '../services/handDetector';
 import { cameraGesture, pushCameraOrbit, pushCameraPan } from '../services/cameraGesture';
-import { handQuat, pickAxis, snapDeg, twistDeg, viewAxisToWorld, type Axis } from '../services/handRotate';
+import { detentDeg, handQuat, pickAxis, snapDeg, twistDeg, viewAxisToWorld, type Axis } from '../services/handRotate';
 
 /** 움켜쥐기 회전 이벤트. axis = 월드 축 (축 잠금 전엔 null), deg = 잡은 순간 대비 누적 각도 */
 export interface ObjectRotateEvent {
@@ -14,13 +14,32 @@ export interface ObjectRotateEvent {
   deg: number;
 }
 
+/**
+ * 핀치 = 마우스 버튼. down = 핀치 확정(200ms), move = 핀치 유지한 채 손 이동, up = 놓음.
+ * screen = 화면 좌표 (0~1). down 지점은 모으기 직전 위치로 고정, move는 그 지점 + 손 이동량
+ */
+export interface PointerEvent2 {
+  phase: 'down' | 'move' | 'up';
+  screen: [number, number];
+}
+
+/** 음성 해석 결과 표시 (HandBridge가 채움). pending = "맞나요?" 확인 대기 */
+export interface VoiceFeedback {
+  label: string;
+  tone: 'ok' | 'warn' | 'error' | 'info';
+  pending?: boolean;
+}
+
 interface Props {
   activeTool: CadTool;
   /** 핀치 확정 시 호출. 스냅·기존 노드 병합·빔 연결은 App이 처리 */
   onPinchAction: (tool: CadTool, rawPos: [number, number, number], isNewStroke?: boolean) => void;
-  /** 음성 최종 텍스트 / 직접 입력 → App(executeNaturalCommand)이 해석 */
+  /** 음성 최종 텍스트 / 직접 입력 → HandBridge가 Jev로 해석 (빠른 조작 외엔 Groq로 전달) */
   onVoiceCommand: (rawText: string) => void;
-  /** 3D 씬에 커서 표시용. 스냅된 월드 좌표가 바뀔 때만 호출 (손 없으면 null) */
+  voiceFeedback?: VoiceFeedback | null;
+  /** 확인 대기 명령 실행(true) / 취소(false) */
+  onVoiceConfirm?: (ok: boolean) => void;
+  /** 3D 씬에 커서 표시용. 화면 좌표가 바뀔 때만 호출 (손 없으면 null) */
   onCursor?: (cursor: HandCursorState | null) => void;
   /** 양손 펴고 벌리기/모으기 → 카메라 줌. factor > 1 확대, < 1 축소 (프레임 간 상대 배율) */
   onCameraZoom?: (factor: number) => void;
@@ -29,6 +48,8 @@ interface Props {
    * 가리키는 대상 판정은 화면 투영이 필요해서 SceneCanvas가 함 (HandTracker는 커서만 보냄)
    */
   onSelect?: () => void;
+  /** 핀치 down/move/up (선택·드래그 편집). 없으면 핀치 = onSelect */
+  onPointer?: (e: PointerEvent2) => void;
   /**
    * 움켜쥐기 회전 (축 잠금). start = 잡음(원본 저장 시점), update = 축 잠긴 뒤 각도 변화, end = 놓음(15° 스냅된 최종값).
    * end에서 axis가 null이면 축 판정 전에 놓은 것 → 변화 없음
@@ -37,8 +58,8 @@ interface Props {
 }
 
 export interface HandCursorState {
-  /** 핀치 시 노드가 찍힐 스냅 좌표 */
-  position: [number, number, number];
+  /** 화면 좌표 (0~1, 좌상단 원점). 마우스 포인터처럼 3D 씬 캔버스 전체에 대응 */
+  screen: [number, number];
   pinching: boolean;
   /** true면 다음 핀치가 직전 노드와 빔으로 이어짐 */
   chainActive: boolean;
@@ -47,19 +68,28 @@ export interface HandCursorState {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 설정값 (SceneCanvas 카메라 확정되면 WORLD_* 범위만 맞추면 됨)
+// 설정값
 // ─────────────────────────────────────────────────────────────
-const GRID = 0.25;
-const WORLD_X: [number, number] = [-4, 4];
-const WORLD_Y: [number, number] = [0, 4]; // 화면 아래 = 지면(y=0)
-const WORLD_Z: [number, number] = [-2, 2];
+/** 커서 화면 좌표 단위 (0~1). 1/1000 = 1080p에서 ~1px → 변화 감지만 줄이고 정밀도는 유지 */
+const CURSOR_STEP = 0.001;
 /** 오른손 커서가 움직이는 카메라 영역(정규화, 거울 기준). 화면 끝까지 손 뻗지 않아도 되게 */
 const ACTIVE_X: [number, number] = [0.15, 0.85];
 const ACTIVE_Y: [number, number] = [0.1, 0.9];
-/** 왼손 손목 높이 → z 매핑 영역. 손 올리면 화면 안쪽(-z) */
-const DEPTH_Y: [number, number] = [0.2, 0.8];
-
-const EMA_ALPHA = 0.35; // 클수록 반응 빠름, 작을수록 부드러움
+/**
+ * 커서 감도 (1 = 손 위치를 화면에 그대로 대응, 0.5 = 손을 2배 움직여야 같은 거리).
+ * 1 미만이면 마우스처럼 상대 이동: 손 이동량 × 감도만큼 커서가 움직이고 화면 끝에서 멈춤 (끝에서 손을 더 밀면 위치가 다시 맞춰짐).
+ * 손이 HANDS_LOST_RESET_MS 이상 사라졌다 나타나면 손 위치로 다시 맞춤
+ */
+const CURSOR_SENSITIVITY = 0.5;
+/**
+ * 커서 One Euro 필터 (정규화 화면 좌표 기준).
+ * 멈춰 있으면 컷오프 ≈ MIN_CUTOFF → 떨림 강하게 제거, 빠르게 움직이면 컷오프↑ → 지연 적음
+ */
+const CURSOR_MIN_CUTOFF = 1.2; // Hz. 작을수록 정지 시 더 안정
+const CURSOR_BETA = 8; // 속도 반응. 클수록 빠른 움직임에 덜 끌림
+const CURSOR_D_CUTOFF = 1; // Hz. 속도 추정 스무딩
+/** 커서 기준 랜드마크: 5 = 검지 뿌리 관절 (핀치 동작에 영향 거의 없음) */
+const CURSOR_LM = 5;
 const PINCH_ON = 0.15; // (엄지-검지 거리) / (손목-중지MCP 거리). 손끝이 실제로 닿아야 ~0.15 이하
 const PINCH_OFF = 0.3;
 const PINCH_COOLDOWN_MS = 250;
@@ -75,8 +105,12 @@ const ROT_LOCK_DEG = 12;
 const ROT_LOCK_RATIO = 1.8;
 /** 출력 각도 데드존: 이보다 작은 변화는 무시 (손떨림) */
 const ROT_DEADZONE_DEG = 2;
-/** 놓을 때 스냅 단위 */
+/** 놓을 때 스냅 단위 (회전 중 걸림 간격도 같음) */
 const ROT_SNAP_DEG = 15;
+/** 회전 중 걸림: 스냅 각도 ±이 범위 안이면 그 각도에 붙어 있음 (클수록 강하게 걸림, ROT_SNAP_DEG/2 미만) */
+const ROT_DETENT_HOLD_DEG = 6.5;
+/** 90° 배수는 더 강하게 걸림 (±이 범위). 이웃 15° 구간과 겹치면 중간값 없이 바로 다음 걸림으로 점프 (가장 딱딱함) */
+const ROT_DETENT_STRONG_DEG = 11;
 /**
  * 인식은 20~30Hz라 각도가 계단식으로 들어옴 → 화면 프레임마다 목표 각도로 보간해서 보냄.
  * 이 시간(≈인식 간격)에 걸쳐 따라감. 너무 크면 손보다 늦게 따라옴
@@ -123,6 +157,13 @@ function stepDrag(t: DragTrack, lm: NormalizedLandmark[]): [number, number] | nu
 }
 /** 핀치가 이 시간 이상 유지돼야 노드 확정 (주먹 쥐는 도중 엄지·검지가 스치는 오인식 방지) */
 const PINCH_CONFIRM_MS = 200;
+/**
+ * 핀치 손떨림 보정: 엄지·검지를 모으는 동작 자체가 커서를 흔듦 → 모으기 시작하기 직전 위치를 찍음.
+ * 모으기 시작 = 핀치 비율이 PINCH_OFF 아래로 내려간 순간. 그보다 LEAD_MS 앞의 커서를 사용
+ * (단, 핀치 시작보다 MAX_BACK_MS 이상 과거로는 안 감 → 손가락 붙인 채 조준해도 오래된 위치 안 찍힘)
+ */
+const PINCH_LOCK_LEAD_MS = 60;
+const PINCH_LOCK_MAX_BACK_MS = 350;
 const FIST_HOLD_MS = 350;
 const HANDS_LOST_RESET_MS = 1000;
 /**
@@ -146,6 +187,8 @@ const ZOOM_GAIN = 1.6;
 // ── 자세 분류 (docs/gesture-spec.md) ──
 /** 같은 자세가 이 시간 유지돼야 모드 전환 (손가락 하나 차이 자세끼리 깜빡임 방지) */
 const POSE_HOLD_MS = 200;
+/** 움켜쥐기(회전 모드 진입)만 더 길게: 손 펴고 오므리는 중간 자세가 잠깐 grab으로 잡혀 의도치 않게 회전 들어가는 것 방지 */
+const GRAB_HOLD_MS = 450;
 /** 엄지 펴짐 비율 = (엄지끝↔새끼MCP) / (손목↔중지MCP). 접어서 손바닥에 붙이면 작아짐. 히스테리시스 */
 const THUMB_OUT = 0.82;
 const THUMB_IN = 0.74;
@@ -169,15 +212,29 @@ const GRAB_MIN_GAP = 0.3;
 // ─────────────────────────────────────────────────────────────
 // 순수 유틸
 // ─────────────────────────────────────────────────────────────
-type Vec3 = [number, number, number];
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-const invLerp = (lo: number, hi: number, v: number) => clamp((v - lo) / (hi - lo), 0, 1);
-const snap = (v: number) => {
-  const s = Math.round(v / GRID) * GRID;
-  return s === 0 ? 0 : s; // -0 제거
-};
+type Vec2 = [number, number];
+const quantize = (v: number) => Math.round(v / CURSOR_STEP) * CURSOR_STEP;
+
+/** One Euro 필터 (Casiez et al. 2012), 2D */
+interface OneEuro2 {
+  x: Vec2;
+  dx: Vec2;
+  t: number;
+}
+const smoothAlpha = (cutoff: number, dt: number) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+function oneEuroStep(f: OneEuro2 | null, raw: Vec2, now: number): OneEuro2 {
+  if (!f) return { x: raw, dx: [0, 0], t: now };
+  const dt = Math.max(1e-3, (now - f.t) / 1000);
+  const aD = smoothAlpha(CURSOR_D_CUTOFF, dt);
+  const dx: Vec2 = [0, 1].map((i) => lerp(f.dx[i], (raw[i] - f.x[i]) / dt, aD)) as Vec2;
+  const cutoff = CURSOR_MIN_CUTOFF + CURSOR_BETA * Math.hypot(dx[0], dx[1]);
+  const a = smoothAlpha(cutoff, dt);
+  return { x: [lerp(f.x[0], raw[0], a), lerp(f.x[1], raw[1], a)], dx, t: now };
+}
+
 const dist = (a: NormalizedLandmark, b: NormalizedLandmark) => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** 엄지·검지 거리를 손 크기로 정규화 → 카메라 거리와 무관한 핀치 비율 */
@@ -334,22 +391,24 @@ function stepPose(h: PoseHold, r: PoseResult, now: number) {
   if (r.pose !== h.candidate) {
     h.candidate = r.pose;
     h.since = now;
-  } else if (r.pose !== h.stable && now - h.since >= POSE_HOLD_MS) {
+  } else if (r.pose !== h.stable && now - h.since >= (r.pose === 'grab' ? GRAB_HOLD_MS : POSE_HOLD_MS)) {
     h.stable = r.pose;
   }
 }
 
 /** HUD에 보여줄 현재 모드 */
-type UiMode = 'idle' | 'draw' | 'depth' | 'select' | 'pan' | 'rotate' | 'fist' | 'zoom';
+type UiMode = 'idle' | 'draw' | 'depth' | 'select' | 'pan' | 'orbit' | 'rotate' | 'fist' | 'zoom' | 'drag';
 const MODE_LABEL: Record<UiMode, string> = {
   idle: '—',
   draw: '그리기',
   depth: '깊이',
   select: '선택',
   pan: '카메라 이동',
-  rotate: '회전',
+  orbit: '카메라 회전',
+  rotate: '물체 회전',
   fist: '주먹',
   zoom: '줌',
+  drag: '잡고 끌기',
 };
 const MODE_COLOR: Record<UiMode, string> = {
   idle: '#5f8f99',
@@ -357,9 +416,11 @@ const MODE_COLOR: Record<UiMode, string> = {
   depth: '#b478ff',
   select: '#7dff8a',
   pan: '#ffd54a',
+  orbit: '#b478ff',
   rotate: '#ff9f43',
   fist: '#ff1e42',
   zoom: '#ffd54a',
+  drag: '#ff1e42',
 };
 /** 이 모드에선 핀치(노드 찍기) 안 함 */
 const NO_PINCH_POSES: ReadonlySet<HandPose> = new Set(['select', 'pan', 'grab']);
@@ -371,8 +432,8 @@ const NO_CURSOR_POSES: ReadonlySet<HandPose> = new Set(['pan', 'grab']);
 // ─────────────────────────────────────────────────────────────
 const POSE_LABEL: Record<HandPose, string> = {
   none: '미분류',
-  draw: '그리기',
-  select: '선택(✌️)',
+  draw: '핀치 선택',
+  select: '선택(V)',
   pan: '3손가락',
   fist: '주먹',
   open: '펼침',
@@ -455,24 +516,44 @@ const rotObserve = (s: PoseSnapshot) =>
         : '손 없음'
     : `${AXIS_LABEL[s.rotView]}축 ${Math.round(s.rotViewDeg)}°`;
 const GESTURE_TEST_STEPS: GestureTestStep[] = [
-  { id: 'draw', title: '그리기', how: '오른손 엄지·검지만 펴고 중·약·새끼 접기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, X, X, X] }] }, check: (s) => s.right === 'draw' },
-  { id: 'select', title: '선택 커서', how: '오른손 ✌️ (검지·중지만, 엄지는 접기)', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }] }, check: (s) => s.right === 'select' },
+  { id: 'draw', title: '핀치 선택', how: '오른손 엄지·검지만 펴고 중·약·새끼 접기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, X, X, X] }] }, check: (s) => s.right === 'draw' },
+  { id: 'select', title: '선택 커서', how: '오른손 V자 (검지·중지만, 엄지는 접기)', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }] }, check: (s) => s.right === 'select' },
   {
     id: 'select_fist',
     title: '선택 확정 (동작)',
-    how: '✌️ 유지하다가 그대로 주먹 쥐기',
+    how: 'V자 유지하다가 그대로 주먹 쥐기',
     hand: 'right',
     glyph: { hands: [{ side: 'right', fingers: [X, O, O, X, X] }, { side: 'right', fingers: [X, X, X, X, X] }] },
     instant: true,
     check: (s, b) => s.selectFires > b.selectFires,
   },
-  { id: 'pan', title: '카메라 이동', how: '오른손 엄지·검지·중지 펴기', hand: 'right', glyph: { hands: [{ side: 'right', fingers: [O, O, O, X, X] }], arrows: 'drag' }, check: (s) => s.right === 'pan' },
+  {
+    id: 'pan',
+    title: '카메라 이동',
+    how: '양손 보이게. 왼손은 펴고, 오른손 엄지·검지·중지 펴기',
+    hand: 'right',
+    glyph: {
+      hands: [
+        { side: 'right', fingers: [O, O, O, X, X] },
+        { side: 'left', fingers: [O, O, O, O, O], dim: true },
+      ],
+      arrows: 'drag',
+    },
+    check: (s) => s.mode === 'pan',
+    observe: (s) => (s.mode === 'pan' ? '카메라 이동' : s.right === 'pan' ? '오른손 OK · 왼손을 펴기' : s.right ? POSE_LABEL[s.right] : '손 없음'),
+  },
   {
     id: 'pan_drag',
     title: '카메라 이동 (동작)',
-    how: '오른손 3손가락 편 채로 좌우로 크게 움직이기',
+    how: '왼손 편 채로, 오른손 3손가락을 좌우로 크게 움직이기',
     hand: 'right',
-    glyph: { hands: [{ side: 'right', fingers: [O, O, O, X, X] }], arrows: 'drag' },
+    glyph: {
+      hands: [
+        { side: 'right', fingers: [O, O, O, X, X] },
+        { side: 'left', fingers: [O, O, O, O, O], dim: true },
+      ],
+      arrows: 'drag',
+    },
     instant: true,
     check: (s, b) => s.panTravel - b.panTravel >= 0.15,
     observe: (s, b) => `${s.right ? POSE_LABEL[s.right] : '손 없음'} · 이동 ${Math.round(((s.panTravel - b.panTravel) / 0.15) * 100)}%`,
@@ -504,7 +585,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
   {
     id: 'orbit',
     title: '카메라 회전',
-    how: '양손 보이게. 오른손은 펴거나 ✌️, 왼손 엄지·검지·중지 펴기',
+    how: '양손 보이게. 오른손은 펴고, 왼손 엄지·검지·중지 펴기',
     hand: 'left',
     glyph: {
       hands: [
@@ -518,7 +599,7 @@ const GESTURE_TEST_STEPS: GestureTestStep[] = [
   {
     id: 'orbit_drag',
     title: '카메라 회전 (동작)',
-    how: '왼손 3손가락 편 채로 좌우로 크게 움직이기',
+    how: '오른손 편 채로, 왼손 3손가락을 좌우로 크게 움직이기',
     hand: 'left',
     glyph: {
       hands: [
@@ -608,7 +689,7 @@ function observedLabel(step: GestureTestStep, s: PoseSnapshot): string {
   if (step.hand === 'both') return s.mode === 'zoom' ? '줌' : `오른 ${s.right ? POSE_LABEL[s.right] : '없음'} / 왼 ${s.left ? POSE_LABEL[s.left] : '없음'}`;
   const p = step.hand === 'right' ? s.right : s.left;
   if (!p) return step.hand === 'right' ? '손 안 보임' : '왼손 안 보임';
-  if (step.hand === 'left' && p === 'pan' && !s.orbit) return '3손가락 (오른손이 그리기 자세라 무시됨)';
+  if (step.hand === 'left' && p === 'pan' && !s.orbit) return '3손가락 (오른손이 핀치 선택 자세라 무시됨)';
   return POSE_LABEL[p];
 }
 
@@ -683,7 +764,7 @@ function tickGestureTest(test: GestureTest, s: PoseSnapshot, now: number) {
 function formatTestResults(results: TestResult[]) {
   const pass = results.filter((r) => r.pass).length;
   const lines = results.map((r) => {
-    const mark = r.pass ? '✓' : r.skipped ? '-' : '✗';
+    const mark = r.pass ? 'O' : r.skipped ? '-' : 'X';
     const time = r.timeMs != null ? ` ${(r.timeMs / 1000).toFixed(1)}s` : '';
     const tg = r.t != null ? ` t${r.t.toFixed(2)} s${r.s!.toFixed(2)}` : '';
     const miss = !r.pass && r.topMiss ? ` → ${r.topMiss} ${Math.round(r.missPct * 100)}%` : '';
@@ -704,6 +785,13 @@ interface TestUi {
   live: GlyphHand[];
   results: TestResult[];
 }
+
+const VOICE_TONE: Record<VoiceFeedback['tone'], string> = {
+  ok: 'text-[#00f3ff]',
+  warn: 'text-[#ff9f43]',
+  error: 'text-[#ff1e42]',
+  info: 'text-cyan-200/70',
+};
 
 // ── Web Speech API 최소 타입 (lib.dom에 없음) ──
 interface SpeechResultAlt { transcript: string }
@@ -747,7 +835,7 @@ const SOFTWARE_GL = /swiftshader|llvmpipe|software|basic render/i;
 type TrackStatus = 'off' | 'loading' | 'tracking' | 'error';
 
 interface HudInfo {
-  cursor: Vec3 | null;
+  cursor: Vec2 | null;
   pinching: boolean;
   hands: number;
   chainLen: number;
@@ -797,7 +885,10 @@ export default function HandTracker(props: Props) {
   /** delegate + 실행 위치(워커/메인) + WebGL 렌더러 (소프트웨어 렌더러면 경고) */
   const [backend, setBackend] = useState<{ delegate: string; worker: boolean; gl: string; soft: boolean } | null>(null);
   /** 웹캠이 실제로 협상한 해상도·fps (요청값과 다를 수 있음 → 60 안 나오면 카메라 하드웨어 한계) */
-  const [camInfo, setCamInfo] = useState<{ w: number; h: number; fps: number } | null>(null);
+  /** max = 카메라가 지원한다고 알린 최대 fps (getCapabilities, 미지원 브라우저면 0) */
+  const [camInfo, setCamInfo] = useState<{ w: number; h: number; fps: number; max: number } | null>(null);
+  /** 카메라가 실제로 보내주는 프레임 수 (1초마다 측정). 설정값은 60이어도 어두우면 노출 때문에 30으로 떨어지는 경우가 많음 */
+  const [camRealFps, setCamRealFps] = useState(0);
 
   const [micOn, setMicOn] = useState(false);
   const [voiceText, setVoiceText] = useState('');
@@ -807,13 +898,26 @@ export default function HandTracker(props: Props) {
 
   // ── 그리기 상태 (렌더와 무관하므로 ref) ──
   const draw = useRef({
-    smoothCursor: null as [number, number] | null, // 정규화 화면좌표 EMA
-    smoothDepth: 0.5, // 왼손 높이 EMA (0~1)
-    zLayer: 0,
+    smoothCursor: null as OneEuro2 | null, // 정규화 화면좌표 (One Euro)
+    /** 상대 이동 커서 (화면 0~1) / 직전 프레임 손 위치 (활성 영역 기준) */
+    relCursor: null as Vec2 | null,
+    prevHandScreen: null as Vec2 | null,
     pinching: false,
     lastPinchAt: 0,
     pinchSince: 0,
     pinchCommitted: false,
+    /** 최근 커서 기록 (핀치 직전 위치 찾기용, ~0.5초) */
+    cursorHist: [] as { t: number; p: Vec2 }[],
+    /** 엄지·검지가 모이기 시작한 시각 (비율이 PINCH_OFF 아래로 내려간 순간) */
+    closeStart: 0,
+    prevPinchRatio: 1,
+    /** 핀치 중 고정된 찍을 위치 */
+    pinchPos: null as Vec2 | null,
+    /** 핀치 확정 후 놓기 전까지 (마우스 버튼 눌림) */
+    pointerDown: false,
+    /** 핀치 확정 순간의 실제 커서 (드래그 이동량 기준) */
+    pointerOrigin: null as Vec2 | null,
+    lastPointer: null as Vec2 | null,
     fistSince: 0,
     lastHandsAt: 0,
     chainLen: 0, // 현재 스트로크 노드 수 (0 = 다음 핀치가 새 스트로크)
@@ -825,7 +929,7 @@ export default function HandTracker(props: Props) {
     lastSelectAt: 0,
     prevRightStable: 'none' as HandPose,
     /** ✌️ 유지 중 마지막 커서. 주먹 쥐는 동안 손끝이 움직여도 조준점 고정 */
-    selectCursor: null as Vec3 | null,
+    selectCursor: null as Vec2 | null,
     /** 움켜쥐기 회전 세션 */
     rot: {
       active: false,
@@ -841,9 +945,13 @@ export default function HandTracker(props: Props) {
       emitted: 0,
       /** 잠긴 화면 축 기준 각도 (TEST 채점용, 월드 부호 미적용) */
       viewDeg: 0,
+      /** 회전 중 오른손이 마지막으로 보인 시각 */
+      seenAt: 0,
     },
     panDrag: newDrag(),
     orbitDrag: newDrag(),
+    /** 카메라 조작 잠금: 먼저 시작한 쪽이 끝날 때까지 다른 모드(팬·오빗·물체 회전) 진입 금지 */
+    camMode: null as 'pan' | 'orbit' | null,
     /** TEST 채점용 누적 카운터 (테스트 중에도 증가, 실제 동작만 막음) */
     selectFires: 0,
     panTravel: 0,
@@ -879,17 +987,6 @@ export default function HandTracker(props: Props) {
     };
   }, [breakChain]);
 
-  // ── 핀치 확정 → App에 도구 동작 위임 ──
-  const commitPoint = useCallback((pos: Vec3): string => {
-    const d = draw.current;
-    const tool = propsRef.current.activeTool;
-    const isNewStroke = d.chainLen === 0;
-    propsRef.current.onPinchAction(tool, pos, isNewStroke);
-    if (tool !== 'draw') return tool;
-    d.chainLen += 1;
-    return isNewStroke ? (pos[1] <= 0 ? '고정 노드에서 시작' : '스트로크 시작') : '빔 연결';
-  }, []);
-
   // ── 카메라 + MediaPipe 루프 ──
   useEffect(() => {
     if (!cameraOn) return;
@@ -906,6 +1003,7 @@ export default function HandTracker(props: Props) {
     let pending = false;
     let submittedAt = 0;
     let lastInfoKey = '';
+    let lastCursorKey = '';
     let lastHint = '';
     let lastTestKey = '';
     let testWasActive = false;
@@ -950,17 +1048,23 @@ export default function HandTracker(props: Props) {
     const ctx = canvas.getContext('2d')!;
 
     const pushInfo = (next: HudInfo) => {
-      const k = `${next.cursor?.join(',')}|${next.pinching}|${next.hands}|${next.chainLen}|${next.hint}|${next.gesture}|${next.mode}|${next.orbit}|${next.rot}`;
+      // 커서는 촘촘하게 움직이므로 씬 커서(onCursor)는 매번 갱신, HUD 리렌더(setInfo)는 1% 단위로만
+      const coarse = next.cursor?.map((v) => Math.round(v * 100)).join(',');
+      const k = `${coarse}|${next.pinching}|${next.hands}|${next.chainLen}|${next.hint}|${next.gesture}|${next.mode}|${next.orbit}|${next.rot}`;
+      const ck = `${next.cursor?.join(',')}|${next.pinching}|${next.chainLen}`;
       if (k !== lastInfoKey) {
         lastInfoKey = k;
         setInfo(next);
+      }
+      if (ck !== lastCursorKey) {
+        lastCursorKey = ck;
         propsRef.current.onCursor?.(
           next.cursor
             ? {
-                position: next.cursor,
+                screen: next.cursor,
                 pinching: next.pinching,
                 chainActive: next.chainLen > 0,
-                selecting: next.mode === 'select',
+                selecting: true, // 그리기 기능 제거 → 커서는 항상 선택용
               }
             : null,
         );
@@ -986,6 +1090,8 @@ export default function HandTracker(props: Props) {
 
       if (hands.length > 0) d.lastHandsAt = now;
       else if (d.chainLen > 0 && now - d.lastHandsAt > HANDS_LOST_RESET_MS) breakChain();
+      // 손이 오래 안 보였으면 상대 커서를 손 위치로 다시 맞춤
+      if (!hands.length && now - d.lastHandsAt > HANDS_LOST_RESET_MS) d.relCursor = null;
 
       // ── 자세 분류 (200ms 유지돼야 stable 갱신) ──
       const drawWorld = drawIdx >= 0 ? res.worldLandmarks[drawIdx] : undefined;
@@ -997,7 +1103,8 @@ export default function HandTracker(props: Props) {
       const rightPose = d.rightPose.stable;
 
       // ── ✌️ → 주먹 = 선택 확정 ──
-      if (rightPose === 'select') d.lastSelectAt = now;
+      // 회전 중 옆으로 세운 손이 ✌️로 오인되면 확정 주먹이 선택으로 번짐 → 회전 중엔 기록 안 함
+      if (rightPose === 'select' && !d.rot.active) d.lastSelectAt = now;
       if (rightPose === 'fist' && d.prevRightStable !== 'fist' && now - d.lastSelectAt < SELECT_FIST_WINDOW_MS) {
         d.selectFires += 1;
         if (!d.test.active) {
@@ -1008,14 +1115,20 @@ export default function HandTracker(props: Props) {
       }
       d.prevRightStable = rightPose;
 
-      // ── 움켜쥐기 → 회전 (축 잠금, 1:1, 놓으면 15° 스냅) ──
+      // ── 움켜쥐기 → 회전 (축 잠금, 1:1, 주먹 쥐면 15° 스냅 확정) ──
+      // 한번 들어가면 주먹 전까지 유지: 손을 옆으로 세우면 움켜쥐기 인식이 자주 풀려서 자세로 유지 판정하면 끊김
       const r = d.rot;
       // 테스트 중엔 각도 계산만 하고 구조물엔 적용 안 함
       const emitRot = (e: ObjectRotateEvent) => !d.test.active && propsRef.current.onObjectRotate?.(e);
       // 줌 중엔 회전 안 함 (양손 펼침 = 줌이 우선)
-      if (rightPose === 'grab' && drawWorld && !d.zoom.active) {
+      if (r.active && drawWorld) r.seenAt = now;
+      const rotStart = !r.active && rightPose === 'grab' && !!drawWorld && !d.zoom.active && !d.camMode;
+      // 주먹 = 확정. 손이 화면 밖으로 오래 나가도 확정 (안 그러면 회전 모드에 갇힘)
+      const rotHold = r.active && rightPose !== 'fist' && now - r.seenAt < HANDS_LOST_RESET_MS;
+      if ((rotStart || rotHold) && drawWorld) {
         const qNow = handQuat(drawWorld);
         if (!r.active) {
+          r.seenAt = now;
           r.active = true;
           r.q0.copy(qNow);
           r.qSmooth.copy(qNow);
@@ -1041,14 +1154,20 @@ export default function HandTracker(props: Props) {
           if (r.view !== null) r.viewDeg = tw[r.view];
           if (r.view !== null && r.world) {
             const raw = tw[r.view] * r.world.sign;
+            // 15°마다 탁 걸림 → 정확한 각도에 맞추기 쉬움
+            const target = detentDeg(raw, ROT_SNAP_DEG, ROT_DETENT_HOLD_DEG, ROT_DETENT_STRONG_DEG);
+            const onDetent = target === snapDeg(target, ROT_SNAP_DEG);
             // 목표 각도만 갱신. 실제 전달은 animateRot이 화면 프레임마다 보간해서 함
-            if (Math.abs(raw - r.out) > ROT_DEADZONE_DEG) r.out = raw;
+            // 걸림 각도는 데드존 무시하고 바로 붙임 (안 그러면 13.5° 같은 데서 멈춤)
+            if (onDetent ? target !== r.out : Math.abs(target - r.out) > ROT_DEADZONE_DEG) r.out = target;
           }
         }
-      } else if (r.active) {
+      } else if (r.active && !rotHold) {
         r.active = false;
         const final = r.world ? snapDeg(r.out, ROT_SNAP_DEG) : 0;
         emitRot({ phase: 'end', axis: r.world?.axis ?? null, deg: final });
+        // 확정한 주먹이 ✌️→주먹 선택으로 이어지지 않게
+        d.lastSelectAt = 0;
         lastHint = r.world
           ? `회전 확정: ${r.world.axis.toUpperCase()}축 ${final >= 0 ? '+' : ''}${final}°`
           : '회전 취소 (축 판정 전에 놓음)';
@@ -1061,9 +1180,10 @@ export default function HandTracker(props: Props) {
         const w = res.worldLandmarks[i];
         return !!w && isGeometricOpen(w);
       };
-      // 오른손 중지·약지·소지가 접힌 자세(draw)가 유지되면 = 깊이 조절 → 왼손 z가 우선, 줌 진입 금지
-      const depthPriority = rightPose === 'draw';
+      // 오른손이 조준(draw·select) 자세면 줌·카메라 회전 진입 금지 (조준 중 화면이 움직이면 안 됨)
+      const depthPriority = rightPose === 'draw' || rightPose === 'select';
       const bothOpen =
+        !d.rot.active &&
         !depthPriority && !!drawHand && !!depthHand && isOpen(drawIdx) && isOpen(depthIdx);
       if (bothOpen) {
         z.offSince = 0;
@@ -1078,6 +1198,7 @@ export default function HandTracker(props: Props) {
             z.total = 1;
             d.pinching = false;
             d.smoothCursor = null;
+            d.prevHandScreen = null;
             lastHint = '줌 모드: 벌리면 확대 / 모으면 축소';
           }
         } else {
@@ -1105,30 +1226,41 @@ export default function HandTracker(props: Props) {
       }
       const zooming = z.active;
 
-      // 왼손 → z 레이어: 오른손이 깊이 자세일 때만 갱신 (그 외엔 고정 → 줌 시작 동작과 안 겹침)
-      if (depthHand && depthPriority && !zooming) {
-        d.smoothDepth = lerp(d.smoothDepth, depthHand[0].y, EMA_ALPHA);
-        const t = invLerp(DEPTH_Y[0], DEPTH_Y[1], d.smoothDepth); // 0=위, 1=아래
-        d.zLayer = snap(lerp(WORLD_Z[0], WORLD_Z[1], t));
-      }
-
-      let cursor: Vec3 | null = null;
+      let cursor: Vec2 | null = null;
       if (zooming) {
         // 줌 중엔 그리기 정지: 커서 숨김 + 핀치/주먹 판정 안 함
         d.smoothCursor = null;
+        d.prevHandScreen = null;
         d.pinching = false;
         d.fistSince = 0;
       } else if (drawHand) {
-        // 엄지·검지 중간점 = 커서 (핀치할 때 커서가 튀지 않음)
-        const rawX = 1 - (drawHand[4].x + drawHand[8].x) / 2;
-        const rawY = (drawHand[4].y + drawHand[8].y) / 2;
-        d.smoothCursor = d.smoothCursor
-          ? [lerp(d.smoothCursor[0], rawX, EMA_ALPHA), lerp(d.smoothCursor[1], rawY, EMA_ALPHA)]
-          : [rawX, rawY];
+        // 커서 = 검지 뿌리 관절(index_mcp, 5번). 엄지·검지를 모아도 거의 안 움직임
+        // (손끝 중간점은 엄지가 더 많이 움직이고 손끝이 겹치면 인식도 흔들려서 핀치할 때 커서가 떨렸음)
+        const rawX = 1 - drawHand[CURSOR_LM].x;
+        const rawY = drawHand[CURSOR_LM].y;
+        d.smoothCursor = oneEuroStep(d.smoothCursor, [rawX, rawY], now);
 
-        const tx = invLerp(ACTIVE_X[0], ACTIVE_X[1], d.smoothCursor[0]);
-        const ty = invLerp(ACTIVE_Y[0], ACTIVE_Y[1], d.smoothCursor[1]);
-        const snapped: Vec3 = [snap(lerp(WORLD_X[0], WORLD_X[1], tx)), snap(lerp(WORLD_Y[1], WORLD_Y[0], ty)), d.zLayer];
+        // 카메라 활성 영역 → 3D 씬 화면 전체 (마우스 포인터처럼 깊이 없음. 카메라 시점과 무관)
+        // 활성 영역 밖도 그대로 (상대 이동 계산용, 절대 위치는 clamp)
+        const handScreen: Vec2 = [
+          (d.smoothCursor.x[0] - ACTIVE_X[0]) / (ACTIVE_X[1] - ACTIVE_X[0]),
+          (d.smoothCursor.x[1] - ACTIVE_Y[0]) / (ACTIVE_Y[1] - ACTIVE_Y[0]),
+        ];
+        let screenPos: Vec2 = [clamp(handScreen[0], 0, 1), clamp(handScreen[1], 0, 1)];
+        if (CURSOR_SENSITIVITY < 1) {
+          // 손 사라졌다 다시 나타남(오래) → 손 위치로 다시 맞춤
+          if (!d.relCursor) d.relCursor = screenPos;
+          // 커서가 숨는 자세(카메라 이동·움켜쥐기) 동안엔 멈춰 둠 → 다시 나타날 때 그 자리
+          else if (d.prevHandScreen && !NO_CURSOR_POSES.has(rightPose)) {
+            d.relCursor = [
+              clamp(d.relCursor[0] + (handScreen[0] - d.prevHandScreen[0]) * CURSOR_SENSITIVITY, 0, 1),
+              clamp(d.relCursor[1] + (handScreen[1] - d.prevHandScreen[1]) * CURSOR_SENSITIVITY, 0, 1),
+            ];
+          }
+          d.prevHandScreen = handScreen;
+          screenPos = d.relCursor;
+        }
+        const snapped: Vec2 = [quantize(screenPos[0]), quantize(screenPos[1])];
         // 카메라 이동·움켜쥐기 중엔 커서 숨김 (EMA는 계속 → 모드 복귀 시 커서 안 튐)
         if (rightPose === 'select') {
           // 원시 자세가 아직 ✌️일 때만 조준점 갱신. 주먹으로 접는 중(200ms 확인 대기)엔 마지막 조준점 유지
@@ -1147,15 +1279,27 @@ export default function HandTracker(props: Props) {
 
         // 핀치 (히스테리시스 + 유지시간 확인). 선택·카메라 이동·움켜쥐기 모드에선 핀치 안 함
         const ratio = pinchRatio(drawHand);
+        if (d.prevPinchRatio >= PINCH_OFF && ratio < PINCH_OFF) d.closeStart = now;
+        d.prevPinchRatio = ratio;
+        if (!d.pinching) {
+          d.cursorHist.push({ t: now, p: snapped });
+          while (d.cursorHist.length && now - d.cursorHist[0].t > 500) d.cursorHist.shift();
+        }
         if (fist || indexCurled || NO_PINCH_POSES.has(rightPose)) {
           d.pinching = false;
         } else if (!d.pinching && ratio < PINCH_ON) {
           d.pinching = true;
           d.pinchSince = now;
           d.pinchCommitted = false;
+          // 모으기 시작 직전 위치로 고정
+          const target = Math.max(d.closeStart - PINCH_LOCK_LEAD_MS, now - PINCH_LOCK_MAX_BACK_MS);
+          const h = d.cursorHist.find((e) => e.t >= target) ?? d.cursorHist[d.cursorHist.length - 1];
+          d.pinchPos = h ? h.p : snapped;
         } else if (d.pinching && ratio > PINCH_OFF) {
           d.pinching = false;
         }
+        if (!d.pinching) d.pinchPos = null;
+        else if (d.pinchPos && cursor) cursor = d.pinchPos; // 핀치 중엔 커서도 고정 표시
 
         if (
           d.pinching &&
@@ -1164,9 +1308,32 @@ export default function HandTracker(props: Props) {
           now - d.lastPinchAt > PINCH_COOLDOWN_MS &&
           !d.test.active // 테스트 중엔 노드 안 찍음
         ) {
+          // 핀치 = 마우스 버튼 down. 선택/드래그 판정은 HandBridge (가리킨 대상은 SceneCanvas가 커서 위치로 판정)
           d.pinchCommitted = true;
           d.lastPinchAt = now;
-          lastHint = commitPoint(snapped);
+          d.selectFires += 1;
+          const p = propsRef.current;
+          if (p.onPointer) {
+            d.pointerDown = true;
+            d.pointerOrigin = snapped;
+            d.lastPointer = d.pinchPos ?? snapped;
+            p.onPointer({ phase: 'down', screen: d.lastPointer });
+          } else {
+            p.onSelect?.();
+            lastHint = '선택 확정';
+          }
+        }
+        // 핀치 유지한 채 이동 = 드래그: 확정 지점 + 손 이동량 (커서도 같이 움직임)
+        if (d.pointerDown && d.pinching && d.pinchPos && d.pointerOrigin) {
+          const pos: Vec2 = [
+            clamp(d.pinchPos[0] + snapped[0] - d.pointerOrigin[0], 0, 1),
+            clamp(d.pinchPos[1] + snapped[1] - d.pointerOrigin[1], 0, 1),
+          ];
+          cursor = pos;
+          if (!d.lastPointer || pos[0] !== d.lastPointer[0] || pos[1] !== d.lastPointer[1]) {
+            d.lastPointer = pos;
+            propsRef.current.onPointer?.({ phase: 'move', screen: pos });
+          }
         }
 
         // 주먹 유지 → 체인 끊기
@@ -1181,29 +1348,49 @@ export default function HandTracker(props: Props) {
         }
       } else {
         d.smoothCursor = null;
+        d.prevHandScreen = null;
         d.pinching = false;
         d.fistSince = 0;
       }
 
+      // 핀치가 어떤 이유로든 풀리면 (손 펴기·주먹·줌·손 사라짐) 버튼 up
+      if (d.pointerDown && !d.pinching) {
+        d.pointerDown = false;
+        propsRef.current.onPointer?.({ phase: 'up', screen: d.lastPointer ?? [0.5, 0.5] });
+        d.pointerOrigin = null;
+      }
+
       // ── HUD 모드 ──
-      const orbit = !zooming && !depthPriority && d.leftPose.stable === 'pan';
+      // ── 모드 배타: 줌 > 물체 회전 > (팬 | 오빗, 먼저 시작한 쪽 유지) > 손 자세 ──
+      // 카메라 이동·회전은 서로 거울 자세: 한 손 3손가락 + 반대 손 펼침 (한 손만 보이면 안 움직임 → 오작동 방지)
+      const panWant =
+        !zooming && !d.rot.active && !!drawHand && rightPose === 'pan' && depthIdx >= 0 && isOpen(depthIdx);
+      const orbitWant =
+        !zooming && !d.rot.active && !!depthHand && d.leftPose.stable === 'pan' && drawIdx >= 0 && isOpen(drawIdx);
+      if ((d.camMode === 'pan' && !panWant) || (d.camMode === 'orbit' && !orbitWant)) d.camMode = null;
+      if (!d.camMode) d.camMode = panWant ? 'pan' : orbitWant ? 'orbit' : null;
+      const orbit = d.camMode === 'orbit';
       let mode: UiMode = 'idle';
       if (zooming) mode = 'zoom';
+      else if (d.rot.active) mode = 'rotate';
+      else if (d.camMode) mode = d.camMode;
+      else if (d.pointerDown) mode = 'drag';
       else if (drawHand) {
         const byPose: Record<HandPose, UiMode> = {
-          none: 'draw',
-          open: 'draw',
-          draw: depthHand ? 'depth' : 'draw',
+          none: 'idle',
+          open: 'idle',
+          draw: 'select',
           select: 'select',
           pan: 'pan',
           grab: 'rotate',
           fist: 'fist',
         };
-        mode = byPose[rightPose];
+        // grab 자세여도 회전이 실제로 시작 안 됐으면(카메라 조작 중 등) 회전으로 표시 안 함
+        mode = rightPose === 'grab' ? 'idle' : byPose[rightPose];
       }
 
-      // ── 카메라 드래그: 오른손 3손가락 = 팬, 왼손 3손가락 = 오빗 (동시 가능, 테스트 중엔 안 움직임) ──
-      if (rightPose === 'pan' && drawHand && !zooming) {
+      // ── 카메라 드래그: 오른손 3손가락 = 팬, 왼손 3손가락 = 오빗 (한 번에 하나만, 테스트 중엔 안 움직임) ──
+      if (d.camMode === 'pan' && drawHand) {
         const m = stepDrag(d.panDrag, drawHand);
         if (m) d.panTravel += Math.hypot(m[0], m[1]);
         if (m && !d.test.active) pushCameraPan(m[0], m[1]);
@@ -1247,7 +1434,7 @@ export default function HandTracker(props: Props) {
       }
 
       const zoomLine = zooming && drawHand && depthHand ?([drawHand[9], depthHand[9]] as const) : null;
-      const overlayCursor = cursor ? d.smoothCursor : null;
+      const overlayCursor = cursor && d.smoothCursor ? d.smoothCursor.x : null;
       renderOverlay(ctx, canvas, hands, drawHand, overlayCursor, d.pinching, zoomLine, (i) => {
         // 진단: 손가락별 접힘(검·중·약·새 ●=접힘) + 엄지 비율(t) + 손가락 곧음(s) → 임계값 튜닝용
         const w = res.worldLandmarks[i];
@@ -1255,7 +1442,7 @@ export default function HandTracker(props: Props) {
         const hold = i === drawIdx ? d.rightPose : d.leftPose;
         const tu = `t${hold.thumbRatio.toFixed(2)} s${hold.straightness.toFixed(2)}`;
         if (i !== drawIdx) {
-          const role = orbit ? 'ORBIT' : `z=${d.zLayer.toFixed(2)}${depthPriority ? '' : '🔒'}`;
+          const role = orbit ? 'ORBIT' : 'LEFT';
           return `${role} ${curl} ${tu}`;
         }
         return `${curl} p${pinchRatio(hands[i]).toFixed(2)} ${tu}`;
@@ -1294,7 +1481,9 @@ export default function HandTracker(props: Props) {
       animLast = now;
       const r = draw.current.rot;
       if (!r.active || !r.world || r.shown === r.out) return;
-      r.shown += (r.out - r.shown) * Math.min(1, dt / ROT_INTERP_MS);
+      // 걸림 각도로 들어갈 땐 보간 없이 바로 → "딱" 걸리는 느낌. 걸림 사이 이동만 부드럽게
+      if (r.out === snapDeg(r.out, ROT_SNAP_DEG)) r.shown = r.out;
+      else r.shown += (r.out - r.shown) * Math.min(1, dt / ROT_INTERP_MS);
       if (Math.abs(r.out - r.shown) < 0.05) r.shown = r.out;
       if (Math.abs(r.shown - r.emitted) >= ROT_EMIT_STEP_DEG || r.shown === r.out) {
         if (r.shown === r.emitted) return;
@@ -1339,9 +1528,23 @@ export default function HandTracker(props: Props) {
       }
       if (pending) submit();
     };
+    let camFrames = 0;
+    let camStart = performance.now();
+    let camShown = -1;
     const loop = () => {
       schedule();
       if (!detector || video.readyState < 2) return;
+      // 실제 카메라 fps 측정 (rVFC = 새 프레임마다 1회. rAF 폴백이면 화면 주사율이 찍히므로 측정 안 함)
+      if (hasVfc) {
+        camFrames += 1;
+        const t = performance.now();
+        if (t - camStart >= 1000) {
+          const real = Math.round((camFrames * 1000) / (t - camStart));
+          if (real !== camShown) setCamRealFps((camShown = real));
+          camFrames = 0;
+          camStart = t;
+        }
+      }
       // rAF 폴백일 때만 의미 있음 (rVFC는 새 프레임마다 한 번씩만 호출됨)
       if (!hasVfc && video.currentTime === lastVideoTime) return;
       lastVideoTime = video.currentTime;
@@ -1381,10 +1584,14 @@ export default function HandTracker(props: Props) {
         const gl = webglRenderer();
         setBackend({ delegate: lm.delegate, worker: lm.kind === 'worker', gl, soft: SOFTWARE_GL.test(gl) });
         console.info('[HandTracker] 검출기', lm.kind, lm.delegate, '/ WebGL', gl);
-        const st = s.getVideoTracks()[0]?.getSettings();
+        const track = s.getVideoTracks()[0];
+        const st = track?.getSettings();
         if (st) {
-          setCamInfo({ w: st.width ?? 0, h: st.height ?? 0, fps: st.frameRate ?? 0 });
-          console.info('[HandTracker] 카메라 설정', st);
+          // getCapabilities는 Firefox 등에서 없음 → 0 (판정은 실측값으로)
+          const caps = typeof track.getCapabilities === 'function' ? track.getCapabilities() : undefined;
+          const max = caps?.frameRate?.max ?? 0;
+          setCamInfo({ w: st.width ?? 0, h: st.height ?? 0, fps: st.frameRate ?? 0, max });
+          console.info('[HandTracker] 카메라 설정', st, '/ 최대 fps', max || '알 수 없음');
         }
         setStatus('tracking');
         schedule();
@@ -1410,11 +1617,11 @@ export default function HandTracker(props: Props) {
       setCamInfo(null);
       setBackend(null);
     };
-  }, [cameraOn, breakChain, commitPoint]);
+  }, [cameraOn, breakChain]);
 
   // ── 음성 인식 ──
   const submitText = useCallback((text: string) => {
-    setVoiceMsg(`전송: "${text}"`);
+    setVoiceMsg('');
     propsRef.current.onVoiceCommand(text);
   }, []);
 
@@ -1514,35 +1721,12 @@ export default function HandTracker(props: Props) {
   return (
     <div
       ref={panelRef}
-      className="fixed bottom-4 right-4 z-50 w-[320px] select-none font-mono text-[11px] text-cyan-300"
+      className="fixed bottom-[78px] right-4 z-50 w-[320px] select-none font-mono text-[11px] text-cyan-300"
     >
-      <div
-        className="relative overflow-hidden rounded border border-cyan-400/60 bg-black/70 shadow-[0_0_18px_rgba(0,243,255,0.25)]"
-        style={{ width: PANEL_W, height: PANEL_H }}
-      >
-        <video
-          ref={videoRef}
-          className="absolute inset-0 h-full w-full -scale-x-100 object-cover opacity-50"
-          playsInline
-          muted
-        />
-        <canvas ref={canvasRef} width={PANEL_W * 2} height={PANEL_H * 2} className="absolute inset-0 h-full w-full" />
-
-        {/* 상단 상태줄 */}
-        <div className="absolute left-0 right-0 top-0 flex items-center justify-between bg-black/50 px-2 py-1">
-          <span className="flex items-center gap-2">
-            <span className={shownStatus === 'error' ? 'text-[#ff1e42]' : ''}>{statusLabel[shownStatus]}</span>
-            {shownStatus === 'tracking' && perf && (
-              <span
-                className="rounded bg-black/60 px-1 tabular-nums"
-                style={{ color: perf.fps >= 55 ? '#7dff8a' : perf.fps >= 30 ? '#ffd54a' : '#ff1e42' }}
-                title={`손 인식: 초당 처리 프레임/카메라 최대 · 추론+제스처처리 · 캡처→결과 지연 · W=워커 M=메인스레드${camInfo ? ` · 카메라 ${camInfo.w}x${camInfo.h} 최대 ${Math.round(camInfo.fps)}fps` : ''}${backend ? ` · WebGL: ${backend.gl}` : ''}`}
-              >
-                {`${Math.round(perf.fps)}${camInfo ? `/${Math.round(camInfo.fps)}` : ''}fps · 인식${perf.inf.toFixed(0)}+${perf.logic.toFixed(0)} 지연${perf.lat.toFixed(0)}ms`}
-                {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '⚠SW' : ''}`}
-              </span>
-            )}
-          </span>
+      {/* 상태줄: 카메라 화면 위에 띄움 (화면 위에 겹치면 손 영상이 가려짐) */}
+      <div className="mb-1.5 flex flex-col gap-1">
+        <div className="flex items-center justify-between rounded border border-cyan-400/40 bg-black/70 px-2 py-1">
+          <span className={shownStatus === 'error' ? 'text-[#ff1e42]' : ''}>{statusLabel[shownStatus]}</span>
           <div className="flex gap-1">
             <button
               onClick={testUi?.running ? stopTest : startTest}
@@ -1560,10 +1744,49 @@ export default function HandTracker(props: Props) {
             </button>
           </div>
         </div>
+        <div className="flex flex-wrap gap-1 empty:hidden">
+          {shownStatus === 'tracking' && perf && (
+            <span
+              className="rounded border border-cyan-400/30 bg-black/70 px-1.5 py-0.5 tabular-nums"
+              style={{ color: perf.fps >= 55 ? '#7dff8a' : perf.fps >= 30 ? '#ffd54a' : '#ff1e42' }}
+              title={`손 인식: 초당 처리 프레임/카메라 최대 · 추론+제스처처리 · 캡처→결과 지연 · W=워커 M=메인스레드${camInfo ? ` · 카메라 ${camInfo.w}x${camInfo.h} 설정 ${Math.round(camInfo.fps)}fps · 지원 최대 ${camInfo.max ? Math.round(camInfo.max) : '?'}fps · 실측 ${camRealFps || '?'}fps` : ''}${backend ? ` · WebGL: ${backend.gl}` : ''}`}
+            >
+              {`${Math.round(perf.fps)}${camRealFps ? `/${camRealFps}` : camInfo ? `/${Math.round(camInfo.fps)}` : ''}fps · 인식${perf.inf.toFixed(0)}+${perf.logic.toFixed(0)} 지연${perf.lat.toFixed(0)}ms`}
+              {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '·SW' : ''}`}
+            </span>
+          )}
+          {shownStatus === 'tracking' && camInfo && (() => {
+            // 지원 최대가 60 미만이면 하드웨어 한계, 지원은 되는데 실측이 낮으면 조명(노출) 문제
+            const hwLimit = camInfo.max > 0 && camInfo.max < 55;
+            const lowReal = camRealFps > 0 && camRealFps < 50;
+            if (!hwLimit && !lowReal) return null;
+            return (
+              <span
+                className="rounded border border-[#ffd54a]/60 bg-black/70 px-1.5 py-0.5 text-[#ffd54a]"
+                title={hwLimit ? '이 카메라는 60fps 모드가 없음' : '카메라는 60fps 지원하지만 실제로는 덜 나옴. 보통 어두워서 노출 시간이 길어진 것 → 조명을 밝게'}
+              >
+                {hwLimit ? `카메라 최대 ${Math.round(camInfo.max)}fps` : `카메라 ${camRealFps}fps · 조명 확인`}
+              </span>
+            );
+          })()}
+        </div>
+      </div>
+
+      <div
+        className="relative overflow-hidden rounded border border-cyan-400/60 bg-black/70 shadow-[0_0_18px_rgba(0,243,255,0.25)]"
+        style={{ width: PANEL_W, height: PANEL_H }}
+      >
+        <video
+          ref={videoRef}
+          className="absolute inset-0 h-full w-full -scale-x-100 object-cover opacity-50"
+          playsInline
+          muted
+        />
+        <canvas ref={canvasRef} width={PANEL_W * 2} height={PANEL_H * 2} className="absolute inset-0 h-full w-full" />
 
         {/* 현재 모드 배지 */}
         {shownStatus === 'tracking' && info.hands > 0 && (
-          <div className="absolute left-2 top-8 flex gap-1 text-[13px] font-bold">
+          <div className="absolute left-2 top-2 flex gap-1 text-[13px] font-bold">
             <span
               className="rounded border bg-black/70 px-2 py-0.5"
               style={{ color: MODE_COLOR[info.mode], borderColor: MODE_COLOR[info.mode] }}
@@ -1571,11 +1794,6 @@ export default function HandTracker(props: Props) {
               {MODE_LABEL[info.mode]}
               {info.rot && ` · ${info.rot}`}
             </span>
-            {info.orbit && (
-              <span className="rounded border border-[#b478ff] bg-black/70 px-2 py-0.5 text-[#b478ff]">
-                카메라 회전
-              </span>
-            )}
           </div>
         )}
 
@@ -1584,11 +1802,11 @@ export default function HandTracker(props: Props) {
           <div className="absolute bottom-0 left-0 right-0 flex justify-between bg-black/50 px-2 py-1">
             <span>
               {info.cursor
-                ? `X ${info.cursor[0].toFixed(2)}  Y ${info.cursor[1].toFixed(2)}  Z ${info.cursor[2].toFixed(2)}`
-                : 'X —  Y —  Z —'}
+                ? `X ${Math.round(info.cursor[0] * 100)}%  Y ${Math.round(info.cursor[1] * 100)}%`
+                : 'X —  Y —'}
             </span>
             <span className={info.pinching ? 'text-[#ff1e42]' : ''}>
-              {`${info.pinching ? 'PINCH' : info.gesture || '—'} · 체인 ${info.chainLen}`}
+              {info.pinching ? 'PINCH' : info.gesture || '—'}
             </span>
           </div>
         )}
@@ -1629,6 +1847,21 @@ export default function HandTracker(props: Props) {
         {!speechSupported && <div className="mt-1 text-cyan-200/60">이 브라우저는 음성 인식 미지원 → 직접 입력</div>}
         {voiceText && <div className="mt-1 truncate text-cyan-100">“{voiceText}”</div>}
         {voiceMsg && <div className="mt-0.5 text-cyan-200/70">{voiceMsg}</div>}
+        {props.voiceFeedback && (
+          <div className="mt-0.5 flex items-center gap-1.5">
+            <span className={`truncate ${VOICE_TONE[props.voiceFeedback.tone]}`}>{props.voiceFeedback.label}</span>
+            {props.voiceFeedback.pending && (
+              <>
+                <button onClick={() => props.onVoiceConfirm?.(true)} className="rounded border border-[#00f3ff]/70 px-1.5 hover:bg-cyan-400/20">
+                  실행
+                </button>
+                <button onClick={() => props.onVoiceConfirm?.(false)} className="rounded border border-cyan-400/40 px-1.5 hover:bg-cyan-400/20">
+                  취소
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1672,7 +1905,7 @@ function GestureTestPanel(props: {
         <ul className="space-y-0.5">
           {ui.results.map((r) => (
             <li key={r.id} className={r.pass ? 'text-[#7dff8a]' : r.skipped ? 'text-cyan-200/50' : 'text-[#ff1e42]'}>
-              <span className="inline-block w-4">{r.pass ? '✓' : r.skipped ? '-' : '✗'}</span>
+              <span className="inline-block w-4">{r.pass ? 'O' : r.skipped ? '-' : 'X'}</span>
               {r.title}
               <span className="text-cyan-200/70">
                 {r.timeMs != null && ` ${(r.timeMs / 1000).toFixed(1)}s`}
@@ -1710,7 +1943,7 @@ function GestureTestPanel(props: {
 
       {ui.inGap && last ? (
         <div className={`py-3 text-center text-base font-bold ${last.pass ? 'text-[#7dff8a]' : 'text-[#ff1e42]'}`}>
-          {last.pass ? `✓ ${last.title} 통과` : last.skipped ? `- ${last.title} 건너뜀` : `✗ ${last.title} 실패`}
+          {last.pass ? `${last.title} 통과` : last.skipped ? `${last.title} 건너뜀` : `${last.title} 실패`}
         </div>
       ) : (
         <>

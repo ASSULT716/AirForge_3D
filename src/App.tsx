@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   StructureState,
   NodePoint,
@@ -18,6 +18,7 @@ import FloorPlanViewer from './components/FloorPlanViewer';
 import FloorLoadPanel from './components/FloorLoadPanel';
 import BuildingSpecBuilder from './components/BuildingSpecBuilder';
 import PartInspector from './components/PartInspector';
+import FloatingPanel from './components/FloatingPanel';
 import {
   reinforceStructure,
   executeNaturalCommand,
@@ -27,11 +28,43 @@ import {
 import { syncBuildingWithSolids } from './utils/buildingEstimator';
 import { downloadStructureAsSTL } from './utils/exportStl';
 import {
+  computePolygonAreaSqm,
   generateWatertightArchitecture,
   getDefaultSpecForCategory,
+  rescalePolygonToArea,
 } from './utils/architectureGenerator';
 
 const snap = (v: number) => Math.round(v * 4) / 4;
+
+/** 자유형 대지 폴리곤 변경 시 면적 유지 옵션 적용 + 건물 구조 안전 재구성 공통 함수 */
+function applySitePolygonToState(
+  prev: StructureState,
+  rawPolygon: [number, number][]
+): StructureState {
+  if (!prev.buildingSpec || rawPolygon.length < 3) return prev;
+  const spec = prev.buildingSpec;
+  const finalPolygon = spec.lockSiteAreaOnDrag
+    ? rescalePolygonToArea(rawPolygon, spec.siteAreaSqm)
+    : rawPolygon;
+  const nextSiteAreaSqm = spec.lockSiteAreaOnDrag
+    ? spec.siteAreaSqm
+    : computePolygonAreaSqm(finalPolygon);
+
+  const nextSpec: BuildingSpec = {
+    ...spec,
+    siteShape: 'custom',
+    sitePolygon: finalPolygon,
+    siteAreaSqm: nextSiteAreaSqm,
+  };
+  const built = generateWatertightArchitecture(nextSpec, prev.activeMaterial);
+  return {
+    ...prev,
+    buildingSpec: built.spec,
+    solids: built.solids,
+    nodes: built.nodes,
+    beams: built.beams,
+  };
+}
 
 export default function App() {
   const initialArch = useMemo(() => {
@@ -46,14 +79,17 @@ export default function App() {
     nodes: initialArch.nodes,
     beams: initialArch.beams,
     activeMaterial: 'stucco',
-    activeColor: '#f8fafc',
+    activeColor: '#f5f2eb',
+    selectedFloorIndex: null,
+    isSiteEditMode: false,
     showMepPipes: false,
+    viewMode: 'exterior',
     activeSpecViz: null,
     chatHistory: [
       {
         id: 'welcome',
         role: 'assistant',
-        text: '기본 단독주택 템플릿(L자 중정 갤러리 하우스)이 배치되었습니다. 좌측 제원 아코디언 항목을 눌러 수치를 조절하면 3D 크기와 변화량이 실시간으로 표시됩니다.',
+        text: '단독주택 10종 디자인 템플릿과 자유형 대지 경계 편집이 준비되었습니다. 사진을 올리면 Vision AI가 지붕·창호·외장재 DNA를 추출하며, "경계 드래그 편집"을 켜고 핀을 끌면 대지 모양에 맞춰 건물이 깨지지 않고 자동 재구성됩니다.',
         timestamp: Date.now(),
       },
     ],
@@ -80,16 +116,37 @@ export default function App() {
   const selectedPart =
     (structure.solids ?? []).find((s) => s.id === structure.selectedPartId) ?? null;
 
-  const handleSubmitBuildingSpec = async (spec: BuildingSpec) => {
+  const handleToggleSiteEditMode = useCallback((next: boolean) => {
+    setStructure((p) => ({
+      ...p,
+      isSiteEditMode: next,
+      selectedPartId: next ? null : p.selectedPartId,
+      selectedFloorIndex: next ? null : p.selectedFloorIndex,
+      selectedUnitTypeId: next ? null : p.selectedUnitTypeId,
+      isLoadHeatmapActive: next ? false : p.isLoadHeatmapActive,
+      statusMessage: next
+        ? '대지 경계 자유 편집 활성화 · 파란 핀을 마우스/제스처로 드래그하세요'
+        : '대지 경계 편집 종료',
+    }));
+  }, []);
+
+  const handleUpdateSitePolygon = useCallback((nextPolygon: [number, number][]) => {
+    setStructure((prev) => applySitePolygonToState(prev, nextPolygon));
+  }, []);
+
+  const handleSubmitBuildingSpec = async (spec: BuildingSpec, overrideMaterial?: CadMaterial) => {
     if (isReinforcing) return;
     setIsFree3DMode(false);
     setIsReinforcing(true);
+    const matToUse = overrideMaterial ?? structure.activeMaterial;
     setStructure((p) => ({
       ...p,
-      statusMessage: `'${spec.projectName}' 예술 건축 매스·창호·배관 생성 중...`,
+      activeMaterial: matToUse,
+      isSiteEditMode: false,
+      statusMessage: `'${spec.projectName}' 건축 매스·지붕·실내 인테리어 동기화 중...`,
     }));
     try {
-      const nextState = await buildFromSpecUI(spec, structure);
+      const nextState = await buildFromSpecUI(spec, { ...structure, activeMaterial: matToUse });
       setStructure(nextState);
       setIsSpecBuilderOpen(false);
     } finally {
@@ -97,7 +154,6 @@ export default function App() {
     }
   };
 
-  // 디자인 유형에서 "3D 디자인" 선택 시 제원 설정 창을 닫고 순수 대화창 모드로 전환
   const handleSelectFree3DMode = () => {
     setIsFree3DMode(true);
     setIsSpecBuilderOpen(false);
@@ -106,21 +162,23 @@ export default function App() {
       ...p,
       buildingSpec: undefined,
       selectedUnitTypeId: null,
+      selectedFloorIndex: null,
+      isSiteEditMode: false,
       isLoadHeatmapActive: false,
+      viewMode: 'exterior',
       statusMessage: '3D 디자인 (3D 프린팅·자유 조형) 대화 모드 활성화',
       chatHistory: [
         ...(p.chatHistory ?? []),
         {
           id: `msg_3d_${Date.now()}`,
           role: 'assistant',
-          text: '3D 디자인 (3D 프린팅·자유 조형) 모드로 전환되었습니다. 만들고 싶은 3D 모델이나 부품(예: "드론 프레임 만들어줘", "기하학 화병 만들어줘")을 말씀해 주세요.',
+          text: '3D 디자인 (3D 프린팅·자유 조형) 모드로 전환되었습니다. 만들고 싶은 3D 모델이나 부품을 말씀해 주세요.',
           timestamp: Date.now(),
         },
       ],
     }));
   };
 
-  // 부위 클릭/제스쳐 선택 후 크기·재질 변경 시 외벽 창호, 수도/전기 배관, 평면도 비율 실시간 동기화
   const handleUpdatePart = (updatedPart: SolidPrimitive) => {
     setStructure((prev) => {
       const nextSolids = (prev.solids ?? []).map((s) =>
@@ -186,13 +244,33 @@ export default function App() {
       Math.max(0, snap(rawPos[1])),
       snap(rawPos[2]),
     ];
-    // StrictMode는 업데이터를 두 번 실행함 → ID·연결 시작점은 업데이터 밖에서 미리 고정
     const fromId = isNewStroke ? null : lastDrawnNodeIdRef.current;
     const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const newNodeId = `node_${uid()}`;
     const beamId = `beam_${uid()}`;
 
     setStructure((prev) => {
+      // 자유형 대지 경계 편집 모드가 켜져 있으면 손 제스처 핀치로 가장 가까운 대지 꼭짓점을 실시간 드래그 변형
+      if (prev.isSiteEditMode && prev.buildingSpec?.sitePolygon && prev.buildingSpec.sitePolygon.length >= 3) {
+        const poly = prev.buildingSpec.sitePolygon;
+        let nearestIdx = -1;
+        let minDist = 1.4;
+        poly.forEach(([vx, vz], idx) => {
+          const d = Math.hypot(vx - rawPos[0], vz - rawPos[2]);
+          if (d < minDist) {
+            minDist = d;
+            nearestIdx = idx;
+          }
+        });
+        if (nearestIdx === -1) return prev;
+        const clampedX = Number(Math.max(-7.5, Math.min(7.5, rawPos[0])).toFixed(2));
+        const clampedZ = Number(Math.max(-7.5, Math.min(7.5, rawPos[2])).toFixed(2));
+        const nextPoly = poly.map((v, idx): [number, number] =>
+          idx === nearestIdx ? [clampedX, clampedZ] : v
+        );
+        return applySitePolygonToState(prev, nextPoly);
+      }
+
       if (tool === 'draw') {
         const existing = prev.nodes.find(
           (n) =>
@@ -232,7 +310,6 @@ export default function App() {
             role: 'primary',
           });
         }
-        // 두 번 실행돼도 같은 값 → 안전
         lastDrawnNodeIdRef.current = targetNode.id;
         return { ...prev, nodes: nextNodes, beams: nextBeams };
       }
@@ -382,7 +459,7 @@ export default function App() {
   };
 
   return (
-    <main className="relative w-screen h-screen overflow-hidden bg-[#f4f6f9]">
+    <main className="relative w-screen h-screen overflow-hidden bg-[#eef2f6]">
       <SceneCanvas
         structure={structure}
         onUpdateStress={(beams) => setStructure((prev) => ({ ...prev, beams }))}
@@ -390,12 +467,19 @@ export default function App() {
           setStructure((prev) => ({
             ...prev,
             selectedPartId,
+            selectedFloorIndex: null,
           }))
         }
+        onUpdateSitePolygon={handleUpdateSitePolygon}
       />
 
-      {/* (조원호) 손·음성 입력 연결점 — 손 관련 코드는 src/hand/ 에만 있음 */}
-      <HandBridge structure={structure} setStructure={setStructure} onPinchAction={handlePinchAction} onVoiceCommand={handleVoiceCommand} lastDrawnNodeIdRef={lastDrawnNodeIdRef} />
+      <HandBridge
+        structure={structure}
+        setStructure={setStructure}
+        onPinchAction={handlePinchAction}
+        onVoiceCommand={handleVoiceCommand}
+        lastDrawnNodeIdRef={lastDrawnNodeIdRef}
+      />
 
       <HudOverlay
         structure={structure}
@@ -409,7 +493,9 @@ export default function App() {
             ...p,
             activeMaterial,
             solids: (p.solids ?? []).map((s) =>
-              s.color === '#86efac' || s.color === '#10b981' ? s : { ...s, material: activeMaterial }
+              s.partRole === 'garden' || s.partRole === 'interior_wall' || s.partRole === 'furniture'
+                ? s
+                : { ...s, material: activeMaterial }
             ),
             beams: p.beams.map((b) => ({ ...b, material: activeMaterial })),
           }))
@@ -419,7 +505,9 @@ export default function App() {
             ...p,
             activeColor,
             solids: (p.solids ?? []).map((s) =>
-              s.color === '#86efac' || s.color === '#10b981' ? s : { ...s, color: activeColor }
+              s.partRole === 'garden' || s.partRole === 'interior_wall' || s.partRole === 'furniture'
+                ? s
+                : { ...s, color: activeColor }
             ),
             beams: p.beams.map((b) => ({ ...b, color: activeColor })),
           }))
@@ -437,6 +525,10 @@ export default function App() {
             buildingSpec: undefined,
             selectedUnitTypeId: null,
             selectedPartId: null,
+            selectedFloorIndex: null,
+            isSiteEditMode: false,
+            showMepPipes: false,
+            viewMode: 'exterior',
             isLoadHeatmapActive: false,
             isSimulating: false,
             activeCandidates: undefined,
@@ -449,7 +541,6 @@ export default function App() {
         }}
       />
 
-      {/* 좌측 상단 도킹: 방 유형 2D 비정형 평면도 (우측 3D 반투명 배치를 가리지 않음) */}
       {selectedUnitType && (
         <FloorPlanViewer
           unitType={selectedUnitType}
@@ -457,18 +548,41 @@ export default function App() {
         />
       )}
 
-      {/* 우측 상단: 부위 클릭/제스쳐 선택 인스펙터 (재질·비용·치수 조절) */}
       {selectedPart && (
         <PartInspector
           part={selectedPart}
           defaultMaterial={structure.activeMaterial}
+          totalFloors={structure.buildingSpec?.floors ?? 1}
+          selectedFloorIndex={structure.selectedFloorIndex ?? null}
+          onSelectWholeFloor={(floorIdx) =>
+            setStructure((p) => ({ ...p, selectedFloorIndex: floorIdx }))
+          }
+          onUpdateWholeFloor={(floorIdx, patch) =>
+            setStructure((p) => ({
+              ...p,
+              solids: (p.solids ?? []).map((s) =>
+                s.floorIndex === floorIdx
+                  ? {
+                      ...s,
+                      material: patch.material ?? s.material,
+                      color: patch.color ?? s.color,
+                    }
+                  : s
+              ),
+            }))
+          }
           onUpdatePart={handleUpdatePart}
           onDeletePart={handleDeletePart}
-          onClose={() => setStructure((p) => ({ ...p, selectedPartId: null }))}
+          onClose={() =>
+            setStructure((p) => ({
+              ...p,
+              selectedPartId: null,
+              selectedFloorIndex: null,
+            }))
+          }
         />
       )}
 
-      {/* 우측 상단: 부위 인스펙터가 닫혀 있을 때 KDS 41 12 00 여유 안전율 하중 시뮬레이터 표시 */}
       {!selectedPart && structure.buildingSpec && (
         <FloorLoadPanel
           spec={structure.buildingSpec}
@@ -477,6 +591,7 @@ export default function App() {
             setStructure((p) => ({
               ...p,
               isLoadHeatmapActive: active,
+              isSiteEditMode: active ? false : p.isSiteEditMode,
               selectedUnitTypeId: active ? null : p.selectedUnitTypeId,
             }))
           }
@@ -511,19 +626,50 @@ export default function App() {
         />
       )}
 
-      {/* 우측 하단: 수도/전기 배관 투시 · 다른 디자인 뽑기 · 견적서 · 3D 프린팅 STL 출력 */}
+      {/* 우측 하단 액션 바 */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-wrap gap-2 bg-white/95 backdrop-blur-md border border-slate-300 p-2.5 rounded-xl shadow-lg">
         {structure.buildingSpec && (
-          <button
-            onClick={() => setStructure((p) => ({ ...p, showMepPipes: !p.showMepPipes }))}
-            className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
-              structure.showMepPipes
-                ? 'bg-blue-600 text-white border-blue-600'
-                : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
-            }`}
-          >
-            수도·전기 배관 {structure.showMepPipes ? 'ON' : 'OFF'}
-          </button>
+          <>
+            <button
+              onClick={() => handleToggleSiteEditMode(!structure.isSiteEditMode)}
+              className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
+                structure.isSiteEditMode
+                  ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                  : 'bg-sky-50 text-sky-800 border-sky-300 hover:bg-sky-100'
+              }`}
+            >
+              {structure.isSiteEditMode ? '대지 경계 편집 ON' : '대지 경계 드래그 편집'}
+            </button>
+            <button
+              onClick={() =>
+                setStructure((p) => ({
+                  ...p,
+                  viewMode: p.viewMode === 'interior_cutaway' ? 'exterior' : 'interior_cutaway',
+                  selectedUnitTypeId: null,
+                  isLoadHeatmapActive: false,
+                }))
+              }
+              className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
+                structure.viewMode === 'interior_cutaway'
+                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                  : 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+              }`}
+            >
+              {structure.viewMode === 'interior_cutaway'
+                ? '실내 투시 ON (지붕·전면벽 오픈)'
+                : '실내 투시 보기'}
+            </button>
+            <button
+              onClick={() => setStructure((p) => ({ ...p, showMepPipes: !p.showMepPipes }))}
+              className={`px-3 py-2 font-bold text-xs rounded-lg cursor-pointer transition border ${
+                structure.showMepPipes
+                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                  : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+              }`}
+            >
+              {structure.showMepPipes ? '수도·전기 배관 투시 ON' : '수도·전기 배관 투시 OFF'}
+            </button>
+          </>
         )}
         <button
           onClick={handleRedesignSameSpec}
@@ -542,192 +688,202 @@ export default function App() {
         )}
         <button
           onClick={() => downloadStructureAsSTL(structure)}
-          className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg cursor-pointer transition"
+          className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-lg cursor-pointer transition"
         >
           3D 프린터 설계도 (.STL)
         </button>
       </div>
 
-      {/* 좌측 하단: 디자인 유형/건축 제원 설정 패널 + 방 유형 선택 + 대화형 수정창 */}
-      <div className="fixed bottom-4 left-4 z-50 w-[94vw] sm:w-[470px] max-h-[82vh] flex flex-col gap-2 bg-white/95 backdrop-blur-md border border-slate-300 p-3.5 rounded-2xl font-sans text-sm text-slate-800 shadow-xl">
-        {isSpecBuilderOpen && !isFree3DMode && (
-          <BuildingSpecBuilder
-            initialSpec={structure.buildingSpec}
-            isGenerating={isReinforcing}
-            onLivePreviewSpec={(nextSpec, activeViz) => {
-              const built = generateWatertightArchitecture(nextSpec, structure.activeMaterial);
-              setStructure((p) => ({
-                ...p,
-                buildingSpec: built.spec,
-                solids: built.solids,
-                nodes: built.nodes,
-                beams: built.beams,
-                activeSpecViz: activeViz,
-              }));
-            }}
-            onSubmitSpec={handleSubmitBuildingSpec}
-            onSelectFree3DMode={handleSelectFree3DMode}
-            onClose={structure.buildingSpec ? () => setIsSpecBuilderOpen(false) : undefined}
-          />
-        )}
+      {/* 좌측 하단 스튜디오 패널 */}
+      <FloatingPanel
+        title={isFree3DMode ? '3D DESIGN & PRINTING STUDIO' : 'AIRFORGE ARCHITECT STUDIO'}
+        subtitle="DRAG BAR TO MOVE · RESIZE"
+        initialX={16}
+        initialY={Math.max(48, window.innerHeight - 680)}
+        baseWidth={490}
+        zIndex={50}
+        headerRightExtra={
+          (!isSpecBuilderOpen || isFree3DMode) && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsFree3DMode(false);
+                setIsSpecBuilderOpen(true);
+              }}
+              className="px-2 py-0.5 text-[10.5px] font-bold bg-sky-50 border border-sky-300 rounded hover:bg-sky-100 text-sky-800 cursor-pointer"
+            >
+              제원·사진 설정
+            </button>
+          )
+        }
+      >
+        <div className="flex flex-col gap-2 font-sans text-sm text-slate-800">
+          {isSpecBuilderOpen && !isFree3DMode && (
+            <BuildingSpecBuilder
+              initialSpec={structure.buildingSpec}
+              isGenerating={isReinforcing}
+              isSiteEditMode={Boolean(structure.isSiteEditMode)}
+              onToggleSiteEditMode={handleToggleSiteEditMode}
+              onLivePreviewSpec={(nextSpec, activeViz, overrideMaterial) => {
+                const matToUse = overrideMaterial ?? structure.activeMaterial;
+                const built = generateWatertightArchitecture(nextSpec, matToUse);
+                setStructure((p) => ({
+                  ...p,
+                  activeMaterial: matToUse,
+                  buildingSpec: built.spec,
+                  solids: built.solids,
+                  nodes: built.nodes,
+                  beams: built.beams,
+                  activeSpecViz: activeViz,
+                }));
+              }}
+              onSubmitSpec={handleSubmitBuildingSpec}
+              onSelectFree3DMode={handleSelectFree3DMode}
+              onClose={structure.buildingSpec ? () => setIsSpecBuilderOpen(false) : undefined}
+            />
+          )}
 
-        {/* 방(세대) 디자인 유형 선택기 */}
-        {structure.buildingSpec?.unitTypes && structure.buildingSpec.unitTypes.length > 0 && (
-          <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1.5">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-bold text-slate-800">
-                방 디자인 유형 (좌측 상단 평면도 + 우측 반투명 3D 배치)
-              </span>
-              {structure.selectedUnitTypeId && (
-                <button
-                  onClick={() => setStructure((p) => ({ ...p, selectedUnitTypeId: null }))}
-                  className="text-sky-600 font-bold hover:underline cursor-pointer"
-                >
-                  선택 해제
-                </button>
-              )}
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-              {structure.buildingSpec.unitTypes.map((ut) => {
-                const isSelected = structure.selectedUnitTypeId === ut.id;
-                return (
+          {structure.buildingSpec?.unitTypes && structure.buildingSpec.unitTypes.length > 0 && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-bold text-slate-800">
+                  방 디자인 유형 (평면도 + 전체 건물 내 3D 위치 표시)
+                </span>
+                {structure.selectedUnitTypeId && (
                   <button
-                    key={ut.id}
-                    onClick={() =>
-                      setStructure((p) => ({
-                        ...p,
-                        selectedUnitTypeId: isSelected ? null : ut.id,
-                        isLoadHeatmapActive: false,
-                      }))
-                    }
-                    className={`p-1.5 rounded-lg border text-left transition cursor-pointer ${
-                      isSelected
-                        ? 'bg-sky-50 border-sky-500 shadow-sm'
-                        : 'bg-white border-slate-200 hover:border-sky-300'
-                    }`}
+                    onClick={() => setStructure((p) => ({ ...p, selectedUnitTypeId: null }))}
+                    className="text-sky-600 font-bold hover:underline cursor-pointer"
                   >
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className="w-2.5 h-2.5 rounded-full shrink-0"
-                        style={{ backgroundColor: ut.color }}
-                      />
-                      <span className="font-mono font-bold text-xs text-slate-900">{ut.code}</span>
-                    </div>
-                    <div className="text-[10.5px] text-slate-600 truncate mt-0.5">
-                      {ut.areaSqm}㎡ · {ut.householdCount}세대
-                    </div>
+                    선택 해제
                   </button>
-                );
-              })}
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                {structure.buildingSpec.unitTypes.map((ut) => {
+                  const isSelected = structure.selectedUnitTypeId === ut.id;
+                  return (
+                    <button
+                      key={ut.id}
+                      onClick={() =>
+                        setStructure((p) => ({
+                          ...p,
+                          selectedUnitTypeId: isSelected ? null : ut.id,
+                          viewMode: 'exterior',
+                          isSiteEditMode: false,
+                          isLoadHeatmapActive: false,
+                        }))
+                      }
+                      className={`p-1.5 rounded-lg border text-left transition cursor-pointer ${
+                        isSelected
+                          ? 'bg-sky-50 border-sky-500 shadow-sm'
+                          : 'bg-white border-slate-200 hover:border-sky-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: ut.color }}
+                        />
+                        <span className="font-mono font-bold text-xs text-slate-900">{ut.code}</span>
+                      </div>
+                      <div className="text-[10.5px] text-slate-600 truncate mt-0.5">
+                        {ut.areaSqm}㎡ · {ut.householdCount}세대
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* 코파일럿 헤더 + 디자인 유형/제원 패널 전환 버튼 */}
-        <div className="flex items-center justify-between border-b border-slate-200 pb-1.5">
-          <div className="flex items-center gap-2 font-mono text-xs font-bold text-sky-700 tracking-wider">
-            <span className="w-2 h-2 rounded-full bg-sky-500" />
-            {isFree3DMode ? '3D DESIGN & PRINTING STUDIO' : 'AIRFORGE ARCHITECT STUDIO'}
-          </div>
-          <div className="flex items-center gap-1.5">
-            {(!isSpecBuilderOpen || isFree3DMode) && (
-              <button
-                onClick={() => {
-                  setIsFree3DMode(false);
-                  setIsSpecBuilderOpen(true);
-                }}
-                className="px-2 py-0.5 text-xs font-bold bg-sky-50 border border-sky-300 rounded hover:bg-sky-100 text-sky-800 cursor-pointer"
-              >
-                디자인 유형·제원 설정
-              </button>
-            )}
+          <div className="flex items-center justify-between border-b border-slate-200 pb-1">
+            <span className="font-mono text-[11px] font-bold text-sky-700">AI DESIGN CHAT</span>
             <button
               onClick={() => setIsChatExpanded((prev) => !prev)}
-              className="px-2 py-0.5 text-xs font-mono border border-slate-300 rounded hover:bg-slate-100 text-slate-600 cursor-pointer"
+              className="px-2 py-0.5 text-[11px] font-mono border border-slate-300 rounded hover:bg-slate-100 text-slate-600 cursor-pointer"
             >
-              {isChatExpanded ? '접기 ▼' : '펼치기 ▲'}
+              {isChatExpanded ? '대화 접기 ▼' : '대화 펼치기 ▲'}
+            </button>
+          </div>
+
+          {isChatExpanded && (!isSpecBuilderOpen || isFree3DMode) && (
+            <div className="flex-1 min-h-[120px] max-h-[26vh] overflow-y-auto space-y-2 pr-1">
+              {(structure.chatHistory ?? []).map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`p-2.5 rounded-xl text-xs leading-relaxed whitespace-pre-wrap break-words ${
+                    msg.role === 'user'
+                      ? 'bg-sky-600 text-white ml-8 shadow-sm'
+                      : 'bg-slate-100 border border-slate-200 text-slate-800 mr-2'
+                  }`}
+                >
+                  <span
+                    className={`font-mono font-bold text-[10px] uppercase tracking-wider block mb-0.5 ${
+                      msg.role === 'user' ? 'text-sky-100' : 'text-sky-700'
+                    }`}
+                  >
+                    {msg.role === 'user' ? 'DESIGNER' : 'AIRFORGE AI'}
+                  </span>
+                  {msg.text}
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+          )}
+
+          {isChatExpanded && structure.activeCandidates && structure.activeCandidates.length > 0 && (
+            <div className="max-h-[20vh] overflow-y-auto space-y-1.5 border-t border-slate-200 pt-2 pr-1">
+              {structure.activeCandidates.map((cand) => (
+                <button
+                  key={cand.id}
+                  onClick={() => handleApplyCandidate(cand)}
+                  className="w-full text-left p-2 rounded-lg border border-sky-300 bg-sky-50 hover:bg-sky-100 transition cursor-pointer flex justify-between items-center gap-2"
+                >
+                  <div>
+                    <div className="font-bold text-xs text-slate-900">{cand.title}</div>
+                    <div className="text-[11px] text-slate-600">{cand.description}</div>
+                  </div>
+                  <span className="shrink-0 px-2.5 py-1 bg-sky-600 text-white font-bold rounded text-[11px]">
+                    적용
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            <input
+              value={testVoiceInput}
+              onChange={(e) => setTestVoiceInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !isReinforcing) {
+                  handleVoiceCommand(testVoiceInput);
+                  setTestVoiceInput('');
+                }
+              }}
+              disabled={isReinforcing}
+              placeholder={
+                isFree3DMode
+                  ? '3D 프린팅 모델 생성·부분 수정 (예: "드론 프레임 만들어줘")'
+                  : '부분 수정 명령 (예: "2층을 목재로 바꿔줘", "지붕 높이만 1.5배 키워줘")'
+              }
+              className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-sky-500"
+            />
+            <button
+              onClick={() => {
+                if (!isReinforcing) {
+                  handleVoiceCommand(testVoiceInput);
+                  setTestVoiceInput('');
+                }
+              }}
+              disabled={isReinforcing}
+              className="px-3.5 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50"
+            >
+              {isReinforcing ? '...' : '전송'}
             </button>
           </div>
         </div>
-
-        {/* 대화형 부분 수정 & 3D 디자인 채팅창 */}
-        {isChatExpanded && (!isSpecBuilderOpen || isFree3DMode) && (
-          <div className="flex-1 min-h-[120px] max-h-[26vh] overflow-y-auto space-y-2 pr-1">
-            {(structure.chatHistory ?? []).map((msg) => (
-              <div
-                key={msg.id}
-                className={`p-2.5 rounded-xl text-xs leading-relaxed whitespace-pre-wrap break-words ${
-                  msg.role === 'user'
-                    ? 'bg-sky-600 text-white ml-8 shadow-sm'
-                    : 'bg-slate-100 border border-slate-200 text-slate-800 mr-2'
-                }`}
-              >
-                <span
-                  className={`font-mono font-bold text-[10px] uppercase tracking-wider block mb-0.5 ${
-                    msg.role === 'user' ? 'text-sky-100' : 'text-sky-700'
-                  }`}
-                >
-                  {msg.role === 'user' ? 'DESIGNER' : 'AIRFORGE AI'}
-                </span>
-                {msg.text}
-              </div>
-            ))}
-            <div ref={chatEndRef} />
-          </div>
-        )}
-
-        {isChatExpanded && structure.activeCandidates && structure.activeCandidates.length > 0 && (
-          <div className="max-h-[20vh] overflow-y-auto space-y-1.5 border-t border-slate-200 pt-2 pr-1">
-            {structure.activeCandidates.map((cand) => (
-              <button
-                key={cand.id}
-                onClick={() => handleApplyCandidate(cand)}
-                className="w-full text-left p-2 rounded-lg border border-sky-300 bg-sky-50 hover:bg-sky-100 transition cursor-pointer flex justify-between items-center gap-2"
-              >
-                <div>
-                  <div className="font-bold text-xs text-slate-900">{cand.title}</div>
-                  <div className="text-[11px] text-slate-600">{cand.description}</div>
-                </div>
-                <span className="shrink-0 px-2.5 py-1 bg-sky-600 text-white font-bold rounded text-[11px]">
-                  적용
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div className="flex items-center gap-2">
-          <input
-            value={testVoiceInput}
-            onChange={(e) => setTestVoiceInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !isReinforcing) {
-                handleVoiceCommand(testVoiceInput);
-                setTestVoiceInput('');
-              }
-            }}
-            disabled={isReinforcing}
-            placeholder={
-              isFree3DMode
-                ? '3D 프린팅 모델 생성·부분 수정 (예: "드론 프레임 만들어줘")'
-                : '부분 수정 명령 (예: "2층을 목재로 바꿔줘", "지붕 높이만 1.5배 키워줘")'
-            }
-            className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-sky-500"
-          />
-          <button
-            onClick={() => {
-              if (!isReinforcing) {
-                handleVoiceCommand(testVoiceInput);
-                setTestVoiceInput('');
-              }
-            }}
-            disabled={isReinforcing}
-            className="px-3.5 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-lg cursor-pointer disabled:opacity-50"
-          >
-            {isReinforcing ? '...' : '전송'}
-          </button>
-        </div>
-      </div>
+      </FloatingPanel>
 
       {isQuotationOpen && (
         <QuotationModal

@@ -317,6 +317,9 @@ const SOLID_GEO: Record<SolidPrimitive['shape'], THREE.BufferGeometry> = {
   cylinder: new THREE.CylinderGeometry(0.7, 0.7, 1.2, 16),
   torus: new THREE.TorusGeometry(0.7, 0.25, 12, 24),
   box: new THREE.BoxGeometry(1, 1, 1),
+  // 박공벽·쐐기벽: 피킹은 단위 박스로 근사 (SceneCanvas ExtrudeGeometry 바운딩과 동일)
+  gable_wall: new THREE.BoxGeometry(1, 1, 1),
+  wedge_wall: new THREE.BoxGeometry(1, 1, 1),
 };
 // 레이캐스트는 material.side만 봄 → 안쪽에서 쏴도 맞도록 양면
 const PICK_MAT = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });

@@ -96,7 +96,7 @@ export const MOVE_DIR_KO: Record<MoveDirection, string> = {
 };
 const meterKo = (m: number) => `${Math.round(m * 100) / 100}m`;
 
-const TOOL_KO: Record<Tool, string> = { draw: '펜', erase: '지우개', move: '이동', deform: '왜곡', spray: '스프레이' };
+const TOOL_KO: Record<Tool, string> = { draw: '펜', erase: '지우개', move: '이동', deform: '왜곡', spray: '스프레이', select: '선택' };
 
 export function describeCommand(c: VoiceCommand): string {
   switch (c.type) {

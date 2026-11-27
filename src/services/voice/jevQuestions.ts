@@ -91,6 +91,7 @@ const TOOL_CRITERIA: Record<Tool, string> = {
   move: 'Dragging parts to a new place: 이동, 옮기기, 무브.',
   deform: 'Bending or warping the shape: 왜곡, 변형, 구부리기.',
   spray: 'Painting color or material onto parts: 스프레이, 브러시, 브러쉬, 색칠, 칠하기.',
+  select: 'Picking parts without changing them: 선택, 고르기, 셀렉트.',
 };
 
 /** 한 요청에 묶어 보내는 원자 질문들 (speculative: intent와 무관하게 전부 물어봄) */

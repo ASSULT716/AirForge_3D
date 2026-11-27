@@ -116,6 +116,8 @@ const BASE_EXTENT: Record<SolidPrimitive['shape'], Vec3> = {
   cylinder: [1.4, 1.2, 1.4],
   cone: [1.6, 1.4, 1.6],
   torus: [1.9, 1.9, 0.5],
+  gable_wall: [1, 1, 1],
+  wedge_wall: [1, 1, 1],
 };
 export const solidExtent = (so: SolidPrimitive): Vec3 => {
   const b = BASE_EXTENT[so.shape] ?? BASE_EXTENT.box;

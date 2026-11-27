@@ -9,17 +9,17 @@ import {
   ChatMessage,
   BuildingSpec,
 } from '../types/cad';
-import { evaluateBuildingSpec, hydrateBuildingSpec } from '../utils/buildingEstimator';
+import {
+  evaluateBuildingSpec,
+  MATERIAL_CATALOG,
+  syncBuildingWithSolids,
+} from '../utils/buildingEstimator';
+import {
+  generateWatertightArchitecture,
+  BUILDING_TEMPLATES_BY_CATEGORY,
+} from '../utils/architectureGenerator';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-
-const MATERIAL_DEFAULT_COLORS: Record<CadMaterial, string> = {
-  hologram: '#00f3ff',
-  steel: '#e2e8f0',
-  titanium: '#64748b',
-  carbon: '#1e293b',
-  gold: '#fbbf24',
-};
 
 function computeSceneBounds(current: StructureState) {
   let minX = Infinity, maxX = -Infinity;
@@ -35,16 +35,6 @@ function computeSceneBounds(current: StructureState) {
     maxY = Math.max(maxY, y + sy * 0.5);
     minZ = Math.min(minZ, z - sz * 0.5);
     maxZ = Math.max(maxZ, z + sz * 0.5);
-  });
-
-  current.nodes.forEach((n) => {
-    const [x, y, z] = n.position;
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
-    minZ = Math.min(minZ, z);
-    maxZ = Math.max(maxZ, z);
   });
 
   if (!Number.isFinite(minX)) {
@@ -63,46 +53,76 @@ function computeSceneBounds(current: StructureState) {
 
 export async function reinforceStructure(current: StructureState): Promise<StructureState> {
   return executeNaturalCommand(
-    `현재 건축물의 취약 부위만 ${current.targetLoadKg}kg 하중을 견디도록 트러스 구조로 보강해줘.`,
+    `현재 구조물의 취약 부위만 ${current.targetLoadKg}kg 하중을 견디도록 트러스 보강 부재를 추가해줘.`,
     current
   );
 }
-
-// UI 패널에서 스크롤바·입력칸으로 한 번에 전달한 제원을 즉시 3D 건축물로 생성
-// src/services/aiReinforce.ts 내 buildFromSpecUI, regenerateDesignVariation, SYSTEM_PROMPT, nextBuildingSpec 교체
 
 export async function buildFromSpecUI(
   spec: BuildingSpec,
   current: StructureState
 ): Promise<StructureState> {
-  const prompt = `[건축 제원 일괄 확정 생성] 프로젝트명:${spec.projectName}, 주용도:${spec.usageType}, 대지면적:${spec.siteAreaSqm}㎡, 건축면적:${spec.buildingAreaSqm}㎡, 지상연면적:${spec.totalFloorAreaSqm}㎡, 지하:${spec.undergroundFloors}개층(지하연면적:${spec.undergroundAreaSqm}㎡), 높이:${spec.heightMeters}m, 지상:${spec.floors}층, 총가구:${spec.households}세대, 가구디자인유형:${spec.unitTypeCount}종, 엘리베이터:${spec.elevators}대, 계단:${spec.stairs}개소, 옥상:${spec.rooftops}개소, 정원면적:${spec.gardenAreaSqm}㎡, 디자인컨셉:${spec.designConcept || '중정형 모던 단독주택'} 조건으로 한국 건축법과 KDS 41 12 00 하중 기준을 반영해 3D 건축물(지상 + 지하층 매스 포함)을 즉시 생성해줘.`;
-  return executeNaturalCommand(prompt, { ...current, buildingSpec: spec }, spec);
+  const { spec: fullSpec, solids, nodes, beams } = generateWatertightArchitecture(
+    spec,
+    current.activeMaterial
+  );
+  const report = evaluateBuildingSpec(fullSpec, current.activeMaterial);
+  const eok = (report.totalMaterialCost / 100000000).toFixed(1);
+
+  const summary = `'${fullSpec.projectName}' (${fullSpec.usageType}) 건축물을 생성했습니다.\n• 내벽·외벽·창호 ${fullSpec.exteriorWindows?.length ?? 0}개소·옥상 난간·수도/전기 배관 ${fullSpec.mepPipes?.length ?? 0}계통 빈틈없이 조립 완료\n• 총 예상 공사 자재비: 약 ${eok}억 원`;
+
+  return {
+    ...current,
+    buildingSpec: fullSpec,
+    solids,
+    nodes,
+    beams,
+    activeSpecViz: null,
+    statusMessage: `'${fullSpec.projectName}' 생성 완료`,
+    chatHistory: [
+      ...(current.chatHistory ?? []),
+      {
+        id: `msg_build_${Date.now()}`,
+        role: 'assistant' as const,
+        text: summary,
+        timestamp: Date.now(),
+      },
+    ].slice(-14),
+  };
 }
 
 export async function regenerateDesignVariation(current: StructureState): Promise<StructureState> {
   const spec = current.buildingSpec;
-  if (!spec) {
+  if (!spec || spec.usageType === '3D 디자인') {
     return executeNaturalCommand(
-      '현재 건축 조건을 유지하면서 완전히 새로운 하이엔드 건축 디자인으로 다시 설계해줘.',
+      '기존 조건을 유지하면서 세계적인 건축가 작품처럼 조형미가 뛰어난 새로운 3D 디자인으로 다시 생성해줘.',
       current
     );
   }
-  return executeNaturalCommand(
-    `[동일 기준 다른 디자인 생성] 기존 건축 제원(용도:${spec.usageType}, 대지:${spec.siteAreaSqm}㎡, 지상연면적:${spec.totalFloorAreaSqm}㎡, 지하:${spec.undergroundFloors}층/${spec.undergroundAreaSqm}㎡, 높이:${spec.heightMeters}m/${spec.floors}층, 총가구:${spec.households}세대, 가구디자인유형:${spec.unitTypeCount}종, 엘리베이터:${spec.elevators}대, 계단:${spec.stairs}개소, 옥상:${spec.rooftops}개소, 정원:${spec.gardenAreaSqm}㎡)은 100% 동일하게 유지하되, 이전 디자인(${spec.designConcept || '기본형'})과는 완전히 다른 독창적이고 미학적인 3D 건축 디자인으로 건물을 다시 생성해줘.`,
-    current,
-    spec
+  const list = BUILDING_TEMPLATES_BY_CATEGORY[spec.usageType];
+  const curIdx = list.findIndex((t) => t.id === spec.templateId);
+  const nextTpl = list[(curIdx + 1) % list.length];
+
+  return buildFromSpecUI(
+    {
+      ...spec,
+      templateId: nextTpl.id,
+      projectName: `AirForge ${nextTpl.name}`,
+      designConcept: nextTpl.concept,
+    },
+    current
   );
 }
 
-const SYSTEM_PROMPT = `You are AirForge 3D's Senior Architectural Design & Structural Code AI Copilot for professional architects and designers.
+const SYSTEM_PROMPT = `You are AirForge 3D's Lead Architectural Sculptor & 3D Printing CAD Copilot.
 
 Return ONLY valid JSON matching this exact schema:
 {
-  "intent": "build_architecture" | "clarify_and_preview" | "delete_part" | "clear" | "replace_scene" | "add_object" | "transform_existing" | "reinforce_part" | "style_or_tool" | "camera_only",
-  "assistantReply": "Natural, professional Korean response summarizing the generated architecture",
+  "intent": "build_architecture" | "modify_in_place" | "delete_part" | "clear" | "replace_scene" | "add_object" | "style_or_tool" | "camera_only",
+  "assistantReply": "Natural, professional Korean response",
   "buildingSpec": {
     "projectName": "string",
-    "usageType": "단독주택" | "공동주택" | "업무·상업시설" | "복합문화시설",
+    "usageType": "단독주택" | "공동주택" | "업무·상업시설" | "복합문화시설" | "3D 디자인",
     "siteAreaSqm": number,
     "buildingAreaSqm": number,
     "totalFloorAreaSqm": number,
@@ -116,11 +136,21 @@ Return ONLY valid JSON matching this exact schema:
     "stairs": number,
     "rooftops": number,
     "gardenAreaSqm": number,
-    "designConcept": "string (e.g. 중정형 모던 단독주택)"
+    "designConcept": "string"
   } | null,
-  "candidates": [],
+  "partPatches": [
+    {
+      "id": "existing solid id or empty to match by groupName",
+      "groupName": "target groupName (e.g. 지붕, 메인동, 별채, 기둥)",
+      "position": [x, y, z] | null,
+      "scale": [sx, sy, sz] | null,
+      "rotation": [rx, ry, rz] | null,
+      "color": "#hex" | null,
+      "material": "stucco|wood|concrete|glass|steel|titanium|gold" | null
+    }
+  ],
   "deleteFilter": {
-    "groupNames": ["다리"],
+    "groupNames": [],
     "solidIds": [],
     "nodeIds": [],
     "region": "all" | "left" | "right" | "top" | "bottom" | "reinforcement"
@@ -129,29 +159,28 @@ Return ONLY valid JSON matching this exact schema:
   "nodes": [],
   "beams": [],
   "activeTool": "draw" | "erase" | "move" | "deform" | "spray" | null,
-  "activeMaterial": "hologram" | "steel" | "titanium" | "carbon" | "gold" | null,
+  "activeMaterial": "stucco" | "wood" | "concrete" | "glass" | "steel" | "titanium" | "gold" | null,
   "activeColor": "#hex" | null,
   "targetLoadKg": number | null,
   "isSimulating": boolean | null,
   "camera": { "changed": boolean, "mode": "free"|"auto_rotate"|"step_rotate"|"preset", "yawDeg": number, "pitchDeg": number, "speed": number, "zoomFactor": number, "preset": "front"|"top"|"iso" }
 }
 
-DIRECT ARCHITECTURAL GENERATION RULES (NO RE-QUESTIONING):
-1. NEVER ask follow-up questions for building specs! Immediately use intent: "build_architecture" whenever building creation or redesign is requested.
-2. AESTHETIC KDS 41 12 00 ARCHITECTURAL GENERATION ("build_architecture"):
-   - Design the structure considering Korean Building Code & KDS 41 12 00 design live loads.
-   - Compose 10-18 coordinated primitives & structural columns:
-     * If undergroundFloors > 0 and undergroundAreaSqm > 0: place subterranean basement foundation volumes below ground (y < 0, e.g. center y = -0.35 * undergroundFloors, scaleY = 0.7 * undergroundFloors, color "#334155") representing the underground basement structure!
-     * Grounded green garden deck(s) ("#10b981", thin slab y=0.04)
-     * Above-ground main architectural volumes (detached house courtyard/cantilevered volumes or multi-story stepped volumes) resting flush on y = 0 (center y = scaleY / 2)
-     * Rooftop terrace slabs (rooftops count) with rooftop garden greenery ("#10b981")
-     * Vertical elevator & stair core towers (elevators & stairs count)
-     * Perimeter load-bearing columns (nodes & beams) scaled appropriately to support structural loads!
-   - Set "groupName": "건물" on every generated element.
-3. PARTIAL DELETION ("delete_part"):
-   - Filter by deleteFilter.groupNames or region without wiping unrelated groups.
-4. STATE PRESERVATION:
-   - Leave activeMaterial, activeColor, activeTool, targetLoadKg, isSimulating as NULL unless explicitly requested.`;
+CRITICAL DESIGN & EDITING RULES:
+1. BRIGHT GALLERY-WORTHY ARCHITECTURE ("build_architecture"):
+   - NEVER make a plain single rectangle or ugly random stack! Compose an iconic, museum-grade modern architectural sculpture using 12-18 harmonious, interlocking volumes with bright daylight colors:
+     * Warm White Stucco ("#f8fafc", material: "stucco"), Natural Oak Wood louvers/soffits ("#e7d5be", material: "wood"), Light Architectural Concrete ("#e2e8f0", material: "concrete"), Sky-tinted Low-E Glass ("#bae6fd", material: "glass"), Soft Mint Garden Lawn ("#86efac", thin slab y=0.03).
+     * Compose an L-shaped or U-shaped courtyard ground floor, dramatic cantilevered 2nd/3rd floor volumes rotated or offset at clean architectural angles, floating roof canopies, sculptural cylindrical/conical atrium skylights, and slender perimeter columns (nodes & beams).
+     * Give descriptive Korean "groupName" to each part (e.g., "1층 메인동", "2층 캔틸레버동", "경사 지붕", "중정 정원", "수직 코어", "테라스 데크") so the user can later modify specific parts!
+   - If undergroundFloors > 0 and undergroundAreaSqm > 0: place a clean light-slate basement volume below y = 0 (center y = -0.3 * undergroundFloors, scaleY = 0.6 * undergroundFloors, color "#cbd5e1", material "concrete").
+   - All above-ground grounded elements must rest flush on y = 0 (center y = scaleY / 2).
+
+2. IN-PLACE PARTIAL MODIFICATION ("modify_in_place") — VERY IMPORTANT:
+   - When the user asks to modify an existing part (e.g. "지붕을 높여줘", "2층을 나무 재질로 바꿔줘", "왼쪽 날개를 넓혀줘", "특정 부위 색/크기 변경"), DO NOT return "clear" or "replace_scene" and DO NOT spawn duplicate solids!
+   - Instead, use intent: "modify_in_place" and populate "partPatches" matching the existing solid's "id" or "groupName" from currentState.solids, specifying ONLY the updated scale/position/rotation/material/color!
+
+3. 3D PRINTING / FREE 3D DESIGN MODE ("replace_scene" or "add_object"):
+   - When usageType is "3D 디자인" (e.g. mechanical bracket, vase, drone frame, figurine, custom 3D printable part), generate clean, manifold, watertight 3D printable geometry using smooth solids (cylinder, torus, cone, sphere, box) in bright studio colors ("#f8fafc", "#e2e8f0", "#bae6fd", "#fde68a").`;
 
 export async function executeNaturalCommand(
   userPrompt: string,
@@ -176,13 +205,6 @@ export async function executeNaturalCommand(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 14000);
   const bounds = computeSceneBounds(current);
-
-  const existingGroups = Array.from(
-    new Set([
-      ...(current.solids ?? []).map((s) => s.groupName).filter(Boolean),
-      ...current.nodes.map((n) => n.groupName).filter(Boolean),
-    ])
-  );
 
   const recentHistory = (current.chatHistory ?? []).slice(-4).map((m) => ({
     role: m.role,
@@ -213,13 +235,21 @@ export async function executeNaturalCommand(
             role: 'user',
             content: JSON.stringify({
               command: userPrompt,
-              existingGroups,
               currentBuildingSpec: lockedSpec ?? current.buildingSpec ?? null,
               sceneBounds: bounds,
               currentState: {
                 activeMaterial: current.activeMaterial,
                 activeColor: current.activeColor,
-                solids: current.solids ?? [],
+                solids: (current.solids ?? []).map((s) => ({
+                  id: s.id,
+                  groupName: s.groupName,
+                  shape: s.shape,
+                  position: s.position,
+                  scale: s.scale,
+                  rotation: s.rotation,
+                  color: s.color,
+                  material: s.material,
+                })),
                 nodes: current.nodes,
                 beams: current.beams,
               },
@@ -246,26 +276,33 @@ export async function executeNaturalCommand(
       res.activeColor && typeof res.activeColor === 'string' && res.activeColor.startsWith('#')
         ? res.activeColor
         : matChanged
-        ? MATERIAL_DEFAULT_COLORS[nextMaterial]
+        ? MATERIAL_CATALOG[nextMaterial]?.hex ?? current.activeColor
         : current.activeColor;
 
     const mapSolids = (arr: any[]): SolidPrimitive[] =>
-      (arr || []).map((s: any, idx: number) => ({
-        id: String(s.id || `solid_${Date.now()}_${idx}`),
-        groupName: s.groupName ? String(s.groupName) : '건물',
-        shape: (['sphere', 'box', 'cylinder', 'cone', 'torus'].includes(s.shape) ? s.shape : 'box') as SolidShape,
-        position: [Number(s.position?.[0] ?? 0), Number(s.position?.[1] ?? 1), Number(s.position?.[2] ?? 0)],
-        scale: [Number(s.scale?.[0] ?? 1), Number(s.scale?.[1] ?? 1), Number(s.scale?.[2] ?? 1)],
-        rotation: s.rotation ? [Number(s.rotation[0] ?? 0), Number(s.rotation[1] ?? 0), Number(s.rotation[2] ?? 0)] : undefined,
-        color: s.color && String(s.color).startsWith('#') ? String(s.color) : nextColor,
-        material: s.material ?? nextMaterial,
-        isFixed: Boolean(s.isFixed),
-      }));
+      (arr || []).map((s: any, idx: number) => {
+        const mat: CadMaterial = s.material ?? nextMaterial ?? 'stucco';
+        const col =
+          s.color && String(s.color).startsWith('#')
+            ? String(s.color)
+            : MATERIAL_CATALOG[mat]?.hex ?? '#f8fafc';
+        return {
+          id: String(s.id || `solid_${Date.now()}_${idx}`),
+          groupName: s.groupName ? String(s.groupName) : '건축 매스',
+          shape: (['sphere', 'box', 'cylinder', 'cone', 'torus'].includes(s.shape) ? s.shape : 'box') as SolidShape,
+          position: [Number(s.position?.[0] ?? 0), Number(s.position?.[1] ?? 1), Number(s.position?.[2] ?? 0)],
+          scale: [Number(s.scale?.[0] ?? 1), Number(s.scale?.[1] ?? 1), Number(s.scale?.[2] ?? 1)],
+          rotation: s.rotation ? [Number(s.rotation[0] ?? 0), Number(s.rotation[1] ?? 0), Number(s.rotation[2] ?? 0)] : undefined,
+          color: col,
+          material: mat,
+          isFixed: Boolean(s.isFixed),
+        };
+      });
 
     const mapNodes = (arr: any[]): NodePoint[] =>
       (arr || []).map((n: any) => ({
         id: String(n.id),
-        groupName: n.groupName ? String(n.groupName) : '건물',
+        groupName: n.groupName ? String(n.groupName) : '기둥 코어',
         position: [Number(n.position?.[0] ?? 0), Number(n.position?.[1] ?? 0), Number(n.position?.[2] ?? 0)],
         isFixed: Boolean(n.isFixed),
         role: n.role === 'reinforcement' ? 'reinforcement' : 'primary',
@@ -276,11 +313,11 @@ export async function executeNaturalCommand(
         .filter((b: any) => validIds.has(b.startNodeId) && validIds.has(b.endNodeId))
         .map((b: any) => ({
           id: String(b.id),
-          groupName: b.groupName ? String(b.groupName) : '건물',
+          groupName: b.groupName ? String(b.groupName) : '기둥 코어',
           startNodeId: String(b.startNodeId),
           endNodeId: String(b.endNodeId),
           stress: Math.max(0.05, Math.min(1, Number(b.stress ?? 0.2))),
-          color: nextColor,
+          color: '#cbd5e1',
           material: nextMaterial,
           role: b.role === 'reinforcement' ? 'reinforcement' : 'primary',
         }));
@@ -299,7 +336,7 @@ export async function executeNaturalCommand(
         }
       : res.buildingSpec
       ? {
-          projectName: String(res.buildingSpec.projectName || 'AirForge 모던 단독주택'),
+          projectName: String(res.buildingSpec.projectName || 'AirForge 모던 중정 단독주택'),
           usageType: res.buildingSpec.usageType || '단독주택',
           siteAreaSqm: Number(res.buildingSpec.siteAreaSqm || 450),
           buildingAreaSqm: Number(res.buildingSpec.buildingAreaSqm || 210),
@@ -311,6 +348,8 @@ export async function executeNaturalCommand(
           households: Number(res.buildingSpec.households || 1),
           unitTypeCount: Number(res.buildingSpec.unitTypeCount || 2),
           unitTypes: current.buildingSpec?.unitTypes,
+          exteriorWindows: current.buildingSpec?.exteriorWindows,
+          mepPipes: current.buildingSpec?.mepPipes,
           floorLoadsKn: current.buildingSpec?.floorLoadsKn,
           elevators: Number(res.buildingSpec.elevators ?? 0),
           stairs: Number(res.buildingSpec.stairs || 1),
@@ -320,19 +359,63 @@ export async function executeNaturalCommand(
         }
       : current.buildingSpec;
 
-    let assistantText = String(res.assistantReply || '명령을 처리했습니다.');
+    let assistantText = String(res.assistantReply || '설계를 반영했습니다.');
 
-    if (res.intent === 'build_architecture') {
-      nextSolids = mapSolids(res.solids);
-      nextNodes = mapNodes(res.nodes);
-      const validIds = new Set(nextNodes.map((n) => n.id));
-      nextBeams = mapBeams(res.beams, validIds);
+    if (res.intent === 'modify_in_place' && Array.isArray(res.partPatches) && res.partPatches.length > 0) {
+      // 기존 도형을 지우거나 중복 생성하지 않고 해당 부위만 제자리 수정
+      nextSolids = nextSolids.map((solid) => {
+        const patch = res.partPatches.find(
+          (p: any) =>
+            (p.id && p.id === solid.id) ||
+            (p.groupName &&
+              solid.groupName &&
+              solid.groupName.toLowerCase().includes(String(p.groupName).toLowerCase()))
+        );
+        if (!patch) return solid;
+        const patchedMat: CadMaterial = patch.material ?? solid.material ?? 'stucco';
+        const patchedColor =
+          patch.color && String(patch.color).startsWith('#')
+            ? String(patch.color)
+            : patch.material
+            ? MATERIAL_CATALOG[patchedMat]?.hex ?? solid.color
+            : solid.color;
+        return {
+          ...solid,
+          position: Array.isArray(patch.position)
+            ? [Number(patch.position[0]), Number(patch.position[1]), Number(patch.position[2])]
+            : solid.position,
+          scale: Array.isArray(patch.scale)
+            ? [Number(patch.scale[0]), Number(patch.scale[1]), Number(patch.scale[2])]
+            : solid.scale,
+          rotation: Array.isArray(patch.rotation)
+            ? [Number(patch.rotation[0]), Number(patch.rotation[1]), Number(patch.rotation[2])]
+            : solid.rotation,
+          material: patchedMat,
+          color: patchedColor,
+        };
+      });
 
       if (nextBuildingSpec) {
-        nextBuildingSpec = hydrateBuildingSpec(nextBuildingSpec, nextSolids);
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
+      }
+    } else if (res.intent === 'build_architecture') {
+      if (nextBuildingSpec) {
+        // 건축 제원(BuildingSpec)이 있는 경우: 빈틈없는 내벽·외벽·창호·옥상 엔진으로 일체형 생성
+        const built = generateWatertightArchitecture(nextBuildingSpec, nextMaterial);
+        nextSolids = built.solids;
+        nextNodes = built.nodes;
+        nextBeams = built.beams;
+        nextBuildingSpec = built.spec;
+
         const report = evaluateBuildingSpec(nextBuildingSpec, nextMaterial);
         const eok = (report.totalMaterialCost / 100000000).toFixed(1);
-        assistantText += `\n\n[KDS 건축법·자재비 자동 산출]\n• 세대 구성: 총 ${nextBuildingSpec.households}세대 (${nextBuildingSpec.unitTypeCount}개 디자인 유형 — 아래에서 평면도/배치 선택)\n• 법정 부설주차장: 필수 ${report.requiredParkingCount}대 (${report.requiredParkingAreaSqm.toLocaleString()}㎡)\n• 총 예상 자재비: 약 ${eok}억 원`;
+        assistantText += `\n\n[건축·설비·자재비 자동 연동 결과]\n• 내벽·외벽·창호 ${nextBuildingSpec.exteriorWindows?.length ?? 0}개소 및 수도·전기 배관 ${nextBuildingSpec.mepPipes?.length ?? 0}계통 빈틈없이 배치 완료\n• 총 예상 공사 자재비: 약 ${eok}억 원`;
+      } else {
+        // 건축 제원 없이 자유 조형(3D 디자인)만 요청한 경우: 기존 AI 솔리드 매핑 유지
+        nextSolids = mapSolids(res.solids);
+        nextNodes = mapNodes(res.nodes);
+        const validIds = new Set(nextNodes.map((n) => n.id));
+        nextBeams = mapBeams(res.beams, validIds);
       }
     } else if (res.intent === 'delete_part') {
       const df = res.deleteFilter || {};
@@ -375,18 +458,22 @@ export async function executeNaturalCommand(
           !matchesGroup(b.groupName) &&
           !(region === 'reinforcement' && b.role === 'reinforcement')
       );
+
+      if (nextBuildingSpec && nextSolids.length > 0) {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
+      }
     } else if (res.intent === 'clear') {
       nextSolids = [];
       nextNodes = [];
       nextBeams = [];
       nextBuildingSpec = undefined;
-    } else if (res.intent === 'replace_scene' || res.intent === 'transform_existing') {
+    } else if (res.intent === 'replace_scene') {
       nextSolids = mapSolids(res.solids);
       nextNodes = mapNodes(res.nodes);
       const validIds = new Set(nextNodes.map((n) => n.id));
       nextBeams = mapBeams(res.beams, validIds);
-      if (nextBuildingSpec) {
-        nextBuildingSpec = hydrateBuildingSpec(nextBuildingSpec, nextSolids);
+      if (nextBuildingSpec && nextBuildingSpec.usageType !== '3D 디자인') {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
       }
     } else if (res.intent === 'add_object') {
       const addedSolids = mapSolids(res.solids);
@@ -397,9 +484,14 @@ export async function executeNaturalCommand(
       nextSolids = [...nextSolids, ...addedSolids];
       nextNodes = allNodes;
       nextBeams = [...nextBeams, ...addedBeams];
+      if (nextBuildingSpec && nextBuildingSpec.usageType !== '3D 디자인') {
+        nextBuildingSpec = syncBuildingWithSolids(nextBuildingSpec, nextSolids);
+      }
     } else if (res.intent === 'style_or_tool' || matChanged || Boolean(res.activeColor)) {
       nextSolids = nextSolids.map((s) =>
-        s.color === '#10b981' ? s : { ...s, material: nextMaterial, color: nextColor }
+        s.color === '#86efac' || s.color === '#10b981'
+          ? s
+          : { ...s, material: nextMaterial, color: nextColor }
       );
       nextBeams = nextBeams.map((b) => ({ ...b, material: nextMaterial, color: nextColor }));
     }
@@ -433,6 +525,7 @@ export async function executeNaturalCommand(
       beams: nextBeams,
       buildingSpec: nextBuildingSpec,
       selectedUnitTypeId: res.intent === 'clear' ? null : current.selectedUnitTypeId,
+      selectedPartId: res.intent === 'clear' ? null : current.selectedPartId,
       activeTool: res.activeTool ?? current.activeTool,
       activeMaterial: nextMaterial,
       activeColor: nextColor,

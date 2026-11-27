@@ -65,16 +65,25 @@ export function viewAxisToWorld(viewAxis: number, cameraQuat: readonly number[])
 export const snapDeg = (deg: number, step: number) => Math.round(deg / step) * step;
 
 /**
- * 회전 중 걸림(디텐트): step 배수 ±hold 안에서는 그 배수에 붙어 있고,
- * 벗어나면 남은 구간을 늘려서 다음 배수까지 이어줌 (연속·단조 → 튀지 않음)
- *   hold=4, step=15: 손 11°~19° → 15° 고정, 19°~22.5° → 15°~22.5°로 빠르게 넘어감
+ * 회전 중 걸림(디텐트): step 배수 ±hold 안에서는 그 배수에 딱 붙어 있고,
+ * 두 걸림 구간 사이는 늘려서 다음 배수까지 빠르게 넘어감 (연속·단조 → 튀지 않음)
+ * strongHold: strongEvery 배수(90°)는 더 넓게 걸림 (직각이 제일 자주 쓰임)
+ *   step=15, hold=6.5, strong 90°±11: 손 82.5°~101° → 90° 고정, 101° 넘으면 바로 105° (구간이 겹치면 중간값 없이 점프)
  */
-export function detentDeg(deg: number, step: number, hold: number): number {
+export function detentDeg(deg: number, step: number, hold: number, strongHold = hold, strongEvery = 90): number {
+  const holdAt = (k: number) => (Math.abs(k) % strongEvery === 0 ? strongHold : hold);
   const k = snapDeg(deg, step);
   const d = deg - k;
-  const half = step / 2;
-  if (Math.abs(d) <= hold) return k;
-  return k + Math.sign(d) * ((Math.abs(d) - hold) * half) / (half - hold);
+  const h = holdAt(k);
+  if (Math.abs(d) <= h) return k;
+  // 이 걸림 구간 끝 ~ 다음 걸림 구간 시작을 k ~ k2로 선형 매핑
+  const sign = Math.sign(d);
+  const k2 = k + sign * step;
+  const from = k + sign * h;
+  const to = k2 - sign * holdAt(k2);
+  const span = to - from;
+  if (sign * span <= 1e-6) return k2;
+  return k + ((deg - from) / span) * (k2 - k);
 }
 
 // ─────────────────────────────────────────────────────────────

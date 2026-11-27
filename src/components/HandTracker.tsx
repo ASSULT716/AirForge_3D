@@ -91,7 +91,9 @@ const ROT_DEADZONE_DEG = 2;
 /** 놓을 때 스냅 단위 (회전 중 걸림 간격도 같음) */
 const ROT_SNAP_DEG = 15;
 /** 회전 중 걸림: 스냅 각도 ±이 범위 안이면 그 각도에 붙어 있음 (클수록 강하게 걸림, ROT_SNAP_DEG/2 미만) */
-const ROT_DETENT_HOLD_DEG = 5.5;
+const ROT_DETENT_HOLD_DEG = 6.5;
+/** 90° 배수는 더 강하게 걸림 (±이 범위). 이웃 15° 구간과 겹치면 중간값 없이 바로 다음 걸림으로 점프 (가장 딱딱함) */
+const ROT_DETENT_STRONG_DEG = 11;
 /**
  * 인식은 20~30Hz라 각도가 계단식으로 들어옴 → 화면 프레임마다 목표 각도로 보간해서 보냄.
  * 이 시간(≈인식 간격)에 걸쳐 따라감. 너무 크면 손보다 늦게 따라옴
@@ -1125,7 +1127,7 @@ export default function HandTracker(props: Props) {
           if (r.view !== null && r.world) {
             const raw = tw[r.view] * r.world.sign;
             // 15°마다 탁 걸림 → 정확한 각도에 맞추기 쉬움
-            const target = detentDeg(raw, ROT_SNAP_DEG, ROT_DETENT_HOLD_DEG);
+            const target = detentDeg(raw, ROT_SNAP_DEG, ROT_DETENT_HOLD_DEG, ROT_DETENT_STRONG_DEG);
             const onDetent = target === snapDeg(target, ROT_SNAP_DEG);
             // 목표 각도만 갱신. 실제 전달은 animateRot이 화면 프레임마다 보간해서 함
             // 걸림 각도는 데드존 무시하고 바로 붙임 (안 그러면 13.5° 같은 데서 멈춤)
@@ -1404,7 +1406,9 @@ export default function HandTracker(props: Props) {
       animLast = now;
       const r = draw.current.rot;
       if (!r.active || !r.world || r.shown === r.out) return;
-      r.shown += (r.out - r.shown) * Math.min(1, dt / ROT_INTERP_MS);
+      // 걸림 각도로 들어갈 땐 보간 없이 바로 → "딱" 걸리는 느낌. 걸림 사이 이동만 부드럽게
+      if (r.out === snapDeg(r.out, ROT_SNAP_DEG)) r.shown = r.out;
+      else r.shown += (r.out - r.shown) * Math.min(1, dt / ROT_INTERP_MS);
       if (Math.abs(r.out - r.shown) < 0.05) r.shown = r.out;
       if (Math.abs(r.shown - r.emitted) >= ROT_EMIT_STEP_DEG || r.shown === r.out) {
         if (r.shown === r.emitted) return;

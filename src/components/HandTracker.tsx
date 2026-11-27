@@ -37,11 +37,11 @@ const ACTIVE_Y: [number, number] = [0.1, 0.9];
 const DEPTH_Y: [number, number] = [0.2, 0.8];
 
 const EMA_ALPHA = 0.35; // 클수록 반응 빠름, 작을수록 부드러움
-const PINCH_ON = 0.3; // (엄지-검지 거리) / (손목-중지MCP 거리)
-const PINCH_OFF = 0.45;
+const PINCH_ON = 0.15; // (엄지-검지 거리) / (손목-중지MCP 거리). 손끝이 실제로 닿아야 ~0.15 이하
+const PINCH_OFF = 0.3;
 const PINCH_COOLDOWN_MS = 250;
 /** 핀치가 이 시간 이상 유지돼야 노드 확정 (주먹 쥐는 도중 엄지·검지가 스치는 오인식 방지) */
-const PINCH_CONFIRM_MS = 120;
+const PINCH_CONFIRM_MS = 200;
 const FIST_HOLD_MS = 350;
 const HANDS_LOST_RESET_MS = 1000;
 /** GestureRecognizer가 이 점수 이상으로 Closed_Fist라고 하면 주먹 */

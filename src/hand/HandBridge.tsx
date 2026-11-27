@@ -67,7 +67,7 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
     }));
   };
 
-  // 움켜쥐기 회전: 잡은 순간 원본 저장 → 매번 원본에 적용 (선택 없으면 전체)
+  // 움켜쥐기 회전: 잡은 순간 원본 저장 → 매번 원본에 적용 (선택 없으면 회전 안 함)
   const rotSession = useRef<RotateSession | null>(null);
   const handleObjectRotate = (e: ObjectRotateEvent) => {
     const s = structureRef.current;
@@ -78,9 +78,13 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
         setStructure((p) => ({ ...p, statusMessage: '시뮬레이션 중엔 회전할 수 없어요' }));
         return;
       }
-      const nodeIds = selected ? selected.nodeIds : s.nodes.map((n) => n.id);
-      const solidIds = selected ? selected.solidIds : (s.solids ?? []).map((x) => x.id);
-      rotSession.current = startSession(s, nodeIds, solidIds);
+      // 선택된 게 없으면 회전 안 함 (전체 회전 금지)
+      if (!selected) {
+        rotSession.current = null;
+        setStructure((p) => ({ ...p, statusMessage: '회전할 구조물을 먼저 선택하세요' }));
+        return;
+      }
+      rotSession.current = startSession(s, selected.nodeIds, selected.solidIds);
       return;
     }
     const ses = rotSession.current;
@@ -93,7 +97,7 @@ export default function HandBridge({ structure, setStructure, onPinchAction, onV
     setStructure((p) => {
       const next = applySession(p, ses, axis, deg, final);
       if (e.phase !== 'end') return next;
-      const target = selected ? selected.label : '전체';
+      const target = selected?.label ?? '';
       return { ...next, statusMessage: `회전: ${target} ${axis.toUpperCase()}축 ${deg >= 0 ? '+' : ''}${deg}°` };
     });
   };

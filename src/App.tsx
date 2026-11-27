@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   StructureState,
   NodePoint,
@@ -9,12 +9,16 @@ import {
 } from './types/cad';
 import { WEAK_BRIDGE_PRESET, TABLE_3D_PRESET } from './data/presets';
 import SceneCanvas from './components/SceneCanvas';
-import HandTracker, { type HandCursorState } from './components/HandTracker';
+import HandTracker, { type HandCursorState, type ObjectRotateEvent } from './components/HandTracker';
 import HudOverlay from './components/HudOverlay';
 import { reinforceStructure, executeNaturalCommand } from './services/aiReinforce';
 import { pushCameraZoom } from './services/cameraGesture';
+import { describeSelection, pruneSelection, type Selection } from './services/selection';
+import { applySession, startSession, type RotateSession } from './services/handRotate';
 
 const snap = (v: number) => Math.round(v * 4) / 4;
+/** 선택 커서가 구조물에서 벗어난 뒤에도 이 시간 동안은 주먹 쥐면 그 구조물 선택 (주먹 쥐는 사이 커서가 흔들림) */
+const HOVER_GRACE_MS = 600;
 
 export default function App() {
   const [structure, setStructure] = useState<StructureState>({
@@ -33,8 +37,66 @@ export default function App() {
   const [isChatExpanded, setIsChatExpanded] = useState(true);
   const lastDrawnNodeIdRef = useRef<string | null>(null);
   const [handCursor, setHandCursor] = useState<HandCursorState | null>(null);
+  // ── 손 선택 (✌️ 조준 → 주먹 확정). hover는 SceneCanvas가 화면 투영으로 계산 ──
+  const [hoverSel, setHoverSel] = useState<Selection | null>(null);
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const hoverMemo = useRef<{ sel: Selection | null; until: number }>({ sel: null, until: 0 });
+  const handleHoverSelection = useCallback((sel: Selection | null) => {
+    setHoverSel(sel);
+    hoverMemo.current = sel
+      ? { sel, until: Infinity }
+      : { sel: hoverMemo.current.sel, until: performance.now() + HOVER_GRACE_MS };
+  }, []);
+  const handleHandSelect = () => {
+    const h = hoverMemo.current;
+    const hovered = h.sel && performance.now() < h.until ? h.sel : null;
+    // 이미 선택된 구조물을 다시 선택하면 해제 (토글)
+    const sel = hovered && hovered.key === liveSelection?.key ? null : hovered;
+    setSelection(sel);
+    setStructure((p) => ({ ...p, statusMessage: sel ? `선택: ${describeSelection(sel)}` : '선택 해제' }));
+  };
+  // 삭제·리셋·프리셋 로드로 요소가 사라지면 선택도 정리
+  const liveSelection = useMemo(() => selection && pruneSelection(structure, selection), [structure, selection]);
+  const liveHover = useMemo(() => hoverSel && pruneSelection(structure, hoverSel), [structure, hoverSel]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelection(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // ── 손 움켜쥐기 회전: 잡은 순간 원본 저장 → 매번 원본에 적용 (선택 없으면 전체) ──
+  const rotSession = useRef<RotateSession | null>(null);
+  const handleObjectRotate = (e: ObjectRotateEvent) => {
+    if (e.phase === 'start') {
+      if (structure.isSimulating) {
+        rotSession.current = null;
+        setStructure((p) => ({ ...p, statusMessage: '시뮬레이션 중엔 회전할 수 없어요' }));
+        return;
+      }
+      const nodeIds = liveSelection ? liveSelection.nodeIds : structure.nodes.map((n) => n.id);
+      const solidIds = liveSelection ? liveSelection.solidIds : (structure.solids ?? []).map((x) => x.id);
+      rotSession.current = startSession(structure, nodeIds, solidIds);
+      return;
+    }
+    const ses = rotSession.current;
+    if (!ses) return;
+    if (e.phase === 'end') rotSession.current = null;
+    if (!e.axis) return;
+    const { axis, deg } = e;
+    // 0°로 놓으면 원위치 (그리드 재스냅으로 비스듬한 구조물이 틀어지지 않게 final 처리 안 함)
+    const final = e.phase === 'end' && deg !== 0;
+    setStructure((p) => {
+      const next = applySession(p, ses, axis, deg, final);
+      if (e.phase !== 'end') return next;
+      const target = liveSelection ? liveSelection.label : '전체';
+      return { ...next, statusMessage: `회전: ${target} ${axis.toUpperCase()}축 ${deg >= 0 ? '+' : ''}${deg}°` };
+    });
+  };
+
   const linkFrom =
-    handCursor?.chainActive && structure.activeTool === 'draw'
+    handCursor?.chainActive && !handCursor.selecting && structure.activeTool === 'draw'
       ? structure.nodes.find((n) => n.id === lastDrawnNodeIdRef.current)?.position ?? null
       : null;
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -256,7 +318,16 @@ export default function App() {
       <SceneCanvas
         structure={structure}
         onUpdateStress={(beams) => setStructure((prev) => ({ ...prev, beams }))}
-        handCursor={handCursor && { position: handCursor.position, pinching: handCursor.pinching, linkFrom }}
+        handCursor={
+          handCursor && {
+            position: handCursor.position,
+            pinching: handCursor.pinching,
+            linkFrom,
+            selecting: handCursor.selecting,
+          }
+        }
+        selection={{ hover: liveHover, selected: liveSelection }}
+        onHoverSelection={handleHoverSelection}
       />
 
       <HandTracker
@@ -265,6 +336,8 @@ export default function App() {
         onVoiceCommand={handleVoiceCommand}
         onCursor={setHandCursor}
         onCameraZoom={pushCameraZoom}
+        onSelect={handleHandSelect}
+        onObjectRotate={handleObjectRotate}
       />
 
       <HudOverlay

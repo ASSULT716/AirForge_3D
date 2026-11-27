@@ -104,6 +104,25 @@ export interface BuildingSpec {
   designConcept?: string;
 }
 
+/**
+ * (조원호) 회전체 원기둥 단면 (shape === 'cylinder'일 때만). 없으면 일반 원기둥.
+ * 스케치업 "면 스케일"(원뿔·원뿔대·접시)과 "원형 면 오프셋 + 밀기"(컵·파이프)용
+ */
+export interface LatheProfile {
+  /** 윗면/아랫면 반지름 비율 (1 = 원기둥, 0 = 뾰족, 1보다 크면 벌어짐) */
+  top: number;
+  bottom: number;
+  /** 오프셋으로 만든 안쪽 구멍 */
+  bore?: {
+    /** 구멍을 시작한 면 */
+    from: 'top' | 'bottom';
+    /** 테두리 두께 = 그 면 반지름 × wall (0~1) */
+    wall: number;
+    /** 깊이 = 높이 × depth (0 = 안쪽 원만, 1 = 관통) */
+    depth: number;
+  };
+}
+
 export interface SolidPrimitive {
   id: string;
   groupName?: string;
@@ -125,6 +144,7 @@ export interface SolidPrimitive {
   material?: CadMaterial;
   isFixed?: boolean;
   floorIndex?: number; // -1: 지하, 1~N: 지상층, 99: 옥상
+  lathe?: LatheProfile;
 }
 
 export interface NodePoint {

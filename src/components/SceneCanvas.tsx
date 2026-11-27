@@ -15,6 +15,7 @@ import {
 import { getKdsLoadRange, MATERIAL_CATALOG } from '../utils/buildingEstimator';
 import { getFloorColor } from '../utils/architectureGenerator';
 import HandSceneLayer from '../hand/HandSceneLayer';
+import { latheGeometry } from '../services/latheShape';
 
 interface Props {
   structure: StructureState;
@@ -72,7 +73,9 @@ function computeBeamTransform(p1: THREE.Vector3, p2: THREE.Vector3) {
   return { mid, length, quat };
 }
 
-function SolidShapeGeometry({ shape }: { shape: SolidPrimitive['shape'] }) {
+function SolidShapeGeometry({ shape, lathe }: { shape: SolidPrimitive['shape']; lathe?: SolidPrimitive['lathe'] }) {
+  // (조원호) 면 스케일·원형 오프셋으로 바뀐 원기둥 (원뿔대·컵·파이프) — src/services/latheShape.ts
+  if (shape === 'cylinder' && lathe) return <primitive object={latheGeometry(lathe)} attach="geometry" dispose={null} />;
   if (shape === 'sphere') return <sphereGeometry args={[0.8, 24, 24]} />;
   if (shape === 'cone') return <coneGeometry args={[0.8, 1.4, 20]} />;
   if (shape === 'cylinder') return <cylinderGeometry args={[0.7, 0.7, 1.2, 24]} />;
@@ -134,7 +137,7 @@ function SolidMeshView({
         }}
       >
         <mesh>
-          <SolidShapeGeometry shape={solid.shape} />
+          <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
           <meshStandardMaterial
             color={heatColor}
             emissive={heatColor}
@@ -146,7 +149,7 @@ function SolidMeshView({
           />
         </mesh>
         <mesh scale={[1.003, 1.003, 1.003]}>
-          <SolidShapeGeometry shape={solid.shape} />
+          <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
           <meshBasicMaterial color="#64748b" wireframe transparent opacity={0.35} />
         </mesh>
       </group>
@@ -182,7 +185,7 @@ function SolidMeshView({
         onPointerOut={() => onLeaveFloor?.()}
       >
         <mesh>
-          <SolidShapeGeometry shape={solid.shape} />
+          <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
           <meshStandardMaterial
             color={solid.partRole === 'interior_wall' ? '#0f172a' : baseHex}
             roughness={0.45}
@@ -193,7 +196,7 @@ function SolidMeshView({
         </mesh>
         {isWall && (
           <mesh scale={[1.003, 1.003, 1.003]}>
-            <SolidShapeGeometry shape={solid.shape} />
+            <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
             <meshBasicMaterial
               color={solid.partRole === 'interior_wall' ? '#0284c7' : '#475569'}
               wireframe
@@ -226,7 +229,7 @@ function SolidMeshView({
       onPointerOut={() => onLeaveFloor?.()}
     >
       <mesh>
-        <SolidShapeGeometry shape={solid.shape} />
+        <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
         <meshStandardMaterial
           color={
             isParamHighlighted
@@ -245,7 +248,7 @@ function SolidMeshView({
       </mesh>
       {/* 건축 외곽선(에지 라인) 및 선택 하이라이트 */}
       <mesh scale={[1.003, 1.003, 1.003]}>
-        <SolidShapeGeometry shape={solid.shape} />
+        <SolidShapeGeometry shape={solid.shape} lathe={solid.lathe} />
         <meshBasicMaterial
           color={isSelected ? '#0284c7' : isParamHighlighted ? '#0369a1' : '#94a3b8'}
           wireframe

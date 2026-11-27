@@ -1,9 +1,18 @@
 //(조원호) 음성 최종 텍스트 → [Jev 원자 판단] → [코드 truth table] → 실행할 명령
 // 빠른 조작(회전·재질·도구·하중)만 여기서 처리. 그 외 / Jev 실패 → Groq(executeNaturalCommand)로 넘김
-import { extractAngleCandidates, parseLoadKg, type AngleCandidate } from './koreanNumber';
+import {
+  extractAngleCandidates,
+  extractDistanceCandidates,
+  extractScaleCandidates,
+  parseLoadKg,
+  type AngleCandidate,
+  type DistanceCandidate,
+  type ScaleCandidate,
+} from './koreanNumber';
 import {
   AXIS_OPTION,
   DIRECTION_SIGN,
+  MOVE_DIRECTION_OPTION,
   IS_COMMAND_NO,
   IS_COMMAND_YES,
   JEV_ENDPOINT,
@@ -14,16 +23,36 @@ import {
   type Axis,
   type Intent,
   type Material,
+  type MoveDirection,
   type Tool,
 } from './jevQuestions';
 
-export type { Axis, Material, Tool } from './jevQuestions';
+export type { Axis, Material, MoveDirection, Tool } from './jevQuestions';
 
 export type VoiceCommand =
   | { type: 'rotate'; axis: Axis; deg: number }
   | { type: 'set_material'; material: Material }
   | { type: 'set_tool'; tool: Tool }
-  | { type: 'set_load'; kg: number };
+  | { type: 'set_load'; kg: number }
+  /** meters null = 거리 안 말함 → 늘리기 모드로 바꾸고 손으로 끌게 안내 */
+  | { type: 'push_pull'; dir: MoveDirection | null; meters: number | null; shrink: boolean }
+  | { type: 'move'; dir: MoveDirection | null; meters: number | null }
+  /** meters null = 옆에 붙여서 복사 */
+  | { type: 'copy'; dir: MoveDirection | null; meters: number | null }
+  | { type: 'delete' }
+  /** meters null = 오프셋 모드로 바꾸고 손으로 끌게 */
+  | { type: 'offset'; meters: number | null }
+  /** factor null = 크기 모드로 바꾸고 손으로 끌게 */
+  | { type: 'scale'; factor: number | null }
+  | { type: 'draw'; shape: 'rect' | 'circle' }
+  /** 원기둥 한쪽 면 반지름 비율 (0 = 뾰족). null = 면 크기 모드 */
+  | { type: 'taper'; end: 'top' | 'bottom'; ratio: number | null }
+  /** 안쪽 파기 (meters null = 절반 깊이, through = 관통) */
+  | { type: 'dig'; meters: number | null; through: boolean }
+  | { type: 'undo' };
+
+/** 선택된 구조물이 있어야 하는 명령 (없으면 AI 설계로 넘김) */
+export const NEEDS_SELECTION: ReadonlySet<VoiceCommand['type']> = new Set(['push_pull', 'move', 'copy', 'delete', 'offset', 'scale', 'taper', 'dig']);
 
 export interface Interpretation {
   /**
@@ -57,6 +86,16 @@ const MATERIAL_KO: Record<Material, string> = {
   glass: '유리',
   hologram: '홀로그램',
 };
+export const MOVE_DIR_KO: Record<MoveDirection, string> = {
+  up: '위로',
+  down: '아래로',
+  left: '왼쪽으로',
+  right: '오른쪽으로',
+  front: '앞으로',
+  back: '뒤로',
+};
+const meterKo = (m: number) => `${Math.round(m * 100) / 100}m`;
+
 const TOOL_KO: Record<Tool, string> = { draw: '펜', erase: '지우개', move: '이동', deform: '왜곡', spray: '스프레이' };
 
 export function describeCommand(c: VoiceCommand): string {
@@ -69,6 +108,28 @@ export function describeCommand(c: VoiceCommand): string {
       return `도구 → ${TOOL_KO[c.tool]}`;
     case 'set_load':
       return `하중 ${c.kg}kg`;
+    case 'push_pull': {
+      const verb = c.shrink ? '줄이기' : '늘리기';
+      return [c.dir && MOVE_DIR_KO[c.dir], c.meters !== null && meterKo(c.meters), verb].filter(Boolean).join(' ');
+    }
+    case 'move':
+      return [c.dir && MOVE_DIR_KO[c.dir], c.meters !== null && meterKo(c.meters), '이동'].filter(Boolean).join(' ');
+    case 'copy':
+      return [c.dir && MOVE_DIR_KO[c.dir], c.meters !== null && meterKo(c.meters), '복사'].filter(Boolean).join(' ');
+    case 'delete':
+      return '삭제';
+    case 'offset':
+      return c.meters !== null ? `오프셋 ${meterKo(c.meters)}` : '오프셋';
+    case 'scale':
+      return c.factor !== null ? `크기 x${c.factor}` : '크기 조절';
+    case 'draw':
+      return c.shape === 'rect' ? '사각형 그리기' : '원 그리기';
+    case 'taper':
+      return `${c.end === 'top' ? '윗면' : '아랫면'} ${c.ratio === null ? '크기' : c.ratio === 0 ? '뾰족하게' : `x${c.ratio}`}`;
+    case 'dig':
+      return c.through ? '관통' : c.meters !== null ? `${meterKo(c.meters)} 파기` : '파기';
+    case 'undo':
+      return '되돌리기';
   }
 }
 
@@ -79,8 +140,8 @@ interface ChoiceAnswer { type: 'choice'; choice: string; probabilities: Record<s
 interface NoulAnswer { type: 'noul'; noul: number }
 export interface JevResponse { model: string; answers: Record<string, ChoiceAnswer | NoulAnswer> }
 
-async function askJev(text: string, angles: AngleCandidate[]): Promise<JevResponse> {
-  const body = { model: JEV_MODEL, state: buildState(text), questions: buildQuestions(angles) };
+async function askJev(text: string, angles: AngleCandidate[], distances: DistanceCandidate[], scales: ScaleCandidate[]): Promise<JevResponse> {
+  const body = { model: JEV_MODEL, state: buildState(text), questions: buildQuestions(angles, distances, scales) };
   console.debug('[voice] Jev 요청', body);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), JEV_TIMEOUT_MS);
@@ -117,7 +178,7 @@ const choice = (r: JevResponse, id: string): string | null => {
 // Truth table: Jev 판단들 → 명령
 //   is_command < 0.3            → ignore (잡담)
 //   negated > 0.7               → ignore ("돌리지 마")
-//   undo > 0.7                  → forward (되돌리기는 Groq)
+//   undo > 0.7                  → undo (손 편집 기록이 없으면 HandBridge가 Groq로 넘김)
 //   intent = other              → forward (Groq)
 //   인자 못 만듦 (하중 숫자 없음) → forward (Groq)
 //   0.3 ≤ is_command ≤ 0.7      → confirm
@@ -128,6 +189,8 @@ export function decideFromJev(
   text: string,
   angles: AngleCandidate[],
   ctx: InterpretContext,
+  distances: DistanceCandidate[] = [],
+  scales: ScaleCandidate[] = [],
 ): Interpretation {
   const p = noul(r, 'is_command');
   if (p < IS_COMMAND_NO) {
@@ -136,12 +199,12 @@ export function decideFromJev(
   if (noul(r, 'negated') > IS_COMMAND_YES) {
     return { action: 'ignore', command: null, label: '하지 말라는 말로 이해 → 무시' };
   }
-  if (noul(r, 'undo') > IS_COMMAND_YES) return { action: 'forward', command: null, label: '되돌리기 → AI 설계로 전달' };
+  if (noul(r, 'undo') > IS_COMMAND_YES) return { action: 'execute', command: { type: 'undo' }, label: '되돌리기' };
   const intent = choice(r, 'intent') as Intent | null;
   if (!intent) throw new Error('응답에 intent 없음');
   if (intent === 'other') return { action: 'forward', command: null, label: 'AI 설계로 전달' };
 
-  const command = buildCommand(intent, r, text, angles, ctx);
+  const command = buildCommand(intent, r, text, angles, ctx, distances, scales);
   if (!command) return { action: 'forward', command: null, label: 'AI 설계로 전달 (인자 해석 실패)' };
 
   const label = describeCommand(command);
@@ -155,8 +218,38 @@ function buildCommand(
   text: string,
   angles: AngleCandidate[],
   ctx: InterpretContext,
+  distances: DistanceCandidate[],
+  scales: ScaleCandidate[],
 ): VoiceCommand | null {
+  const dir = () => MOVE_DIRECTION_OPTION[choice(r, 'move_direction') ?? 'not_specified'] ?? null;
+  // 후보가 하나뿐이면 Jev가 not_specified를 골라도 그 값 (숫자는 코드가 뽑은 것만 씀)
+  const meters = () => distances.find((d) => d.key === choice(r, 'distance'))?.meters ?? (distances.length === 1 ? distances[0].meters : null);
   switch (intent) {
+    case 'push_pull':
+      return { type: 'push_pull', dir: dir(), meters: meters(), shrink: choice(r, 'resize') === 'shrink' };
+    case 'move_part':
+      return { type: 'move', dir: dir(), meters: meters() };
+    case 'copy_part':
+      return { type: 'copy', dir: dir(), meters: meters() };
+    case 'delete_part':
+      return { type: 'delete' };
+    case 'offset_face':
+      return { type: 'offset', meters: meters() };
+    case 'scale_part': {
+      const f = scales.find((c) => c.key === choice(r, 'scale_factor'))?.factor ?? (scales.length === 1 ? scales[0].factor : null);
+      return { type: 'scale', factor: f };
+    }
+    case 'draw_shape':
+      return { type: 'draw', shape: choice(r, 'shape') === 'circle' ? 'circle' : 'rect' };
+    case 'taper_face': {
+      const end = choice(r, 'face_end') === 'bottom' ? 'bottom' : 'top';
+      // 뾰족·원뿔 = 0, 배율 후보(절반 = 0.5, 두 배 = 2)는 지금 크기 기준이 아니라 원래 원기둥 기준 비율로
+      const pointed = /뾰족|원뿔|꼭짓점/.test(text);
+      const f = scales.find((c) => c.key === choice(r, 'scale_factor'))?.factor ?? (scales.length === 1 ? scales[0].factor : null);
+      return { type: 'taper', end, ratio: pointed ? 0 : f };
+    }
+    case 'dig_hole':
+      return { type: 'dig', meters: meters(), through: /뚫|관통|파이프/.test(text) };
     case 'rotate': {
       const axis = AXIS_OPTION[choice(r, 'axis') ?? 'not_specified'] ?? ctx.currentAxis;
       const picked = angles.find((a) => a.key === choice(r, 'amount'));
@@ -184,9 +277,11 @@ function buildCommand(
 // ─────────────────────────────────────────────────────────────
 export async function interpretVoice(text: string, ctx: InterpretContext): Promise<Interpretation> {
   const angles = extractAngleCandidates(text);
+  const distances = extractDistanceCandidates(text);
+  const scales = extractScaleCandidates(text);
   try {
-    const r = await askJev(text, angles);
-    return decideFromJev(r, text, angles, ctx);
+    const r = await askJev(text, angles, distances, scales);
+    return decideFromJev(r, text, angles, ctx, distances, scales);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.warn('[voice] Jev 실패 → Groq', msg);

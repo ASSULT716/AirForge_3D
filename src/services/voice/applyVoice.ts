@@ -50,5 +50,8 @@ export function applyVoiceCommand(s: StructureState, cmd: VoiceCommand, selected
       return done({ ...s, activeTool: cmd.tool });
     case 'set_load':
       return done({ ...s, targetLoadKg: cmd.kg });
+    default:
+      // 늘리기·이동·복사·삭제·되돌리기는 편집 기록·카메라가 필요해서 HandBridge가 처리
+      return fail(`${label}: 여기서 처리하지 않는 명령`);
   }
 }

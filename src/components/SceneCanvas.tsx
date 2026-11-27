@@ -10,6 +10,7 @@ import {
   BeamMember,
   CadMaterial,
   CameraControlState,
+  SolidPrimitive,
 } from '../types/cad';
 
 interface Props {
@@ -23,13 +24,13 @@ const UP_VEC = new THREE.Vector3(0, 1, 0);
 
 const MATERIAL_SPECS: Record<
   CadMaterial,
-  { defaultHex: string; metalness: number; roughness: number; emissiveIntensity: number }
+  { defaultHex: string; metalness: number; roughness: number; emissiveIntensity: number; transparent?: boolean; opacity?: number }
 > = {
-  hologram: { defaultHex: '#00f3ff', metalness: 0.1, roughness: 0.25, emissiveIntensity: 1.35 },
-  steel: { defaultHex: '#e2e8f0', metalness: 0.92, roughness: 0.2, emissiveIntensity: 0.08 },
-  titanium: { defaultHex: '#64748b', metalness: 0.95, roughness: 0.24, emissiveIntensity: 0.1 },
-  carbon: { defaultHex: '#1e293b', metalness: 0.2, roughness: 0.72, emissiveIntensity: 0.04 },
-  gold: { defaultHex: '#fbbf24', metalness: 0.98, roughness: 0.14, emissiveIntensity: 0.16 },
+  hologram: { defaultHex: '#00f3ff', metalness: 0.1, roughness: 0.2, emissiveIntensity: 0.9, transparent: true, opacity: 0.55 },
+  steel: { defaultHex: '#e2e8f0', metalness: 0.92, roughness: 0.18, emissiveIntensity: 0.05 },
+  titanium: { defaultHex: '#64748b', metalness: 0.95, roughness: 0.25, emissiveIntensity: 0.06 },
+  carbon: { defaultHex: '#1e293b', metalness: 0.15, roughness: 0.78, emissiveIntensity: 0.02 },
+  gold: { defaultHex: '#fbbf24', metalness: 0.98, roughness: 0.12, emissiveIntensity: 0.14 },
 };
 
 function computeBeamTransform(p1: THREE.Vector3, p2: THREE.Vector3) {
@@ -52,17 +53,17 @@ function StudioReflectionEnv() {
 
     const grad = ctx.createLinearGradient(0, 0, 0, 128);
     grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.35, '#94a3b8');
+    grad.addColorStop(0.35, '#cbd5e1');
     grad.addColorStop(0.5, '#0f172a');
     grad.addColorStop(0.75, '#38bdf8');
     grad.addColorStop(1, '#1e293b');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 256, 128);
 
-    ctx.fillStyle = '#fffbeb';
-    ctx.fillRect(25, 14, 70, 22);
+    ctx.fillStyle = '#fef9c3';
+    ctx.fillRect(20, 12, 80, 26);
     ctx.fillStyle = '#e0f2fe';
-    ctx.fillRect(155, 18, 75, 24);
+    ctx.fillRect(150, 16, 80, 26);
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.mapping = THREE.EquirectangularReflectionMapping;
@@ -76,6 +77,51 @@ function StudioReflectionEnv() {
   }, [scene]);
 
   return null;
+}
+
+function SolidShapeGeometry({ shape }: { shape: SolidPrimitive['shape'] }) {
+  if (shape === 'sphere') return <sphereGeometry args={[0.8, 36, 36]} />;
+  if (shape === 'cone') return <coneGeometry args={[0.8, 1.4, 24]} />;
+  if (shape === 'cylinder') return <cylinderGeometry args={[0.7, 0.7, 1.2, 32]} />;
+  if (shape === 'torus') return <torusGeometry args={[0.7, 0.25, 24, 48]} />;
+  return <boxGeometry args={[1, 1, 1]} />;
+}
+
+function SolidMeshView({
+  solid,
+  defaultMaterial,
+  defaultColor,
+}: {
+  solid: SolidPrimitive;
+  defaultMaterial: CadMaterial;
+  defaultColor: string;
+}) {
+  const matKey = solid.material ?? defaultMaterial ?? 'hologram';
+  const spec = MATERIAL_SPECS[matKey];
+  const color = solid.color ?? defaultColor ?? spec.defaultHex;
+
+  return (
+    <group position={solid.position} scale={solid.scale} rotation={solid.rotation ?? [0, 0, 0]}>
+      <mesh>
+        <SolidShapeGeometry shape={solid.shape} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={spec.emissiveIntensity}
+          metalness={spec.metalness}
+          roughness={spec.roughness}
+          transparent={Boolean(spec.transparent)}
+          opacity={spec.opacity ?? 1}
+        />
+      </mesh>
+      {matKey === 'hologram' && (
+        <mesh scale={[1.005, 1.005, 1.005]}>
+          <SolidShapeGeometry shape={solid.shape} />
+          <meshBasicMaterial color="#00f3ff" wireframe transparent opacity={0.35} />
+        </mesh>
+      )}
+    </group>
+  );
 }
 
 function CameraController({ control = { mode: 'free' } }: { control?: CameraControlState }) {
@@ -117,7 +163,6 @@ function CameraController({ control = { mode: 'free' } }: { control?: CameraCont
       animState.current.pitchRemaining = 0;
     }
 
-    // zoomFactor > 1 이면 확대(카메라 거리 나누기), < 1 이면 축소(카메라 거리 늘리기)
     if (control.zoomFactor && Math.abs(control.zoomFactor - 1.0) > 0.02) {
       const mag = Math.max(0.35, Math.min(2.8, control.zoomFactor));
       const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
@@ -188,6 +233,15 @@ function StaticStructure({ structure }: { structure: StructureState }) {
 
   return (
     <group>
+      {(structure.solids ?? []).map((solid) => (
+        <SolidMeshView
+          key={solid.id}
+          solid={solid}
+          defaultMaterial={structure.activeMaterial}
+          defaultColor={structure.activeColor}
+        />
+      ))}
+
       {structure.nodes.map((node) => {
         const isGrounded = node.isFixed;
         return (
@@ -222,7 +276,7 @@ function StaticStructure({ structure }: { structure: StructureState }) {
         const baseColor = new THREE.Color(beam.color ?? spec.defaultHex);
         const stressBlend = Math.max(0, (beam.stress - 0.45) * 1.8);
         const finalColor = baseColor.clone().lerp(DANGER_RED, Math.min(1, stressBlend));
-        const radius = beam.radius ?? 0.038;
+        const radius = beam.radius ?? 0.04;
 
         return (
           <mesh key={beam.id} position={mid} quaternion={quat} scale={[1, length, 1]}>
@@ -241,7 +295,6 @@ function StaticStructure({ structure }: { structure: StructureState }) {
   );
 }
 
-// 임계 감쇠 스프링-댐퍼 기반 안정화 물리 시뮬레이션 (선 날뜀 원천 차단)
 function DynamicPhysicsStructure({
   structure,
   onUpdateStress,
@@ -288,10 +341,9 @@ function DynamicPhysicsStructure({
   useFrame((state, delta) => {
     const dt = Math.min(delta, 0.016);
     const loadForcePerNode = Math.min(28, (structure.targetLoadKg / unfixedCount) * 0.35);
-    const springK = 52.0;   // 안정적 강성
-    const dampingC = 14.0;  // 축 방향 상대 속도 감쇠(진동 억제)
+    const springK = 52.0;
+    const dampingC = 14.0;
 
-    // 1. 비고정 노드에 목표 하중 적용 + 속도/바닥 경계 안정화
     structure.nodes.forEach((node) => {
       if (node.isFixed) return;
       const body = bodyRefs.current[node.id];
@@ -303,7 +355,6 @@ function DynamicPhysicsStructure({
       const vel = body.linvel();
       if (!Number.isFinite(vel.x) || !Number.isFinite(vel.y) || !Number.isFinite(vel.z)) return;
 
-      // 지면(y = 0.06) 이하 침투 방지 및 평면 스케치 Z축 고정
       let vx = THREE.MathUtils.clamp(vel.x, -2.2, 2.2);
       let vy = THREE.MathUtils.clamp(vel.y, -2.2, 2.2);
       let vz = isPlanarSketch ? 0 : THREE.MathUtils.clamp(vel.z, -2.2, 2.2);
@@ -318,7 +369,6 @@ function DynamicPhysicsStructure({
       body.setLinvel({ x: vx, y: vy, z: vz }, true);
     });
 
-    // 2. 임계 감쇠 스프링-댐퍼 반력 계산 및 메시 업데이트
     structure.beams.forEach((beam) => {
       const bodyA = bodyRefs.current[beam.startNodeId];
       const bodyB = bodyRefs.current[beam.endNodeId];
@@ -339,7 +389,6 @@ function DynamicPhysicsStructure({
       const displacement = THREE.MathUtils.clamp(currentLen - restLen, -0.8, 0.8);
       const dir = diff.clone().normalize();
 
-      // 두 노드 간 축 방향 상대 속도 계산 (진동 감쇠용)
       const vA = bodyA.linvel();
       const vB = bodyB.linvel();
       const relVel = new THREE.Vector3(vB.x - vA.x, vB.y - vA.y, vB.z - vA.z).dot(dir);
@@ -351,16 +400,10 @@ function DynamicPhysicsStructure({
       const nodeB = structure.nodes.find((n) => n.id === beam.endNodeId);
 
       if (nodeA && !nodeA.isFixed) {
-        bodyA.applyImpulse(
-          { x: dir.x * impulseMag, y: dir.y * impulseMag, z: dir.z * impulseMag },
-          true
-        );
+        bodyA.applyImpulse({ x: dir.x * impulseMag, y: dir.y * impulseMag, z: dir.z * impulseMag }, true);
       }
       if (nodeB && !nodeB.isFixed) {
-        bodyB.applyImpulse(
-          { x: -dir.x * impulseMag, y: -dir.y * impulseMag, z: -dir.z * impulseMag },
-          true
-        );
+        bodyB.applyImpulse({ x: -dir.x * impulseMag, y: -dir.y * impulseMag, z: -dir.z * impulseMag }, true);
       }
 
       const strain = Math.abs(displacement) / restLen;
@@ -396,6 +439,33 @@ function DynamicPhysicsStructure({
 
   return (
     <group>
+      {/* 물리 지면 충돌체 */}
+      <RigidBody type="fixed" position={[0, -0.5, 0]}>
+        <mesh>
+          <boxGeometry args={[40, 1, 40]} />
+          <meshBasicMaterial transparent opacity={0} />
+        </mesh>
+      </RigidBody>
+
+      {/* 입체 3D 솔리드 물리 시뮬레이션 */}
+      {(structure.solids ?? []).map((solid) => (
+        <RigidBody
+          key={solid.id}
+          type={solid.isFixed ? 'fixed' : 'dynamic'}
+          position={solid.position}
+          linearDamping={2.0}
+          angularDamping={2.0}
+          restitution={0.3}
+          colliders="hull"
+        >
+          <SolidMeshView
+            solid={{ ...solid, position: [0, 0, 0] }}
+            defaultMaterial={structure.activeMaterial}
+            defaultColor={structure.activeColor}
+          />
+        </RigidBody>
+      ))}
+
       {structure.nodes.map((node) => {
         const initPos = initialPosMap.get(node.id) ?? new THREE.Vector3(...node.position);
         return (
@@ -430,7 +500,7 @@ function DynamicPhysicsStructure({
       {structure.beams.map((beam) => {
         const matKey = beam.material ?? structure.activeMaterial ?? 'hologram';
         const spec = MATERIAL_SPECS[matKey];
-        const radius = beam.radius ?? 0.038;
+        const radius = beam.radius ?? 0.04;
         return (
           <mesh
             key={beam.id}
@@ -457,7 +527,7 @@ function DynamicPhysicsStructure({
 }
 
 export default function SceneCanvas({ structure, onUpdateStress }: Props) {
-  const simKey = `${structure.nodes.length}-${structure.beams.length}`;
+  const simKey = `${structure.solids?.length ?? 0}-${structure.nodes.length}-${structure.beams.length}`;
 
   return (
     <div className="w-full h-full bg-[#050811]">
@@ -465,9 +535,9 @@ export default function SceneCanvas({ structure, onUpdateStress }: Props) {
         <color attach="background" args={['#050811']} />
         <fog attach="fog" args={['#050811', 10, 26]} />
 
-        <ambientLight intensity={0.5} />
-        <directionalLight position={[6, 10, 6]} intensity={2.2} color="#ffffff" />
-        <directionalLight position={[-6, 4, -4]} intensity={1.1} color="#38bdf8" />
+        <ambientLight intensity={0.55} />
+        <directionalLight position={[6, 10, 6]} intensity={2.4} color="#ffffff" />
+        <directionalLight position={[-6, 4, -4]} intensity={1.2} color="#38bdf8" />
         <pointLight position={[0, 4, 3]} intensity={1.2} color="#fef3c7" />
 
         <StudioReflectionEnv />

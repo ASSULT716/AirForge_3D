@@ -168,6 +168,8 @@ const ZOOM_GAIN = 1.6;
 // ── 자세 분류 (docs/gesture-spec.md) ──
 /** 같은 자세가 이 시간 유지돼야 모드 전환 (손가락 하나 차이 자세끼리 깜빡임 방지) */
 const POSE_HOLD_MS = 200;
+/** 움켜쥐기(회전 모드 진입)만 더 길게: 손 펴고 오므리는 중간 자세가 잠깐 grab으로 잡혀 의도치 않게 회전 들어가는 것 방지 */
+const GRAB_HOLD_MS = 450;
 /** 엄지 펴짐 비율 = (엄지끝↔새끼MCP) / (손목↔중지MCP). 접어서 손바닥에 붙이면 작아짐. 히스테리시스 */
 const THUMB_OUT = 0.82;
 const THUMB_IN = 0.74;
@@ -371,20 +373,21 @@ function stepPose(h: PoseHold, r: PoseResult, now: number) {
   if (r.pose !== h.candidate) {
     h.candidate = r.pose;
     h.since = now;
-  } else if (r.pose !== h.stable && now - h.since >= POSE_HOLD_MS) {
+  } else if (r.pose !== h.stable && now - h.since >= (r.pose === 'grab' ? GRAB_HOLD_MS : POSE_HOLD_MS)) {
     h.stable = r.pose;
   }
 }
 
 /** HUD에 보여줄 현재 모드 */
-type UiMode = 'idle' | 'draw' | 'depth' | 'select' | 'pan' | 'rotate' | 'fist' | 'zoom';
+type UiMode = 'idle' | 'draw' | 'depth' | 'select' | 'pan' | 'orbit' | 'rotate' | 'fist' | 'zoom';
 const MODE_LABEL: Record<UiMode, string> = {
   idle: '—',
   draw: '그리기',
   depth: '깊이',
   select: '선택',
   pan: '카메라 이동',
-  rotate: '회전',
+  orbit: '카메라 회전',
+  rotate: '물체 회전',
   fist: '주먹',
   zoom: '줌',
 };
@@ -394,6 +397,7 @@ const MODE_COLOR: Record<UiMode, string> = {
   depth: '#b478ff',
   select: '#7dff8a',
   pan: '#ffd54a',
+  orbit: '#b478ff',
   rotate: '#ff9f43',
   fist: '#ff1e42',
   zoom: '#ffd54a',
@@ -841,7 +845,10 @@ export default function HandTracker(props: Props) {
   /** delegate + 실행 위치(워커/메인) + WebGL 렌더러 (소프트웨어 렌더러면 경고) */
   const [backend, setBackend] = useState<{ delegate: string; worker: boolean; gl: string; soft: boolean } | null>(null);
   /** 웹캠이 실제로 협상한 해상도·fps (요청값과 다를 수 있음 → 60 안 나오면 카메라 하드웨어 한계) */
-  const [camInfo, setCamInfo] = useState<{ w: number; h: number; fps: number } | null>(null);
+  /** max = 카메라가 지원한다고 알린 최대 fps (getCapabilities, 미지원 브라우저면 0) */
+  const [camInfo, setCamInfo] = useState<{ w: number; h: number; fps: number; max: number } | null>(null);
+  /** 카메라가 실제로 보내주는 프레임 수 (1초마다 측정). 설정값은 60이어도 어두우면 노출 때문에 30으로 떨어지는 경우가 많음 */
+  const [camRealFps, setCamRealFps] = useState(0);
 
   const [micOn, setMicOn] = useState(false);
   const [voiceText, setVoiceText] = useState('');
@@ -895,6 +902,8 @@ export default function HandTracker(props: Props) {
     },
     panDrag: newDrag(),
     orbitDrag: newDrag(),
+    /** 카메라 조작 잠금: 먼저 시작한 쪽이 끝날 때까지 다른 모드(팬·오빗·물체 회전) 진입 금지 */
+    camMode: null as 'pan' | 'orbit' | null,
     /** TEST 채점용 누적 카운터 (테스트 중에도 증가, 실제 동작만 막음) */
     selectFires: 0,
     panTravel: 0,
@@ -1063,7 +1072,7 @@ export default function HandTracker(props: Props) {
       const emitRot = (e: ObjectRotateEvent) => !d.test.active && propsRef.current.onObjectRotate?.(e);
       // 줌 중엔 회전 안 함 (양손 펼침 = 줌이 우선)
       if (r.active && drawWorld) r.seenAt = now;
-      const rotStart = !r.active && rightPose === 'grab' && !!drawWorld && !d.zoom.active;
+      const rotStart = !r.active && rightPose === 'grab' && !!drawWorld && !d.zoom.active && !d.camMode;
       // 주먹 = 확정. 손이 화면 밖으로 오래 나가도 확정 (안 그러면 회전 모드에 갇힘)
       const rotHold = r.active && rightPose !== 'fist' && now - r.seenAt < HANDS_LOST_RESET_MS;
       if ((rotStart || rotHold) && drawWorld) {
@@ -1256,9 +1265,16 @@ export default function HandTracker(props: Props) {
       }
 
       // ── HUD 모드 ──
-      const orbit = !zooming && !depthPriority && d.leftPose.stable === 'pan';
+      // ── 모드 배타: 줌 > 물체 회전 > (팬 | 오빗, 먼저 시작한 쪽 유지) > 손 자세 ──
+      const panWant = rightPose === 'pan' && !!drawHand && !zooming && !d.rot.active;
+      const orbitWant = !zooming && !depthPriority && !d.rot.active && !!depthHand && d.leftPose.stable === 'pan';
+      if ((d.camMode === 'pan' && !panWant) || (d.camMode === 'orbit' && !orbitWant)) d.camMode = null;
+      if (!d.camMode) d.camMode = panWant ? 'pan' : orbitWant ? 'orbit' : null;
+      const orbit = d.camMode === 'orbit';
       let mode: UiMode = 'idle';
       if (zooming) mode = 'zoom';
+      else if (d.rot.active) mode = 'rotate';
+      else if (d.camMode) mode = d.camMode;
       else if (drawHand) {
         const byPose: Record<HandPose, UiMode> = {
           none: 'idle',
@@ -1269,11 +1285,12 @@ export default function HandTracker(props: Props) {
           grab: 'rotate',
           fist: 'fist',
         };
-        mode = d.rot.active ? 'rotate' : byPose[rightPose];
+        // grab 자세여도 회전이 실제로 시작 안 됐으면(카메라 조작 중 등) 회전으로 표시 안 함
+        mode = rightPose === 'grab' ? 'idle' : byPose[rightPose];
       }
 
-      // ── 카메라 드래그: 오른손 3손가락 = 팬, 왼손 3손가락 = 오빗 (동시 가능, 테스트 중엔 안 움직임) ──
-      if (rightPose === 'pan' && drawHand && !zooming && !d.rot.active) {
+      // ── 카메라 드래그: 오른손 3손가락 = 팬, 왼손 3손가락 = 오빗 (한 번에 하나만, 테스트 중엔 안 움직임) ──
+      if (d.camMode === 'pan' && drawHand) {
         const m = stepDrag(d.panDrag, drawHand);
         if (m) d.panTravel += Math.hypot(m[0], m[1]);
         if (m && !d.test.active) pushCameraPan(m[0], m[1]);
@@ -1409,9 +1426,23 @@ export default function HandTracker(props: Props) {
       }
       if (pending) submit();
     };
+    let camFrames = 0;
+    let camStart = performance.now();
+    let camShown = -1;
     const loop = () => {
       schedule();
       if (!detector || video.readyState < 2) return;
+      // 실제 카메라 fps 측정 (rVFC = 새 프레임마다 1회. rAF 폴백이면 화면 주사율이 찍히므로 측정 안 함)
+      if (hasVfc) {
+        camFrames += 1;
+        const t = performance.now();
+        if (t - camStart >= 1000) {
+          const real = Math.round((camFrames * 1000) / (t - camStart));
+          if (real !== camShown) setCamRealFps((camShown = real));
+          camFrames = 0;
+          camStart = t;
+        }
+      }
       // rAF 폴백일 때만 의미 있음 (rVFC는 새 프레임마다 한 번씩만 호출됨)
       if (!hasVfc && video.currentTime === lastVideoTime) return;
       lastVideoTime = video.currentTime;
@@ -1451,10 +1482,14 @@ export default function HandTracker(props: Props) {
         const gl = webglRenderer();
         setBackend({ delegate: lm.delegate, worker: lm.kind === 'worker', gl, soft: SOFTWARE_GL.test(gl) });
         console.info('[HandTracker] 검출기', lm.kind, lm.delegate, '/ WebGL', gl);
-        const st = s.getVideoTracks()[0]?.getSettings();
+        const track = s.getVideoTracks()[0];
+        const st = track?.getSettings();
         if (st) {
-          setCamInfo({ w: st.width ?? 0, h: st.height ?? 0, fps: st.frameRate ?? 0 });
-          console.info('[HandTracker] 카메라 설정', st);
+          // getCapabilities는 Firefox 등에서 없음 → 0 (판정은 실측값으로)
+          const caps = typeof track.getCapabilities === 'function' ? track.getCapabilities() : undefined;
+          const max = caps?.frameRate?.max ?? 0;
+          setCamInfo({ w: st.width ?? 0, h: st.height ?? 0, fps: st.frameRate ?? 0, max });
+          console.info('[HandTracker] 카메라 설정', st, '/ 최대 fps', max || '알 수 없음');
         }
         setStatus('tracking');
         schedule();
@@ -1586,33 +1621,10 @@ export default function HandTracker(props: Props) {
       ref={panelRef}
       className="fixed bottom-[78px] right-4 z-50 w-[320px] select-none font-mono text-[11px] text-cyan-300"
     >
-      <div
-        className="relative overflow-hidden rounded border border-cyan-400/60 bg-black/70 shadow-[0_0_18px_rgba(0,243,255,0.25)]"
-        style={{ width: PANEL_W, height: PANEL_H }}
-      >
-        <video
-          ref={videoRef}
-          className="absolute inset-0 h-full w-full -scale-x-100 object-cover opacity-50"
-          playsInline
-          muted
-        />
-        <canvas ref={canvasRef} width={PANEL_W * 2} height={PANEL_H * 2} className="absolute inset-0 h-full w-full" />
-
-        {/* 상단 상태줄 */}
-        <div className="absolute left-0 right-0 top-0 flex items-center justify-between bg-black/50 px-2 py-1">
-          <span className="flex items-center gap-2">
-            <span className={shownStatus === 'error' ? 'text-[#ff1e42]' : ''}>{statusLabel[shownStatus]}</span>
-            {shownStatus === 'tracking' && perf && (
-              <span
-                className="rounded bg-black/60 px-1 tabular-nums"
-                style={{ color: perf.fps >= 55 ? '#7dff8a' : perf.fps >= 30 ? '#ffd54a' : '#ff1e42' }}
-                title={`손 인식: 초당 처리 프레임/카메라 최대 · 추론+제스처처리 · 캡처→결과 지연 · W=워커 M=메인스레드${camInfo ? ` · 카메라 ${camInfo.w}x${camInfo.h} 최대 ${Math.round(camInfo.fps)}fps` : ''}${backend ? ` · WebGL: ${backend.gl}` : ''}`}
-              >
-                {`${Math.round(perf.fps)}${camInfo ? `/${Math.round(camInfo.fps)}` : ''}fps · 인식${perf.inf.toFixed(0)}+${perf.logic.toFixed(0)} 지연${perf.lat.toFixed(0)}ms`}
-                {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '·SW' : ''}`}
-              </span>
-            )}
-          </span>
+      {/* 상태줄: 카메라 화면 위에 띄움 (화면 위에 겹치면 손 영상이 가려짐) */}
+      <div className="mb-1.5 flex flex-col gap-1">
+        <div className="flex items-center justify-between rounded border border-cyan-400/40 bg-black/70 px-2 py-1">
+          <span className={shownStatus === 'error' ? 'text-[#ff1e42]' : ''}>{statusLabel[shownStatus]}</span>
           <div className="flex gap-1">
             <button
               onClick={testUi?.running ? stopTest : startTest}
@@ -1630,10 +1642,49 @@ export default function HandTracker(props: Props) {
             </button>
           </div>
         </div>
+        <div className="flex flex-wrap gap-1 empty:hidden">
+          {shownStatus === 'tracking' && perf && (
+            <span
+              className="rounded border border-cyan-400/30 bg-black/70 px-1.5 py-0.5 tabular-nums"
+              style={{ color: perf.fps >= 55 ? '#7dff8a' : perf.fps >= 30 ? '#ffd54a' : '#ff1e42' }}
+              title={`손 인식: 초당 처리 프레임/카메라 최대 · 추론+제스처처리 · 캡처→결과 지연 · W=워커 M=메인스레드${camInfo ? ` · 카메라 ${camInfo.w}x${camInfo.h} 설정 ${Math.round(camInfo.fps)}fps · 지원 최대 ${camInfo.max ? Math.round(camInfo.max) : '?'}fps · 실측 ${camRealFps || '?'}fps` : ''}${backend ? ` · WebGL: ${backend.gl}` : ''}`}
+            >
+              {`${Math.round(perf.fps)}${camRealFps ? `/${camRealFps}` : camInfo ? `/${Math.round(camInfo.fps)}` : ''}fps · 인식${perf.inf.toFixed(0)}+${perf.logic.toFixed(0)} 지연${perf.lat.toFixed(0)}ms`}
+              {backend && ` · ${backend.delegate}${backend.worker ? '·W' : '·M'}${backend.soft ? '·SW' : ''}`}
+            </span>
+          )}
+          {shownStatus === 'tracking' && camInfo && (() => {
+            // 지원 최대가 60 미만이면 하드웨어 한계, 지원은 되는데 실측이 낮으면 조명(노출) 문제
+            const hwLimit = camInfo.max > 0 && camInfo.max < 55;
+            const lowReal = camRealFps > 0 && camRealFps < 50;
+            if (!hwLimit && !lowReal) return null;
+            return (
+              <span
+                className="rounded border border-[#ffd54a]/60 bg-black/70 px-1.5 py-0.5 text-[#ffd54a]"
+                title={hwLimit ? '이 카메라는 60fps 모드가 없음' : '카메라는 60fps 지원하지만 실제로는 덜 나옴. 보통 어두워서 노출 시간이 길어진 것 → 조명을 밝게'}
+              >
+                {hwLimit ? `카메라 최대 ${Math.round(camInfo.max)}fps` : `카메라 ${camRealFps}fps · 조명 확인`}
+              </span>
+            );
+          })()}
+        </div>
+      </div>
+
+      <div
+        className="relative overflow-hidden rounded border border-cyan-400/60 bg-black/70 shadow-[0_0_18px_rgba(0,243,255,0.25)]"
+        style={{ width: PANEL_W, height: PANEL_H }}
+      >
+        <video
+          ref={videoRef}
+          className="absolute inset-0 h-full w-full -scale-x-100 object-cover opacity-50"
+          playsInline
+          muted
+        />
+        <canvas ref={canvasRef} width={PANEL_W * 2} height={PANEL_H * 2} className="absolute inset-0 h-full w-full" />
 
         {/* 현재 모드 배지 */}
         {shownStatus === 'tracking' && info.hands > 0 && (
-          <div className="absolute left-2 top-8 flex gap-1 text-[13px] font-bold">
+          <div className="absolute left-2 top-2 flex gap-1 text-[13px] font-bold">
             <span
               className="rounded border bg-black/70 px-2 py-0.5"
               style={{ color: MODE_COLOR[info.mode], borderColor: MODE_COLOR[info.mode] }}
@@ -1641,11 +1692,6 @@ export default function HandTracker(props: Props) {
               {MODE_LABEL[info.mode]}
               {info.rot && ` · ${info.rot}`}
             </span>
-            {info.orbit && (
-              <span className="rounded border border-[#b478ff] bg-black/70 px-2 py-0.5 text-[#b478ff]">
-                카메라 회전
-              </span>
-            )}
           </div>
         )}
 

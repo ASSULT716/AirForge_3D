@@ -59,6 +59,9 @@ const ACTIVE_Y: [number, number] = [0.1, 0.9];
 /** 왼손 손목 높이 → z. 손 올리면 화면 안쪽(-z), 내리면 앞(+z). 화면 높이 1.0 이동 = 10m (40% = 4m). 클수록 민감 */
 const Z_PER_SCREEN = 10;
 
+/** 커서 축을 카메라 좌우 회전(yaw)에 맞출 때 이 각도 단위로 스냅 (그리드 직각·대각선 유지) */
+const CURSOR_YAW_SNAP_DEG = 45;
+
 const EMA_ALPHA = 0.35; // 클수록 반응 빠름, 작을수록 부드러움
 const PINCH_ON = 0.15; // (엄지-검지 거리) / (손목-중지MCP 거리). 손끝이 실제로 닿아야 ~0.15 이하
 const PINCH_OFF = 0.3;
@@ -181,6 +184,27 @@ type Vec3 = [number, number, number];
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const invLerp = (lo: number, hi: number, v: number) => clamp((v - lo) / (hi - lo), 0, 1);
+/**
+ * 카메라 좌우 회전(yaw, 45° 스냅) 기준 커서 축 → 월드 변환.
+ * 손 좌우 = 화면 오른쪽 방향, 왼손 깊이(+) = 카메라 쪽. y(높이)는 그대로.
+ * 기본 정면 시점이면 (lx, lz) 그대로 → 기존 동작과 같음
+ */
+function cursorToWorld(lx: number, ly: number, lz: number, cameraQuat: readonly number[]): Vec3 {
+  const q = new THREE.Quaternion(cameraQuat[0], cameraQuat[1], cameraQuat[2], cameraQuat[3]);
+  const back = new THREE.Vector3(0, 0, 1).applyQuaternion(q); // 카메라 → 시청자 방향
+  // 위에서 내려다볼 때(back이 거의 수직)도 yaw가 안정적이도록 up 벡터로 보조
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+  const h = Math.hypot(back.x, back.z) > 0.2 ? back : up.negate();
+  const step = (CURSOR_YAW_SNAP_DEG * Math.PI) / 180;
+  const yaw = Math.round(Math.atan2(h.x, h.z) / step) * step; // 0 = 정면(+z에서 봄)
+  const c = Math.cos(yaw);
+  const sn = Math.sin(yaw);
+  // right = (cos, 0, -sin), back = (sin, 0, cos)
+  const wx = lx * c + lz * sn;
+  const wz = -lx * sn + lz * c;
+  return [snap(clamp(wx, WORLD_X[0], WORLD_X[1])), snap(ly), snap(clamp(wz, WORLD_Z[0], WORLD_Z[1]))];
+}
+
 const snap = (v: number) => {
   const s = Math.round(v / GRID) * GRID;
   return s === 0 ? 0 : s; // -0 제거
@@ -1144,7 +1168,8 @@ export default function HandTracker(props: Props) {
 
         const tx = invLerp(ACTIVE_X[0], ACTIVE_X[1], d.smoothCursor[0]);
         const ty = invLerp(ACTIVE_Y[0], ACTIVE_Y[1], d.smoothCursor[1]);
-        const snapped: Vec3 = [snap(lerp(WORLD_X[0], WORLD_X[1], tx)), snap(lerp(WORLD_Y[1], WORLD_Y[0], ty)), d.zLayer];
+        // 카메라를 옆으로 돌려도 손 좌우 = 화면 좌우가 되게 카메라 yaw 기준으로 축 회전
+        const snapped = cursorToWorld(lerp(WORLD_X[0], WORLD_X[1], tx), lerp(WORLD_Y[1], WORLD_Y[0], ty), d.zLayer, cameraGesture.cameraQuat);
         // 카메라 이동·움켜쥐기 중엔 커서 숨김 (EMA는 계속 → 모드 복귀 시 커서 안 튐)
         if (rightPose === 'select') {
           // 원시 자세가 아직 ✌️일 때만 조준점 갱신. 주먹으로 접는 중(200ms 확인 대기)엔 마지막 조준점 유지

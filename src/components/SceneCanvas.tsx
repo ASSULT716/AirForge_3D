@@ -11,6 +11,7 @@ import {
   CadMaterial,
   CameraControlState,
 } from '../types/cad';
+import { consumeCameraZoom } from '../services/cameraGesture';
 
 export interface SceneHandCursor {
   position: [number, number, number];
@@ -149,6 +150,16 @@ function CameraController({ control = { mode: 'free' } }: { control?: CameraCont
   useFrame((_, delta) => {
     const ctrl = controlsRef.current;
     if (!ctrl) return;
+
+    // 손 제스처 줌 (양손 펴고 벌리기=확대 / 모으기=축소)
+    const zoomLog = consumeCameraZoom(Math.min(delta, 0.05));
+    if (zoomLog !== 0) {
+      const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
+      offset.setLength(THREE.MathUtils.clamp(offset.length() * Math.exp(-zoomLog), 1.2, 18.0));
+      camera.position.copy(ctrl.target).add(offset);
+      ctrl.update();
+    }
+
     const { yawRemaining, pitchRemaining, speed } = animState.current;
     if (Math.abs(yawRemaining) < 0.002 && Math.abs(pitchRemaining) < 0.002) return;
 

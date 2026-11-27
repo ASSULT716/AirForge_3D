@@ -13,6 +13,8 @@ interface Props {
   onVoiceCommand: (rawText: string) => void;
   /** 3D 씬에 커서 표시용. 스냅된 월드 좌표가 바뀔 때만 호출 (손 없으면 null) */
   onCursor?: (cursor: HandCursorState | null) => void;
+  /** 양손 펴고 벌리기/모으기 → 카메라 줌. factor > 1 확대, < 1 축소 (프레임 간 상대 배율) */
+  onCameraZoom?: (factor: number) => void;
 }
 
 export interface HandCursorState {
@@ -47,6 +49,19 @@ const HANDS_LOST_RESET_MS = 1000;
 /** GestureRecognizer가 이 점수 이상으로 Closed_Fist라고 하면 주먹 */
 const FIST_SCORE = 0.6;
 
+// ── 양손 줌 ──
+/** 모델이 이 점수 이상으로 Open_Palm이면 펼친 손 */
+const OPEN_SCORE = 0.5;
+/** 양손이 이만큼 펴진 채 유지돼야 줌 모드 진입 (스쳐 지나가는 오인식 방지) */
+const ZOOM_ENTER_MS = 250;
+/** 줌 중 한 손이 잠깐 안 펴진 걸로 잡혀도 이 시간까진 유지 */
+const ZOOM_EXIT_MS = 250;
+const ZOOM_EMA = 0.3;
+/** 손 간격 변화 ±3% 이내는 무시 (손떨림) */
+const ZOOM_DEADZONE = 0.03;
+/** 손 간격 2배 → 줌 2^GAIN 배 */
+const ZOOM_GAIN = 1.6;
+
 const LOCAL_MODEL_URL = `${import.meta.env.BASE_URL}models/gesture_recognizer.task`;
 const REMOTE_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task';
@@ -80,6 +95,26 @@ const dist3 = (a: Landmark, b: Landmark) => Math.hypot(a.x - b.x, a.y - b.y, a.z
  */
 function isCurled(w: Landmark[], tip: number, pip: number) {
   return dist3(w[tip], w[0]) < dist3(w[pip], w[0]);
+}
+
+/** 기하 펼침 판정: 검지~새끼 4손가락 모두 안 접힘 */
+function isGeometricOpen(w: Landmark[]) {
+  return [
+    [8, 6],
+    [12, 10],
+    [16, 14],
+    [20, 18],
+  ].every(([t, p]) => !isCurled(w, t, p));
+}
+
+/** 깊이 조절 자세: 중지·약지·소지 모두 접힘 (검지·엄지는 자유 → 핀치하면서 z 조절 가능) */
+function isDepthPose(w: Landmark[]) {
+  return isCurled(w, 12, 10) && isCurled(w, 16, 14) && isCurled(w, 20, 18);
+}
+
+/** 두 손바닥 중심(중지 MCP) 사이 화면 거리. x는 영상 비율 보정 → 사선/가로/세로 모두 같은 척도 */
+function palmDistance(a: NormalizedLandmark[], b: NormalizedLandmark[], aspect: number) {
+  return Math.hypot((a[9].x - b[9].x) * aspect, a[9].y - b[9].y);
 }
 
 /** 기하 주먹 판정: 검지~새끼 4손가락 중 3개 이상 접힘 (꽉 쥐면 새끼 추정이 흔들려서 3/4) */
@@ -196,6 +231,14 @@ export default function HandTracker(props: Props) {
     fistSince: 0,
     lastHandsAt: 0,
     chainLen: 0, // 현재 스트로크 노드 수 (0 = 다음 핀치가 새 스트로크)
+    zoom: {
+      active: false,
+      since: 0, // 양손 펼침 시작 시각 (진입 대기)
+      offSince: 0, // 펼침 풀린 시각 (종료 대기)
+      smooth: 0, // 손 간격 EMA
+      anchor: 0, // 마지막으로 줌을 적용한 기준 간격
+      total: 1, // 이번 줌 세션 누적 배율 (HUD 표시용)
+    },
   });
 
   const breakChain = useCallback(() => {
@@ -279,15 +322,73 @@ export default function HandTracker(props: Props) {
       if (hands.length > 0) d.lastHandsAt = now;
       else if (d.chainLen > 0 && now - d.lastHandsAt > HANDS_LOST_RESET_MS) breakChain();
 
-      // 왼손 → z 레이어 (안 보이면 마지막 값 유지)
-      if (depthHand) {
+      // ── 양손 펼침 + 간격 변화 → 카메라 줌 ──
+      const z = d.zoom;
+      const isOpen = (i: number) => {
+        const g = res.gestures[i]?.[0];
+        if (g?.categoryName === 'Open_Palm' && g.score >= OPEN_SCORE) return true;
+        const w = res.worldLandmarks[i];
+        return !!w && isGeometricOpen(w);
+      };
+      // 오른손 중지·약지·소지가 접혀 있으면 = 깊이 조절 자세 → 왼손 z가 우선, 줌 진입 금지
+      const drawWorld = drawIdx >= 0 ? res.worldLandmarks[drawIdx] : undefined;
+      const depthPriority = !!drawWorld && isDepthPose(drawWorld);
+      const bothOpen =
+        !depthPriority && !!drawHand && !!depthHand && isOpen(drawIdx) && isOpen(depthIdx);
+      if (bothOpen) {
+        z.offSince = 0;
+        const aspect = video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9;
+        const dNow = palmDistance(drawHand, depthHand, aspect);
+        if (!z.active) {
+          if (!z.since) z.since = now;
+          if (now - z.since >= ZOOM_ENTER_MS && dNow > 1e-3) {
+            z.active = true;
+            z.smooth = dNow;
+            z.anchor = dNow;
+            z.total = 1;
+            d.pinching = false;
+            d.smoothCursor = null;
+            lastHint = '줌 모드: 벌리면 확대 / 모으면 축소';
+          }
+        } else {
+          z.smooth = lerp(z.smooth, dNow, ZOOM_EMA);
+          const logR = Math.log(z.smooth / z.anchor);
+          if (Math.abs(logR) > ZOOM_DEADZONE) {
+            // 데드존 넘은 만큼만 적용하고 기준점이 따라감 → 떨림은 무시, 움직임은 연속
+            const sign = Math.sign(logR);
+            const factor = Math.exp((logR - sign * ZOOM_DEADZONE) * ZOOM_GAIN);
+            propsRef.current.onCameraZoom?.(factor);
+            z.total *= factor;
+            z.anchor = z.smooth / Math.exp(sign * ZOOM_DEADZONE);
+          }
+        }
+      } else {
+        z.since = 0;
+        if (z.active) {
+          if (!z.offSince) z.offSince = now;
+          else if (now - z.offSince > ZOOM_EXIT_MS) {
+            z.active = false;
+            z.offSince = 0;
+            lastHint = `줌 종료 (x${z.total.toFixed(2)})`;
+          }
+        }
+      }
+      const zooming = z.active;
+
+      // 왼손 → z 레이어: 오른손이 깊이 자세일 때만 갱신 (그 외엔 고정 → 줌 시작 동작과 안 겹침)
+      if (depthHand && depthPriority && !zooming) {
         d.smoothDepth = lerp(d.smoothDepth, depthHand[0].y, EMA_ALPHA);
         const t = invLerp(DEPTH_Y[0], DEPTH_Y[1], d.smoothDepth); // 0=위, 1=아래
         d.zLayer = snap(lerp(WORLD_Z[0], WORLD_Z[1], t));
       }
 
       let cursor: Vec3 | null = null;
-      if (drawHand) {
+      if (zooming) {
+        // 줌 중엔 그리기 정지: 커서 숨김 + 핀치/주먹 판정 안 함
+        d.smoothCursor = null;
+        d.pinching = false;
+        d.fistSince = 0;
+      } else if (drawHand) {
         // 엄지·검지 중간점 = 커서 (핀치할 때 커서가 튀지 않음)
         const rawX = 1 - (drawHand[4].x + drawHand[8].x) / 2;
         const rawY = (drawHand[4].y + drawHand[8].y) / 2;
@@ -346,9 +447,10 @@ export default function HandTracker(props: Props) {
         d.fistSince = 0;
       }
 
-      renderOverlay(ctx, canvas, hands, drawHand, d.smoothCursor, d.pinching, (i) => {
+      const zoomLine = zooming && drawHand && depthHand ? ([drawHand[9], depthHand[9]] as const) : null;
+      renderOverlay(ctx, canvas, hands, drawHand, d.smoothCursor, d.pinching, zoomLine, (i) => {
         const g = res.gestures[i]?.[0]?.categoryName ?? '';
-        if (i !== drawIdx) return `DEPTH z=${d.zLayer.toFixed(2)}`;
+        if (i !== drawIdx) return `DEPTH z=${d.zLayer.toFixed(2)}${depthPriority ? '' : ' 🔒'}`;
         // 진단: 손가락별 접힘(검·중·약·새 ●=접힘) + 핀치 비율 + 모델 제스처
         const w = res.worldLandmarks[i];
         const curl = w
@@ -356,7 +458,14 @@ export default function HandTracker(props: Props) {
           : '????';
         return `${curl} p${pinchRatio(hands[i]).toFixed(2)} ${g || '-'}`;
       });
-      pushInfo({ cursor, pinching: d.pinching, hands: hands.length, chainLen: d.chainLen, hint: lastHint, gesture });
+      pushInfo({
+        cursor,
+        pinching: d.pinching,
+        hands: hands.length,
+        chainLen: d.chainLen,
+        hint: lastHint,
+        gesture: zooming ? `ZOOM x${z.total.toFixed(2)}` : gesture,
+      });
     };
 
     const loop = () => {
@@ -577,6 +686,7 @@ function renderOverlay(
   drawHand: NormalizedLandmark[] | null,
   cursor: [number, number] | null,
   pinching: boolean,
+  zoomLine: readonly [NormalizedLandmark, NormalizedLandmark] | null,
   labelOf: (i: number) => string,
 ) {
   const { width: w, height: h } = canvas;
@@ -615,6 +725,19 @@ function renderOverlay(
     ctx.fillStyle = isDraw ? '#00f3ff' : '#b478ff';
     ctx.fillText(labelOf(i), px(lm[0]) - 40, Math.min(h - 8, py(lm[0]) + 30));
   });
+
+  // 줌 중: 두 손바닥을 잇는 선
+  if (zoomLine) {
+    const [a, b] = zoomLine;
+    ctx.strokeStyle = '#ffd54a';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([10, 8]);
+    ctx.beginPath();
+    ctx.moveTo((1 - a.x) * w, a.y * h);
+    ctx.lineTo((1 - b.x) * w, b.y * h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   if (cursor) {
     const cx = cursor[0] * w;

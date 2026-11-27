@@ -11,6 +11,7 @@ import SceneCanvas from './components/SceneCanvas';
 import HandTracker, { type HandCursorState } from './components/HandTracker';
 import HudOverlay from './components/HudOverlay';
 import { reinforceStructure, executeNaturalCommand } from './services/aiReinforce';
+import { pushCameraZoom } from './services/cameraGesture';
 
 const snap = (v: number) => Math.round(v * 4) / 4;
 
@@ -220,6 +221,7 @@ export default function App() {
         onPinchAction={handlePinchAction}
         onVoiceCommand={handleVoiceCommand}
         onCursor={setHandCursor}
+        onCameraZoom={pushCameraZoom}
       />
 
       <HudOverlay

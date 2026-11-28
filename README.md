@@ -1,32 +1,253 @@
-# React + TypeScript + Vite
+# AirForge 3D
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+**누구나 손과 말로 짓고, 물리 법칙으로 검증하는 초경량 웹 3D 건축·프린팅 스튜디오**
 
-Currently, two official plugins are available:
+> **상상을 가장 가볍게, 안전은 가장 정확하게**
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+---
 
-## React Compiler
+## 1. 프로젝트 개요
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **교과목/프로그램**: 2026학년도 DJU OSS·AI 해커톤 경진대회 
+- **팀명**:  딸깍 AirForge 3D
+- **참여 학생**: 이현수(팀장), 조원호(팀원), 우윤상(팀원)
+- **수행 기간**: 2026.11.27 ~ 2026.11.28
 
-## Expanding the Oxlint configuration
+**AirForge 3D**는 별도 설치 없이 웹 브라우저만으로 동작하는 초경량 3D 건축 설계·구조 검증·3D 프린팅 입문 스튜디오입니다.  
+사진 업로드, 웹캠 손 제스처, 한국어 음성, 마우스 입력을 통합하여 **비전공자**가 머릿속의 집과 건물을 건축가에게 직관적으로 표현할 수 있게 돕고, **현장 디자이너·건축가**가 저사양 환경에서도 한국 건축구조기준(KDS) 기반의 안전 여부와 물량산출(QTO) 기초 예산을 자동 점검할 수 있게 합니다. 또한 **3D 프린팅 입문자**가 가볍게 3D 형상을 편집하고 `.STL` 파일로 즉시 출력 실습을 할 수 있는 환경을 제공합니다.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `tsrs` and editing `.oxlintrc.json`:
+### 팀원 및 담당 영역
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+| 참여 학생 | 담당 영역 | 주요 역할 |
+| :--- | :--- | :--- |
+| **이현수 (팀장)** | 건축 생성 엔진 · 구조물리 · QTO 예산 · PBR · UI 통합 | 파라메트릭 10종 주택 템플릿 및 자유형 대지 내접 생성(`architectureGenerator.ts`), Vision AI 건축·자재 DNA 분석(`imageStyleAnalyzer.ts`), KDS 기반 구조역학 해석 및 QTO 실물량 공사비 엔진(`structuralPhysics.ts`), HDR 스튜디오 PBR 텍스처·입체 창틀 렌더링(`proceduralTextures.ts`, `SceneCanvas.tsx`), 부위별 재질·예산 실시간 연동 및 `.STL` 내보내기 |
+| **조원호 (팀원)** | 손 제스처 비전 · 한국어 음성 · SketchUp식 3D 편집 (`feat/hand-voice`, 34 커밋) | MediaPipe HandLandmarker(WASM) + Web Worker 오프로딩(`handDetector.ts`, `handLandmarker.worker.ts`), One Euro Filter·SLERP·히스테리시스·Swing-Twist 축 잠금(`handRotate.ts`), SketchUp식 3D 편집 연산 및 회전체 형상(`sketchOps.ts`, `LatheShape.ts`), 한국어 수사 파서·TypeSafe Jev·Truth Table·Groq LLM 폴백 음성 파이프라인(`voiceCommand.ts`), 외부 Store(`useSyncExternalStore`) 및 Vite dev 프록시 키 은닉 |
+| **우윤상 (팀원)** | 손 제스처 비전 · 한국어 음성 · SketchUp식 3D 편집 (`feat/hand-voice`, 34 커밋) | MediaPipe HandLandmarker(WASM) + Web Worker 오프로딩(`handDetector.ts`, `handLandmarker.worker.ts`), One Euro Filter·SLERP·히스테리시스·Swing-Twist 축 잠금(`handRotate.ts`), SketchUp식 3D 편집 연산 및 회전체 형상(`sketchOps.ts`, `LatheShape.ts`), 한국어 수사 파서·TypeSafe Jev·Truth Table·Groq LLM 폴백 음성 파이프라인(`voiceCommand.ts`), 외부 Store(`useSyncExternalStore`) 및 Vite dev 프록시 키 은닉 |
+
+
+### 저장소 및 접속 정보
+
+| 항목 | 주소 / 내용 |
+| :--- | :--- |
+| **GitHub 저장소** | https://github.com/ASSULT716/AirForge_3D.git |
+
+---
+
+## 2. 문제 정의 및 목표
+
+### 해결하려는 3가지 핵심 문제
+
+1. **비전공자 ↔ 건축가·디자이너 간 직관적 소통 도구의 부재**
+   - 예비 건축주나 비전공자가 원하는 집·빌딩을 머릿속에 그려도, 추상적인 말("따뜻한 느낌", "창이 넓은 집")과 참고 사진 몇 장만으로는 공간감과 구조를 전달하기 어렵습니다.
+   - 초기 의사소통 오차로 인해 설계 수정이 반복되고 시간과 초기 기획 비용이 누적됩니다.
+2. **가혹한 저사양 현장 환경에서의 기초 예산·구조 안전 자동 검증 공백**
+   - Revit, AutoCAD 등 전문 BIM·CAD는 대용량 설치, 고가 라이선스, 고사양 워크스테이션이 필수적이어서 미팅 현장이나 저사양 노트북에서 즉각 활용하기 어렵습니다.
+   - 반대로 일반 생성형 AI 도구는 물리 법칙을 무시한 구조(예: 기둥 없이 유리만 떠 있는 건물)를 생성하며 공사비 검증을 제공하지 못합니다.
+3. **3D 프린팅 입문·실습을 위한 초경량 모델링 툴의 부족**
+   - Blender, Fusion 360 등은 학습 곡선이 가파르고 실습실 저사양 PC에서 설치·구동 부담이 커 입문자가 첫 `.STL` 출력까지 도달하기 전에 포기하는 경우가 많습니다.
+
+### 주요 사용자
+
+- **비전공자 · 예비 건축주**: 전문 용어나 단축키를 몰라도 사진·손짓·말로 원하는 집의 3D 초안을 5분 만에 만들어 건축가에게 전달하는 사용자
+- **전문 디자이너 · 건축가**: 저사양 노트북과 웹 브라우저만으로 현장에서 대지·골조·자재를 바꾸며 KDS 안전 여부(DCR)와 개략 공사비를 즉석 브리핑하는 실무자
+- **3D 프린팅 입문자 · 학생**: 프로그램 설치 없이 웹에서 면 밀고 당기기(Push/Pull), 회전체 생성 등을 실습하고 버튼 한 번으로 `.STL` 설계도를 출력하는 학습자
+
+### 기대효과 (실제 현장 사용자 검증 전, 공학 검증 기반 기대 사항)
+
+- 사진·손 제스처·음성을 결합한 멀티모달 입력으로 비전공자의 3D 시안 작성 진입장벽과 초기 소통 비용 절감
+- 저사양 웹 환경에서 KDS 구조 안전 스크리닝과 QTO 실물량 기초 예산을 자동화하여 현장 기획 검토 속도 향상
+- 설치 없는 브라우저 3D 편집 및 원클릭 `.STL` 출력으로 교육·메이커 환경의 3D 프린팅 실습 접근성 확대
+
+---
+
+## 3. 기술 스택 및 자체 구현 영역
+
+### 기술 스택
+
+| 구분 | 내용 |
+| :--- | :--- |
+| **언어 · 빌드** | TypeScript 7, Vite 8, oxlint |
+| **UI** | React 19, Tailwind CSS 4 |
+| **3D 렌더링 · 물리** | Three.js, React Three Fiber, `@react-three/drei`, `@react-three/postprocessing`(Bloom), `@react-three/rapier`(Rapier 강체 물리) |
+| **비전 · 음성 · AI** | MediaPipe HandLandmarker (WASM), Web Speech API (`ko-KR`), TypeSafe Jev, OpenRouter Vision AI / Groq LLM & Vision |
+| **개발 · 보안 · 배포** | Git/GitHub (브랜치 단위 병렬 협업), Vite dev 프록시(API 키 은닉), Cloudflare Quick Tunnel(HTTPS 웹캠·마이크 권한 확보) |
+
+### 오픈소스(OSS) 활용 및 자체 구현 영역
+
+| 기술 / OSS | 활용 목적 | AirForge 3D 자체 구현 영역 |
+| :--- | :--- | :--- |
+| **Three.js / React Three Fiber** | 웹 3D 씬 렌더링 | 10종 파라메트릭 건축 매스 생성기, 지붕 박공/경사 밀봉 지오메트리(`gable_wall`, `wedge_wall`), 2D 차집합 층간 테라스·유리 난간 마감, PMREM HDR 라이트룸 환경맵 및 프로시저럴 PBR 텍스처, 입체 알루미늄 창틀, 외관·실내·골조·하중 4종 투시 뷰 |
+| **MediaPipe HandLandmarker (WASM)** | 양손 21개 랜드마크 추출 | Web Worker 추론 오프로딩(실패 시 메인 스레드 자동 폴백), 내장 GPU 경합 회피용 CPU delegate 기본화, `640×360@60fps` 및 `requestVideoFrameCallback` 최적화, One Euro Filter·SLERP·히스테리시스·Swing-Twist 축 잠금, 규칙 기반 기하 자세 분류기 및 12단계 제스처 자가 테스트 |
+| **React 19 (`useSyncExternalStore`)** | UI 상태 관리 | 60fps 손 좌표·제스처 상태를 React 리렌더 없이 3D Canvas 안팎에 공유하는 외부 Store(`handStore.ts`) 및 이벤트 버스(`editBus`, `cameraGesture`) — 공유 파일 연결점 1줄 최소화 |
+| **Three.js (`Raycaster`, `LatheGeometry`)** | 3D 선택 및 지오메트리 생성 | 레이-직선 최근접점 기반 미터 단위 드래그, SketchUp식 순수 함수 편집 연산(Push/Pull·이동·복사·오프셋·스케일·면 테이퍼·구멍 파기, 30단계 Undo), 회전체 생성기(원뿔·컵·파이프·접시), 손 커서 DOM 조작(`elementFromPoint` + 합성 이벤트) |
+| **Web Speech API / TypeSafe Jev / Groq LLM** | 한국어 음성·자연어 명령 | 한국어 수사 파서(`koreanNumber.ts`), 원자 질문 확률 + 코드 Truth Table 결정 로직(`is_command` 0.3/0.7 임계값), 1.5초 타임아웃(`AbortController`)·설계 요청 시 Groq LLM 자동 폴백, 상황별 음성 추천 칩(최대 7개) |
+| **OpenRouter Vision / Groq Vision** | 참조 사진 분석 | 다중 사진(외벽·지붕·실내) 기반 건축·자재 DNA JSON 추출, 창호 비율 65% 이상 시 철골/복합 골조 자동 강제 안전 로직, 오프라인/키 미설정 시 로컬 구역·자재 추정 폴백 |
+| **@react-three/rapier & 자체 역학 모듈** | 물리 시뮬레이션 및 구조 검증 | KDS 41 12 00 / 14 20 20 / 14 31 10 / 41 50 20 기반 4대 주구조(RC·H-Beam 철골·중목·복합조) 하중 전달 경로(슬래브→보→기둥→기초) 실시간 해석, 오일러 좌굴·보 처짐($L/240$)·지반압 검토, QTO 실물량 공사비 및 부위 재질 변경 차액 실시간 동기화 |
+
+### 시스템 구성 및 데이터 흐름
+
+- **비차단 60fps 입력 파이프라인**: 웹캠 프레임은 `createImageBitmap`으로 Web Worker에 전달되어 3D 메인 스레드와 분리 추론됩니다. 추출된 손 상태는 `handStore`(외부 Store)와 `editBus`를 통해 React 리렌더링 없이 3D 씬과 DOM 커서에 직접 전달됩니다.
+- **안전 우선 하이브리드 AI 파이프라인**:
+  - **사진 분석**: 참조 사진 업로드 시 Vision AI가 주구조체·지붕 경사각·처마·창호 비율·외장/단열 자재를 추출하며, 유리 비중이 높으면 철골/복합 골조를 강제해 비현실적 무골조 유리집 생성을 차단합니다.
+  - **음성 제어**: 한국어 수사 파서가 구어체 숫자를 추출하고, TypeSafe Jev가 의도 확률을 반환하면 코드의 Truth Table이 실행 여부를 결정합니다. 1.5초 내 미응답이거나 복합 설계 요청이면 Groq LLM으로 원문을 전달합니다.
+- **로컬 완결형 공학·출력 엔진**: 대지 경계 다각형 변형(최대 12각형 내접 영역 이진 탐색), KDS 구조역학 계산, QTO 물량산출 예산, `.STL` 내보내기는 모두 브라우저 로컬에서 즉시 실행되어 네트워크가 불안정한 현장에서도 핵심 기능이 유지됩니다.
+- **보안 구조**: 외부 API 키 중 서버 전용 키는 `VITE_` 접두사 없이 `vite.config.ts` 프록시 서버 헤더에서만 주입하여 브라우저 번들 노출을 차단했습니다.
+
+---
+
+## 4. 실행 방법
+
+### 1) 저장소 복제
+
+```bash
+git clone [[https://github.com/ASSULT716/AirForge_3D.git](https://github.com/ASSULT716/AirForge_3D.git)]
+cd AirForge_3D
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+### 2) 사전 준비 환경
+
+- **Runtime**: Node.js 20 이상, npm
+- **브라우저**: WebGL2 및 Web Speech API(`ko-KR`)를 지원하는 Chromium 기반 브라우저(Chrome / Edge 권장)
+- **권한**: 손 제스처·음성 기능 테스트 시 웹캠 및 마이크 권한 필요 (외부 접속 테스트 시 Cloudflare Quick Tunnel 등 HTTPS 환경 필요)
+
+### 3) 환경변수 설정
+
+프로젝트 루트에 `.env` 파일을 생성하여 필요한 키를 설정합니다. (실제 API 키 및 민감정보는 공개 저장소에 커밋하지 않습니다.)
+
+```env
+# Vision AI / LLM 기능 연동 시 (미설정 시 로컬 분석 폴백으로 기본 건축·물리·예산 기능 정상 동작)
+VITE_OPENROUTER_API_KEY=your_openrouter_key_here
+VITE_GROQ_API_KEY=your_groq_key_here
+# 서버 프록시 전용 키 (vite.config.ts 프록시에서 헤더 주입, 브라우저 번들 비노출)
+JEV_API_KEY=your_jev_key_here
+```
+
+### 4) 설치 및 실행
+
+```bash
+npm install
+npm run dev
+```
+
+- 로컬 실행 후 `http://localhost:5173` 접속 (외부 기기에서 웹캠·마이크 테스트 시 `cloudflared tunnel --url http://localhost:5173`으로 HTTPS 터널 생성)
+
+### 5) 테스트 및 시연 절차
+
+1. **사진 기반 설계 & 10종 템플릿**: 좌측 패널에 원하는 집 사진(최대 6장)을 업로드하여 Vision AI가 추출한 주구조·외장·창호·지붕 자재 명세를 확인하고 10종 템플릿을 전환합니다.
+2. **손 제스처 & 한국어 음성 제어**: 웹캠을 켜고 12단계 제스처 자가 테스트(`TEST` 모드) 또는 실사용 모드에서 핀치 선택·회전·줌·DOM 버튼 조작을 수행하고, 하단 음성 추천 칩 또는 마이크로 한국어 명령을 실행합니다.
+3. **자유형 대지 경계 드래그**: `대지 경계 드래그 편집`을 켜고 3D 파란 핀(`P1~P12`)을 드래그해 비정형 대지로 변형할 때 건물이 경계 내부에 깨지지 않고 자동 재구성되는지 확인합니다.
+4. **구조 골조 · KDS 하중 · 실시간 예산 연동**: `구조 골조 보기`로 RC/H-Beam/중목 기둥·보·기초를 확인하고, 우측 하중 패널에서 층별 활하중을 높여 3D DCR 히트맵 변화를 검증합니다. 이후 3D 벽체·지붕을 클릭해 재질(금·유리·티타늄·목재 등)을 바꾸고 호버 툴팁과 총 예상 공사비의 즉각적인 차액 반영을 확인합니다.
+5. **3D 프린팅 입문 & `.STL` 추출**: `3D 디자인` 모드에서 Push/Pull·회전체 형상을 편집하거나 설계한 주택에서 `3D 프린터 설계도 (.STL)` 버튼으로 `.STL` 파일을 추출합니다.
+
+### 제한 사항 및 계획 대비 구현 차이 (투명성 공개)
+
+- **해상도 변경**: 초기 계획 문서에는 `720p/60fps`로 설계했으나, MediaPipe HandLandmarker 내부 입력 크기가 약 `224px`인 점을 실측 검증하여 디코드·업로드 부하를 줄인 `640×360@60fps`로 구현했습니다.
+- **공중 스케치 방식 변경**: 초기 계획의 `RDP(Ramer-Douglas-Peucker)` 공중 자유곡선 단순화는 3D 정밀도 한계로 미구현하고, 3D 프린팅 실습에 적합한 **핀치 선택 + SketchUp식 정밀 편집 연산(Push/Pull·테이퍼·구멍 파기·회전체)**으로 전환했습니다.
+- **구조 해석 적용 범위**: 본 서비스의 KDS 구조역학 엔진은 초기 기획·미팅 단계의 정량적 스크리닝 도구이며, 실제 건축 인허가 및 실시설계에는 정밀 유한요소해석(FEM)과 건축구조기술사의 검토가 필요합니다.
+
+---
+
+## 5. 결과물 및 정량적 검증
+
+### 주요 구현 기능
+
+- **Vision AI 사진 분석 & 10종 건축 템플릿**: 사진에서 주구조·외장·창호·지붕·단열 DNA를 추출하고, L자 중정·ㄷ자 아트리움·필로티 캔틸레버·스플릿 박공·모던 한옥 처마 등 10종 구조로 즉시 생성
+- **비파괴적 자유형 대지 경계 편집**: 최대 12각형 폴리곤 꼭짓점 드래그·추가·삭제, 면적 고정 유지 옵션, 오목 다각형 내부 최대 내접 안전 영역 자동 탐색
+- **틈새 0mm 3D 기하 마감**: 박공/경사 지붕 마감벽(`gable_wall`, `wedge_wall`), 2D 직사각형 차집합 기반 층간 단차 테라스 슬래브·데크·유리 난간·하부 소핏·필로티 기둥 자동 생성
+- **KDS 물리 구조 검증 & 4대 뷰 모드**: 외관(HDR PBR + 입체 알루미늄 창틀) / 실내 투시(가구·내벽·2D 방 평면도) / 구조 골조 투시(기초·기둥·거더 보·내진 코어) / KDS 물리 하중(DCR) 히트맵 및 수도·전기 배관(MEP) 투시
+- **QTO 실물량 예산 & 재질 변경 즉시 정산**: 콘크리트·철근/철골·외벽·창호·지붕·설비·조경 공종별 산출 + 개별 부위/층 재질 변경 시 면적×단가 차액 실시간 반영 + 인쇄용 견적서 리포트
+- **저사양 손 제스처·음성 제어 & 3D 프린팅 `.STL` 출력**: 비접촉 3D 조작·UI 제어, 한국어 음성 명령, SketchUp식 3D 편집(30단계 Undo)·회전체 생성·원클릭 `.STL` 내보내기
+
+### 1차 트러블슈팅 및 최적화 기록
+
+| 구분 | 개발·테스트 중 발견된 문제 | 적용한 해결 방법 | 개선 결과 |
+| :--- | :--- | :--- | :--- |
+| **내장 GPU 경합 및 프레임 저하** | 내장 그래픽 PC에서 Three.js와 MediaPipe가 GPU를 나눠 쓰며 추론 지연(99ms) 및 3D 렌더 끊김 발생 | Web Worker 오프로딩 + `CPU delegate` 기본화 + `640×360@60fps` 최적화 + `useSyncExternalStore`로 React 리렌더 제거 | 추론 지연 **99ms → 55ms (-44.4%)**, 픽셀 부하 **-75.0%**, 3D 60fps 유지 |
+| **AI 무골조 유리집 생성** | 유리 비중이 높은 참조 사진 업로드 시 기둥 없이 유리벽만 서 있는 비현실적 구조 생성 | Vision AI DNA 스키마에 주구조체 필드 추가 및 창호비 65%↑ 시 H-Beam 철골/복합조 강제 적용 | 실제 시공 가능한 골조·스팬드럴·커튼월·단열 명세 자동 생성 |
+| **지붕·층간 어긋남 빈틈** | 경사 지붕-벽체 사이 및 1·2층 디자인 어긋남 구간 상부가 뚫려 보임 | 정규화 삼각 박공/경사 마감벽 추가 + 2D 직사각형 차집합(`subtractRect2D`)으로 노출 구간 자동 밀봉 | 빈틈 0mm 밀봉 및 테라스 데크·유리 난간·캔틸레버 하부 소핏·필로티 기둥 자동 마감 |
+| **PBR 금속 흑화·과노출·창틀 소실** | 금(`gold`)이 검게 죽고, 유리가 불투명한 파란색이며, 조명을 올리면 흰 벽이 날아가고 창문이 구멍처럼 보임 | `PMREMGenerator.fromScene` HDR 라이트룸 환경맵, 노출(`0.92`) 및 재질별 `envMapIntensity` 조율, 다크 알루미늄 4면 창틀·멀리언 추가 | 금속 광택·투명 반사 로이 유리·차분한 명암 대비·입체 창틀 확보 |
+| **예산 현실성 및 부위 차액 미반영** | 단순 평당 배수 방식의 고가 견적 산출, 개별 벽·층 재질 변경 시 호버 툴팁과 총액이 연동되지 않음 | 대한건설협회 단가 기반 QTO 엔진 구축 + `syncPhysicsAndBudgetForSolids`로 변경 면적×단가 차액 및 자중 변화 재계산 | 200㎡ 기준 평당 **614~765만 원** 실거래 범위 달성, 호버 툴팁·총액·DCR 즉시 동기화 |
+
+### 2차 정량적 검증
+
+#### ① 저사양 내장 GPU 환경 손 인식 실측 성능 (조원호 `feat/hand-voice` 실측)
+
+- **검증 목적**: 전문 워크스테이션이 없는 저사양 노트북(내장 그래픽)에서도 3D 렌더링과 손 제스처 추적이 동시에 쾌적하게 동작하는지 확인
+
+| 측정 항목 | 최적화 전 (초기 설정/계획) | 최적화 후 (실제 구현) | 개선 효과 |
+| :--- | :--- | :--- | :--- |
+| **손 랜드마크 추론 지연 (내장 GPU PC)** | GPU Delegate: **99 ms** | CPU Delegate (Web Worker): **55 ms** | **-44.4% 단축** (Three.js GPU 경합 해소) |
+| **프레임당 디코드·업로드 픽셀 수** | 720p (`1280×720`): **921.6K px** | `640×360@60fps`: **230.4K px** | **-75.0% 절감** (모델 내부 입력 ~224px 정합) |
+| **제스처 경계 깜빡임 방지** | 단일 임계값 | 히스테리시스(진입 0.82 / 해제 0.74) + 200ms 유지 | 모드 오작동 억제 및 12단계 자가 테스트 검증 |
+| **음성 명령 오작동·응답 지연 대응** | 단일 LLM 의존 | 한국어 수사 파서 + Jev 확률 Truth Table(0.3/0.7) + 1.5s 폴백 | 수치 환각 차단 및 1.5초 초과 시 자동 복구 |
+
+#### ② KDS 건축구조기준 물리 해석 엔진 정량 검증 (`src/utils/structuralPhysics.ts`)
+
+- **검증 조건**: 지상 2층 단독주택, 연면적 `200㎡`(건축면적 `110㎡`, 높이 `7.2m`), 층별 활하중 $L$을 주거 기준(`2.0 kN/㎡`)에서 극한 과적재(`10.0 kN/㎡`)까지 증가시킬 때 1층 기둥 누적 계수축하중($P_u$) 및 응력비($\text{DCR} = P_u / \min(\phi P_n, 0.75 P_{cr})$) 변화 검증
+
+| 층별 활하중 L (kN/㎡) | RC 라멘조 (`350×350`, fck=24MPa)<br>축하중 / 내력 (DCR) | H-Beam 철골조 (`H-200`, SS275)<br>축하중 / 내력 (DCR) | 중목 집성재 (`Glulam 210×210`)<br>축하중 / 내력 (DCR) | 엔진 자동 판정 |
+| :---: | :---: | :---: | :---: | :--- |
+| **2.0** (KDS 주거 기준) | 684.9 / 1686.4 kN (**40.6%**) | 617.3 / 1181.5 kN (**52.2%**) | 295.8 / 497.0 kN (**59.5%**) | 3구조 모두 **안전 (<78%)** |
+| **4.0** (집회·문화 수준) | 860.9 / 1686.4 kN (**51.0%**) | 793.3 / 1181.5 kN (**67.1%**) | 413.2 / 497.0 kN (**83.1%**) | 중목 **주의 구간 진입 (≥78%)** |
+| **6.0** (고하중 적재) | 1036.9 / 1686.4 kN (**61.5%**) | 969.3 / 1181.5 kN (**82.0%**) | 530.5 / 497.0 kN (**106.7%**) | 중목 **KDS 한계 초과(위험 경고)**, 철골 주의 |
+| **8.0** (극한 하중) | 1212.9 / 1686.4 kN (**71.9%**) | 1145.3 / 1181.5 kN (**96.9%**) | 647.8 / 497.0 kN (**130.3%**) | RC 안전 유지, 철골 한계 근접 |
+| **10.0** (과적재 한계) | 1388.9 / 1686.4 kN (**82.4%**) | 1321.3 / 1181.5 kN (**111.8%**) | 765.2 / 497.0 kN (**154.0%**) | 철골·중목 한계 초과, RC 주의 |
+
+- **검증 의의**: 중목 집성재가 고하중에서 가장 먼저 허용 한계를 초과하는 역학적 거동을 정량 재현했으며, 이에 근거해 **4층 이상 건축물에서 중목 단독 적용을 자동 제한**하고 RC·복합조 전환을 안내합니다.
+
+#### ③ QTO 실물량 기반 공사비 및 재질 변경 차액 검증 (`src/utils/structuralPhysics.ts`)
+
+- **검증 조건**: 지상 2층 단독주택, 연면적 `200㎡`(약 `60.5평`), 건축면적 `110㎡`, 정원 `95㎡`, 설계·감리·간접비 16% 포함 (토지구입비·취득세 제외)
+
+| 설계 구성 시나리오 | 순수 자재비 | 시공 노무비 | 설계·간접비(16%) | 총 예상 공사비 | 평당 단가 | 비고 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **RC 라멘조** (스타코·우드, 이중 로이창 56%) | 1.86억 | 1.34억 | 0.51억 | **3.71억 원** | **614만 원/평** | 기준 단독주택 모델 |
+| **H-Beam 철골조** (콘크리트·징크, 커튼월 72%) | 2.18억 | 1.40억 | 0.57억 | **4.15억 원** | **686만 원/평** | 대형 유리 파사드 안전 골조 |
+| **중목 집성재조** (적삼목·스타코, 삼중 로이창 58%) | 2.42억 | 1.57억 | 0.64억 | **4.63억 원** | **765만 원/평** | 고단열 친환경 목조 |
+| **RC + 2층 외벽 샴페인 골드 변경** (95㎡ 적용) | 1.95억 | 1.36억 | 0.53억 | **3.84억 원** | **636만 원/평** | **+0.13억 원** 차액 즉시 정산 |
+
+### 개발 및 고도화 현황
+
+- **멀티모달 손·음성 입력 및 3D 편집 계층 (`feat/hand-voice`, 34 커밋 — 조원호, 우윤상)**:
+  - MediaPipe WASM Web Worker 오프로딩, CPU delegate 실측 최적화(55ms), `640×360@60fps` 경량화
+  - One Euro Filter, 쿼터니언 SLERP, 히스테리시스, Swing-Twist 축 잠금, Raycasting 및 SketchUp식 3D 편집(30단계 Undo), 회전체 형상, 손 커서 DOM 조작, 12단계 제스처 자가 테스트
+  - 한국어 수사 파서, TypeSafe Jev + Truth Table 결정 로직, Groq LLM 1.5초 폴백, 상황별 음성 추천 칩, Vite dev 프록시 API 키 은닉
+- **건축 생성 · KDS 물리 · QTO 예산 · PBR 렌더링 계층 (27 커밋 — 이현수)**:
+  - Vision AI 다중 사진 건축·자재 DNA 분석 및 안전 골조 자동 강제
+  - 최대 12각형 자유형 대지 경계 드래그 편집 및 오목 다각형 내접 영역 고속 탐색
+  - 10종 건축 템플릿, 지붕 박공/경사 마감벽 및 2D 차집합 층간 단차 테라스·유리 난간·필로티 기둥 0mm 밀봉
+  - KDS 4대 주구조 물리 해석(슬래브·보·기둥·기초), QTO 실물량 공사비 및 개별/층 재질 변경 차액 실시간 동기화
+  - HDR 라이트룸 PBR 텍스처(금·철·티타늄·카본·투명 로이유리·입체 알루미늄 창틀), 외관/실내/골조/하중 4종 뷰 및 `.STL` 내보내기
+
+---
+
+## 6. 공개 범위
+
+- **공개 저장소 여부**: AirForge 3D 전체 프론트엔드·물리·예산·손/음성 입력 소스코드를 공개합니다.
+- **비공개 항목**: API 키 및 환경변수(`.env`), 외부 API 인증 토큰
+- **대체 증빙자료**:
+  - 실시간 앱 작동 시연 영상(3분) 및 직접 디자인한 완성 주택 투어 영상(2분)
+  - 앱 내 12단계 제스처 자가 테스트(`TEST` 모드) 및 실시간 KDS/QTO 물리·예산 검증 패널
+
+---
+
+## 7. 라이선스 및 참고문헌
+
+### 오픈소스 라이선스 현황
+
+| 구분 | 이름 | 라이선스 |
+| :--- | :--- | :--- |
+| **언어 · 빌드** | TypeScript, Vite | Apache-2.0 / MIT |
+| **UI** | React, Tailwind CSS | MIT |
+| **3D 렌더링** | Three.js, React Three Fiber, `@react-three/drei`, `@react-three/postprocessing` | MIT |
+| **강체 물리** | `@react-three/rapier` (Rapier) | Apache-2.0 |
+| **손 인식 비전** | MediaPipe HandLandmarker (`@mediapipe/tasks-vision`) | Apache-2.0 |
+
+- Web Speech API(브라우저 내장), OpenRouter, Groq, TypeSafe Jev, Cloudflare Quick Tunnel은 각 제공사의 이용 약관을 따릅니다.
+- 자체 개발 소스코드는 **MIT License**로 공개합니다.
+
+### 참고문헌 및 공학 기준
+
+- Casiez, G., Roussel, N., & Vogel, D. (2012). *1€ Filter: A Simple Speed-based Low-pass Filter for Noisy Input in Interactive Systems*. Proc. CHI 2012.
+- Zhang, F., et al. (2020). *MediaPipe Hands: On-device Real-time Hand Tracking*. arXiv:2006.10214.
+- 국토교통부 국가건설기준센터(KCSC): **KDS 41 12 00** (건축물 설계하중), **KDS 14 20 20** (콘크리트구조 휨 및 압축 설계기준), **KDS 14 31 10** (강구조 부재 설계기준), **KDS 41 50 20** (목구조 일반 설계기준).
